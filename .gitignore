@@ -1,0 +1,21 @@
+# Secrets
+backend/.env
+frontend/.env
+*.key
+
+# Runtime data
+backend/data/ai_settings.json
+backend/uploads/
+backend/outputs/
+logs/
+
+# Local dependencies
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+
+# Python / OS
+**/__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db

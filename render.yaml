@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: document-automation-ai
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: CLOUD_MODE
+        value: "true"
+      - key: APP_DATA_DIR
+        value: /data
+      - key: ADMIN_PASSWORD
+        generateValue: true
+    disk:
+      name: document-automation-data
+      mountPath: /data
+      sizeGB: 10

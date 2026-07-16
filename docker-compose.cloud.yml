@@ -1,0 +1,22 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      CLOUD_MODE: "true"
+      APP_DATA_DIR: /data
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-this-password}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
+      TRANSLATION_PROVIDER: ${TRANSLATION_PROVIDER:-none}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+    volumes:
+      - document_data:/data
+    restart: unless-stopped
+volumes:
+  document_data:

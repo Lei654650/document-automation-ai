@@ -1,0 +1,2 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap');
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,'Noto Sans SC',system-ui,sans-serif;background:#f7f9fc;color:#0b1730}button,input,textarea,select{font:inherit}button{cursor:pointer}a{text-decoration:none;color:inherit}
