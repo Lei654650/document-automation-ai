@@ -23,7 +23,7 @@ node --version
 echo.
 echo [npm]
 where npm
-call npm --version
+call "%~dp0Npm_Run.bat" --version
 echo.
 echo [Important files]
 if exist "backend\requirements.txt" (echo OK backend\requirements.txt) else (echo MISSING backend\requirements.txt)

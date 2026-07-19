@@ -65,7 +65,11 @@ def _analyze_pdf(item: dict, path: Path) -> None:
 
 def _analyze_xlsx(item: dict, path: Path) -> None:
     from openpyxl import load_workbook
-    wb = load_workbook(path, read_only=False, data_only=False)
+    # Large or complex workbooks can take minutes and consume hundreds of MB when
+    # loaded in normal mode. During order creation we only need a safe structural
+    # preview, so files >= 8 MB are opened in read-only streaming mode.
+    streaming = path.stat().st_size >= 8 * 1024 * 1024
+    wb = load_workbook(path, read_only=streaming, data_only=False, keep_links=False)
     sheets, samples = [], []
     total_rows = total_cells = formula_count = merged_count = chart_count = image_count = 0
     max_columns = 0
@@ -73,9 +77,9 @@ def _analyze_xlsx(item: dict, path: Path) -> None:
         rows, cols = ws.max_row or 0, ws.max_column or 0
         total_rows += rows
         max_columns = max(max_columns, cols)
-        merged_count += len(ws.merged_cells.ranges)
-        chart_count += len(getattr(ws, '_charts', []))
-        image_count += len(getattr(ws, '_images', []))
+        merged_count += 0 if streaming else len(ws.merged_cells.ranges)
+        chart_count += 0 if streaming else len(getattr(ws, '_charts', []))
+        image_count += 0 if streaming else len(getattr(ws, '_images', []))
         non_empty = 0
         for row in ws.iter_rows(min_row=1, max_row=min(rows, 80), min_col=1, max_col=min(cols, 40)):
             for cell in row:
@@ -94,6 +98,7 @@ def _analyze_xlsx(item: dict, path: Path) -> None:
         'max_columns': max_columns, 'sample_non_empty_cells': total_cells,
         'formula_count_sample': formula_count, 'merged_range_count': merged_count,
         'chart_count': chart_count, 'image_count': image_count,
+        'analysis_mode': 'streaming_preview' if streaming else 'full_structure',
     })
     item['capabilities'] += ['工作表识别', '公式识别', '合并单元格识别', '图表与图片统计']
     wb.close()
@@ -222,6 +227,9 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
                 item['warnings'].append('旧版 Office 二进制格式仅做基础识别；建议转换为 XLSX、DOCX 或 PPTX 后进行深度分析。')
         except Exception as exc:
             item['warnings'].append(f'深度分析未完成：{type(exc).__name__}: {str(exc)[:120]}')
+        if 'ocr' in services and item['format'] == '图片':
+            item['warnings'] = [w for w in item['warnings'] if '需要 OCR' not in w]
+            item['details']['ocr_status'] = '已启用'
         language = _detect_language(item.get('_text_sample',''))
         item['details']['detected_language'] = language
         item.pop('_text_sample', None)
@@ -250,7 +258,7 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
     category = _category(files, requirements)
     languages = sorted({x['details'].get('detected_language',{}).get('name','未知') for x in files})
     return {
-        'engine_version': '8.1-recognition', 'status': 'completed', 'file_count': len(files), 'total_size_bytes': total,
+        'engine_version': '11.2-document-analyzer', 'status': 'completed', 'file_count': len(files), 'total_size_bytes': total,
         'input_formats': sorted(formats), 'detected_languages': languages, 'document_category': category,
         'complexity': complexity, 'files': files, 'recommended_workflow': workflow,
         'warnings': warnings or ['未发现明显风险。'],

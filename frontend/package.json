@@ -1,7 +1,7 @@
 {
   "name": "document-automation-ai-enterprise",
   "private": true,
-  "version": "10.5.0",
+  "version": "21.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,5 +15,5 @@
     "react-dom": "^19.2.0",
     "lucide-react": "^0.468.0"
   },
-  "description": "Document Automation AI Version 10.5.0"
+  "description": "Document Automation AI Enterprise V21.3.0"
 }

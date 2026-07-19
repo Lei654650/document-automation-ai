@@ -1,0 +1,1 @@
+{"locale":"en-US","name":"English","version":"11.1.0","note":"Interface strings are currently loaded from the centralized App.jsx dictionary; this file supports modular migration and structure verification."}

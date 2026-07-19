@@ -1,6 +1,3 @@
-# Document Automation AI
+# Document Automation AI V21.3.0
 
-- Product version: **10.5.0**
-- Enterprise milestone: **V10.5 Enterprise**
-- Frontend: React + Vite
-- Backend: FastAPI
+Unified processing state machine and truthful delivery status.

@@ -1,230 +1,243 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  ArrowRight, BarChart3, Check, ChevronDown, CircleCheck, CloudUpload, Code2,
-  CreditCard, FileText, Gauge, KeyRound, Languages, LayoutDashboard, LockKeyhole,
-  Menu, ScanText, ShieldCheck, Sparkles, Users, Workflow, X, Zap
+  ArrowLeft, ArrowRight, Check, ChevronDown, CircleCheck, CloudUpload, Code2,
+  Archive, Download, FileText, FolderOpen, Languages, LayoutDashboard, Menu, ScanText, ShieldCheck, Sparkles,
+  Workflow, X
 } from 'lucide-react'
 import './App.css'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
+const VERSION = '21.3.0'
 
-const tools = [
-  [ScanText, 'OCR 智能识别', '识别扫描件、图片与复杂 PDF 中的文字和表格'],
-  [Languages, '文档翻译', '支持中、英、越及多语言翻译，并尽量保留原始版式'],
-  [Workflow, '格式转换', 'PDF、Word、Excel、PPT、CSV 与图片之间灵活转换'],
-  [Sparkles, 'AI 数据整理', '自动清理错列、空行、重复内容并输出结构化结果'],
-  [ShieldCheck, '人工质量复核', '关键项目由人工复核内容、数字、格式和交付质量'],
-  [Code2, '企业 API', '通过 API 将文档处理能力接入企业现有工作流'],
-]
-
-const plans = [
-  ['体验版', '$0', '适合首次体验', ['每月 20 页', '基础 OCR', 'PDF / Word 转换']],
-  ['专业版', '$39', '适合个人与小团队', ['每月 2,000 页', 'AI 翻译与数据整理', '优先处理队列']],
-  ['企业版', '定制', '适合批量与系统集成', ['独立工作区', '团队与 API Key', '专属支持与 SLA']],
-]
-
-function App() {
-  const [page, setPage] = useState('home')
-  const [mobile, setMobile] = useState(false)
-  const [files, setFiles] = useState([])
-  const [service, setService] = useState('ocr')
-  const [form, setForm] = useState({ name: '', email: '', company: '', requirements: '' })
-  const [submitting, setSubmitting] = useState(false)
-  const [result, setResult] = useState(null)
-  const [error, setError] = useState('')
-
-  const totalSize = useMemo(() => files.reduce((sum, f) => sum + f.size, 0), [files])
-
-  function addFiles(list) {
-    const incoming = [...list]
-    setFiles(prev => {
-      const seen = new Set(prev.map(f => `${f.name}-${f.size}`))
-      return [...prev, ...incoming.filter(f => !seen.has(`${f.name}-${f.size}`))]
-    })
+const I18N = {
+  zh: {
+    lang:'中文', languageLabel:'界面语言', platformLabel:'平台', workflowLabel:'流程', pricingLabel:'价格', readyLabel:'准备开始自动化？', processingCenterLabel:'AI 处理中心', liveOrderLabel:'订单实时处理', workspaceLabel:'企业工作台', team:'团队', billing:'账单', api:'API', serviceOcr:'OCR 智能识别', serviceTranslation:'文档翻译', serviceConversion:'格式转换', serviceCleanup:'智能数据整理', serviceAnalysis:'企业数据分析', toolOcrDesc:'识别扫描件、图片和 PDF 中的文字与表格', toolTranslationDesc:'多语言翻译并尽量保留原始版式', toolConversionDesc:'支持 PDF、Word、Excel、PPT、CSV 与图片转换', toolCleanupDesc:'清理、整理并标准化文档数据', toolQuality:'质量检查', toolQualityDesc:'基于规则检查处理结果与交付文件', toolApi:'企业 API', toolApiDesc:'把文档处理能力接入企业业务流程', stepUpload:'上传', stepUnderstand:'理解', stepProcess:'处理', stepValidate:'检查', stepDeliver:'交付', demoReady:'已就绪', demoDone:'完成', demoWaiting:'等待', demoProcessing:'处理中', demoBilingual:'Excel + 双语 PDF', statusProcessing:'处理中', statusCompleted:'已完成', statusFailed:'失败', langZh:'中文', langEn:'英文', langVi:'越南语', langZhEn:'中英双语', langZhVi:'中越双语', langOther:'其他语言', fmtImages:'图片', fmtOriginal:'保持原始版式', platform:'平台能力', workflow:'处理流程', pricing:'价格方案', workspace:'企业工作台', processNow:'立即处理',
+    heroTag:`AI Document Intelligence · Version ${VERSION}`, heroTitle1:'让企业文档，', heroTitle2:'自动完成。',
+    heroDesc:'上传 PDF、Excel、Word、PPT 或图片。AI 自动完成 OCR、翻译、数据提取、格式转换与质量检查。',
+    start:'开始处理文档', viewWorkspace:'查看企业工作台', noInstall:'无需安装', isolated:'文件隔离', triLang:'中英越支持',
+    platformTitle:'一个平台，处理所有企业文档', platformDesc:'从文件上传到最终交付，所有能力统一在同一套工作流中。',
+    workflowTitle:'从上传到交付，全流程可视化', workflowDesc:'不再依赖手工复制、格式调整和重复检查。',
+    pricingTitle:'商业套餐即将开放', pricingDesc:'当前版本用于产品验收。套餐、额度和支付将在商业化版本中接通。',
+    ctaTitle:'把重复文档工作交给 AI', ctaDesc:'从一个文件开始体验，再逐步接入整个企业工作流。', freeStart:'免费开始',
+    backHome:'返回首页', center:'智能文档处理中心', centerDesc:'上传文件并选择目标，系统会自动创建处理订单。',
+    drop:'拖拽文件到这里，或点击选择', support:'支持 PDF、Word、Excel、PPT、CSV、图片和 ZIP，单文件最大 100MB', clear:'清空',
+    settings:'处理设置', selected:'已选择', capabilities:'项处理能力', targetLang:'目标语言（可多选）', outputFormat:'输出格式（可多选）',
+    name:'姓名', email:'邮箱', company:'公司', optional:'可选', requirements:'处理要求', create:'创建处理订单', creating:'正在上传文件，请稍候…', secure:'文件采用独立订单空间保存',
+    fileRequired:'请先选择至少一个文件。', languageRequired:'请选择至少一种目标语言。', formatRequired:'请选择至少一种输出格式。', contactRequired:'请填写姓名和邮箱。', submitFailed:'订单提交失败',
+    noOrder:'暂无订单信息', backCenter:'返回处理中心', processing:'项目正在自动处理', completed:'项目处理完成', failed:'项目处理失败',
+    processingDesc:'页面会自动刷新进度，无需重复提交订单。', completedDesc:'系统已完成处理并生成交付文件，请进行项目验收和下载。',
+    orderNo:'订单编号', currentStatus:'当前状态', fileCount:'文件数量', deliveryCount:'交付文件', items:'个', target:'目标语言', output:'输出格式', liveLog:'实时处理日志',
+    delivery:'项目验收与交付', deliveryDesc:'请逐个下载并检查文件能否正常打开、内容和格式是否符合要求。', noOutput:'处理已完成，但尚未找到交付文件。',
+    newProject:'新建处理项目', saveOrder:'请保存订单号：', dashboardTitle:'企业工作台', dashboardDesc:'仅显示真实订单。团队、API、账单和套餐功能将在正式商业化版本中开放。',
+    recentOrders:'最近真实订单', noRealOrders:'暂无真实订单', comingSoon:'即将开放', refresh:'刷新', footer:'面向企业的 AI 文档识别、翻译、转换与数据自动化平台。', taskFlow:'任务处理流程', stepPending:'等待', stepRunning:'处理中', stepCompleted:'完成', stepFailed:'失败', retryTask:'重新处理', taskDuration:'耗时', taskMessage:'当前信息', analysisLabel:'文档分析器', analysisTitle:'文档分析结果', analysisComplexity:'复杂度', analysisCategory:'文档类别', analysisFormats:'文件格式', analysisLanguages:'识别语言', analysisFiles:'分析文件数', analysisWorkflow:'推荐处理流程', metric_pages:'页数', metric_extractable_text_chars_sample:'可提取文本字符样本', metric_likely_scanned:'疑似扫描件', metric_encrypted:'是否加密', yes:'是', no:'否', aiSettings:'AI 翻译设置', provider:'翻译服务商', apiKey:'API 密钥', model:'模型', adminPassword:'管理员密码（本地版可留空）', saveSettings:'保存设置', testConnection:'测试连接', settingsSaved:'翻译设置已保存', connectionOk:'连接测试成功', settingsFailed:'设置操作失败', downloadFile:'下载文件', downloadAll:'生成交付包并选择保存位置', openFolder:'打开所在文件夹', fileType:'文件类型', generatedAt:'生成时间', folderOpened:'已打开交付文件夹', folderFailed:'无法打开交付文件夹', autoOriginal:'未选择文件类型转换；系统将保持原文件类型，并尽量保留字体、颜色、边框、公式、合并单元格、图片与排版。', processingSummary:'处理摘要', successCount:'处理成功', failedCount:'处理失败', ocrCount:'OCR 文件', totalDuration:'总耗时', averageDuration:'平均耗时', outputMode:'输出方式', originalMode:'保持原始文件类型与版式', metric_paragraph_count:'段落数', metric_non_empty_paragraph_count:'非空段落数', metric_table_count:'表格数', metric_image_count:'图片数', metric_section_count:'节数', metric_heading_count:'标题数', metric_sheet_count:'工作表数', metric_total_rows:'总行数', metric_max_columns:'最大列数', metric_sample_non_empty_cells:'非空单元格样本', metric_formula_count_sample:'公式样本数', metric_merged_range_count:'合并区域数', metric_chart_count:'图表数', metric_slide_count:'幻灯片数', metric_text_shape_count:'文本框数', metric_picture_count:'图片数', metric_group_shape_count:'组合图形数', metric_width:'宽度', metric_height:'高度', metric_mode:'颜色模式', metric_image_format:'图片格式', taskEngine:'任务引擎', smartEngine:'智能处理已启用', smartOcrOn:'已自动启用 OCR；翻译后保持原格式', smartOcrOff:'无需 OCR；翻译后保持原格式', smartZip:'ZIP 将自动解压、分类处理并重新打包'
+  },
+  en: {
+    lang:'English', languageLabel:'Interface language', platformLabel:'Platform', workflowLabel:'Workflow', pricingLabel:'Pricing', readyLabel:'READY TO AUTOMATE?', processingCenterLabel:'AI PROCESSING CENTER', liveOrderLabel:'LIVE ORDER PROCESSING', workspaceLabel:'ENTERPRISE WORKSPACE', team:'Team', billing:'Billing', api:'API', serviceOcr:'OCR recognition', serviceTranslation:'Document translation', serviceConversion:'Format conversion', serviceCleanup:'Smart data organization', serviceAnalysis:'Enterprise data analysis', toolOcrDesc:'Recognize text and tables in scans, images and PDFs', toolTranslationDesc:'Multilingual translation with layout retention', toolConversionDesc:'Convert PDF, Word, Excel, PPT, CSV and images', toolCleanupDesc:'Clean, organize and standardize document data', toolQuality:'Quality control', toolQualityDesc:'Rule-based checks for results and delivery files', toolApi:'Enterprise API', toolApiDesc:'Connect document processing to business workflows', stepUpload:'Upload', stepUnderstand:'Understand', stepProcess:'Process', stepValidate:'Validate', stepDeliver:'Deliver', demoReady:'Ready', demoDone:'Done', demoWaiting:'Waiting', demoProcessing:'Processing', demoBilingual:'Excel + bilingual PDF', statusProcessing:'Processing', statusCompleted:'Completed', statusFailed:'Failed', langZh:'Chinese', langEn:'English', langVi:'Vietnamese', langZhEn:'Chinese-English bilingual', langZhVi:'Chinese-Vietnamese bilingual', langOther:'Other language', fmtImages:'Images', fmtOriginal:'Preserve original layout', platform:'Capabilities', workflow:'Workflow', pricing:'Pricing', workspace:'Workspace', processNow:'Process now',
+    heroTag:`AI Document Intelligence · Version ${VERSION}`, heroTitle1:'Enterprise documents,', heroTitle2:'completed automatically.',
+    heroDesc:'Upload PDF, Excel, Word, PowerPoint or images. AI performs OCR, translation, extraction, conversion and quality checks.',
+    start:'Process documents', viewWorkspace:'View workspace', noInstall:'No installation', isolated:'File isolation', triLang:'Chinese, English & Vietnamese',
+    platformTitle:'One platform for every enterprise document', platformDesc:'From upload to final delivery, every capability stays in one workflow.',
+    workflowTitle:'A visible workflow from upload to delivery', workflowDesc:'Reduce copying, formatting and repetitive checks.',
+    pricingTitle:'Commercial plans coming soon', pricingDesc:'This release is for product acceptance. Plans, quotas and payments will be connected in the commercial release.',
+    ctaTitle:'Give repetitive document work to AI', ctaDesc:'Start with one file, then connect the full enterprise workflow.', freeStart:'Start free',
+    backHome:'Back home', center:'Intelligent Document Processing Center', centerDesc:'Upload files and choose your goals. The system will create a processing order.',
+    drop:'Drop files here, or click to select', support:'PDF, Word, Excel, PPT, CSV, images and ZIP. Maximum 100 MB per file.', clear:'Clear',
+    settings:'Processing settings', selected:'Selected', capabilities:'capabilities', targetLang:'Target languages (multiple)', outputFormat:'Output formats (multiple)',
+    name:'Name', email:'Email', company:'Company', optional:'Optional', requirements:'Requirements', create:'Create processing order', creating:'Uploading and creating order…', secure:'Files are stored in an isolated order workspace',
+    fileRequired:'Select at least one file.', languageRequired:'Select at least one target language.', formatRequired:'Select at least one output format.', contactRequired:'Enter your name and email.', submitFailed:'Order submission failed',
+    noOrder:'No order information', backCenter:'Back to processing center', processing:'Project is processing', completed:'Project completed', failed:'Project failed',
+    processingDesc:'Progress refreshes automatically. Do not submit the order again.', completedDesc:'Processing is complete and delivery files are ready for acceptance and download.',
+    orderNo:'Order number', currentStatus:'Current status', fileCount:'Files', deliveryCount:'Delivery files', items:'', target:'Target languages', output:'Output formats', liveLog:'Live processing log',
+    delivery:'Project acceptance and delivery', deliveryDesc:'Download each file and verify that it opens and meets content and formatting requirements.', noOutput:'Processing completed, but no delivery file was found.',
+    newProject:'New project', saveOrder:'Save this order number: ', dashboardTitle:'Enterprise Workspace', dashboardDesc:'Only real orders are shown. Team, API, billing and plan features will open in the commercial release.',
+    recentOrders:'Recent real orders', noRealOrders:'No real orders yet', comingSoon:'Coming soon', refresh:'Refresh', footer:'Enterprise AI platform for document recognition, translation, conversion and data automation.', taskFlow:'Task workflow', stepPending:'Pending', stepRunning:'Running', stepCompleted:'Completed', stepFailed:'Failed', retryTask:'Retry task', taskDuration:'Duration', taskMessage:'Current message', analysisLabel:'DOCUMENT ANALYZER', analysisTitle:'Document Analysis Result', analysisComplexity:'Complexity', analysisCategory:'Category', analysisFormats:'Formats', analysisLanguages:'Languages', analysisFiles:'Files Analyzed', analysisWorkflow:'Recommended Workflow', metric_pages:'Pages', metric_extractable_text_chars_sample:'Extractable Text Sample', metric_likely_scanned:'Likely Scanned', metric_encrypted:'Encrypted', yes:'Yes', no:'No', aiSettings:'AI Translation Settings', provider:'Provider', apiKey:'API Key', model:'Model', adminPassword:'Admin password (optional locally)', saveSettings:'Save settings', testConnection:'Test connection', settingsSaved:'Translation settings saved', connectionOk:'Connection test succeeded', settingsFailed:'Settings operation failed', downloadFile:'Download', downloadAll:'Save delivery ZIP as…', openFolder:'Open folder', fileType:'File type', generatedAt:'Generated', folderOpened:'Delivery folder opened', folderFailed:'Could not open the delivery folder', smartEngine:'Smart processing enabled', smartOcrOn:'OCR enabled automatically; original format will be retained', smartOcrOff:'OCR not required; original format will be retained', smartZip:'ZIP files will be extracted, classified, processed and repackaged'
+  },
+  vi: {
+    lang:'Tiếng Việt', languageLabel:'Ngôn ngữ giao diện', platformLabel:'NỀN TẢNG', workflowLabel:'QUY TRÌNH', pricingLabel:'BẢNG GIÁ', readyLabel:'SẴN SÀNG TỰ ĐỘNG HÓA?', processingCenterLabel:'TRUNG TÂM XỬ LÝ AI', liveOrderLabel:'XỬ LÝ ĐƠN HÀNG TRỰC TIẾP', workspaceLabel:'KHÔNG GIAN DOANH NGHIỆP', team:'Nhóm', billing:'Thanh toán', api:'API', serviceOcr:'Nhận dạng OCR', serviceTranslation:'Dịch tài liệu', serviceConversion:'Chuyển đổi định dạng', serviceCleanup:'Sắp xếp dữ liệu thông minh', serviceAnalysis:'Phân tích dữ liệu doanh nghiệp', toolOcrDesc:'Nhận dạng chữ và bảng trong bản quét, ảnh và PDF', toolTranslationDesc:'Dịch đa ngôn ngữ và giữ bố cục', toolConversionDesc:'Chuyển đổi PDF, Word, Excel, PPT, CSV và hình ảnh', toolCleanupDesc:'Làm sạch, sắp xếp và chuẩn hóa dữ liệu tài liệu', toolQuality:'Kiểm soát chất lượng', toolQualityDesc:'Kiểm tra kết quả và tệp bàn giao theo quy tắc', toolApi:'API doanh nghiệp', toolApiDesc:'Kết nối xử lý tài liệu với quy trình doanh nghiệp', stepUpload:'Tải lên', stepUnderstand:'Hiểu nội dung', stepProcess:'Xử lý', stepValidate:'Kiểm tra', stepDeliver:'Bàn giao', demoReady:'Sẵn sàng', demoDone:'Hoàn tất', demoWaiting:'Đang chờ', demoProcessing:'Đang xử lý', demoBilingual:'Excel + PDF song ngữ', statusProcessing:'Đang xử lý', statusCompleted:'Hoàn tất', statusFailed:'Thất bại', langZh:'Tiếng Trung', langEn:'Tiếng Anh', langVi:'Tiếng Việt', langZhEn:'Song ngữ Trung-Anh', langZhVi:'Song ngữ Trung-Việt', langOther:'Ngôn ngữ khác', fmtImages:'Hình ảnh', fmtOriginal:'Giữ bố cục gốc', platform:'Năng lực', workflow:'Quy trình', pricing:'Bảng giá', workspace:'Không gian doanh nghiệp', processNow:'Xử lý ngay',
+    heroTag:`AI Document Intelligence · Phiên bản ${VERSION}`, heroTitle1:'Tài liệu doanh nghiệp,', heroTitle2:'được hoàn thành tự động.',
+    heroDesc:'Tải lên PDF, Excel, Word, PowerPoint hoặc hình ảnh. AI thực hiện OCR, dịch, trích xuất, chuyển đổi và kiểm tra chất lượng.',
+    start:'Xử lý tài liệu', viewWorkspace:'Xem không gian làm việc', noInstall:'Không cần cài đặt', isolated:'Tệp được cách ly', triLang:'Hỗ trợ Trung–Anh–Việt',
+    platformTitle:'Một nền tảng cho mọi tài liệu doanh nghiệp', platformDesc:'Từ tải lên đến bàn giao, mọi năng lực nằm trong cùng một quy trình.',
+    workflowTitle:'Hiển thị toàn bộ quy trình từ tải lên đến bàn giao', workflowDesc:'Giảm sao chép thủ công, chỉnh định dạng và kiểm tra lặp lại.',
+    pricingTitle:'Gói thương mại sắp ra mắt', pricingDesc:'Phiên bản này dùng để nghiệm thu sản phẩm. Gói, hạn mức và thanh toán sẽ được kết nối ở bản thương mại.',
+    ctaTitle:'Giao công việc tài liệu lặp lại cho AI', ctaDesc:'Bắt đầu với một tệp rồi kết nối toàn bộ quy trình doanh nghiệp.', freeStart:'Bắt đầu miễn phí',
+    backHome:'Về trang chủ', center:'Trung tâm xử lý tài liệu thông minh', centerDesc:'Tải tệp lên và chọn mục tiêu. Hệ thống sẽ tự tạo đơn xử lý.',
+    drop:'Kéo tệp vào đây hoặc nhấp để chọn', support:'Hỗ trợ PDF, Word, Excel, PPT, CSV, hình ảnh và ZIP; tối đa 100 MB mỗi tệp.', clear:'Xóa hết',
+    settings:'Cài đặt xử lý', selected:'Đã chọn', capabilities:'năng lực', targetLang:'Ngôn ngữ đích (chọn nhiều)', outputFormat:'Định dạng đầu ra (chọn nhiều)',
+    name:'Họ tên', email:'Email', company:'Công ty', optional:'Không bắt buộc', requirements:'Yêu cầu xử lý', create:'Tạo đơn xử lý', creating:'Đang tải lên và tạo đơn…', secure:'Tệp được lưu trong không gian riêng của từng đơn',
+    fileRequired:'Vui lòng chọn ít nhất một tệp.', languageRequired:'Vui lòng chọn ít nhất một ngôn ngữ đích.', formatRequired:'Vui lòng chọn ít nhất một định dạng đầu ra.', contactRequired:'Vui lòng nhập họ tên và email.', submitFailed:'Gửi đơn thất bại',
+    noOrder:'Chưa có thông tin đơn', backCenter:'Quay lại trung tâm xử lý', processing:'Dự án đang được xử lý', completed:'Dự án đã hoàn thành', failed:'Dự án thất bại',
+    processingDesc:'Tiến độ tự động cập nhật, không cần gửi lại đơn.', completedDesc:'Hệ thống đã xử lý xong và tạo tệp bàn giao để nghiệm thu và tải xuống.',
+    orderNo:'Mã đơn', currentStatus:'Trạng thái hiện tại', fileCount:'Số tệp', deliveryCount:'Tệp bàn giao', items:' tệp', target:'Ngôn ngữ đích', output:'Định dạng đầu ra', liveLog:'Nhật ký xử lý trực tiếp',
+    delivery:'Nghiệm thu và bàn giao', deliveryDesc:'Tải từng tệp và kiểm tra khả năng mở, nội dung và định dạng.', noOutput:'Đã xử lý xong nhưng chưa tìm thấy tệp bàn giao.',
+    newProject:'Dự án mới', saveOrder:'Hãy lưu mã đơn: ', dashboardTitle:'Không gian doanh nghiệp', dashboardDesc:'Chỉ hiển thị đơn thực tế. Nhóm, API, hóa đơn và gói dịch vụ sẽ mở ở phiên bản thương mại.',
+    recentOrders:'Đơn thực tế gần đây', noRealOrders:'Chưa có đơn thực tế', comingSoon:'Sắp ra mắt', refresh:'Làm mới', footer:'Nền tảng AI doanh nghiệp cho nhận dạng, dịch, chuyển đổi và tự động hóa dữ liệu tài liệu.', taskFlow:'Quy trình tác vụ', stepPending:'Đang chờ', stepRunning:'Đang xử lý', stepCompleted:'Hoàn tất', stepFailed:'Thất bại', retryTask:'Xử lý lại', taskDuration:'Thời gian', taskMessage:'Thông tin hiện tại', analysisLabel:'BỘ PHÂN TÍCH TÀI LIỆU', analysisTitle:'Kết quả phân tích tài liệu', analysisComplexity:'Độ phức tạp', analysisCategory:'Loại tài liệu', analysisFormats:'Định dạng', analysisLanguages:'Ngôn ngữ', analysisFiles:'Số tệp đã phân tích', analysisWorkflow:'Quy trình đề xuất', metric_pages:'Số trang', metric_extractable_text_chars_sample:'Mẫu ký tự có thể trích xuất', metric_likely_scanned:'Có thể là bản quét', metric_encrypted:'Được mã hóa', yes:'Có', no:'Không', aiSettings:'Cài đặt dịch AI', provider:'Nhà cung cấp', apiKey:'Khóa API', model:'Mô hình', adminPassword:'Mật khẩu quản trị (có thể để trống khi chạy cục bộ)', saveSettings:'Lưu cài đặt', testConnection:'Kiểm tra kết nối', settingsSaved:'Đã lưu cài đặt dịch', connectionOk:'Kết nối thành công', settingsFailed:'Thao tác cài đặt thất bại', downloadFile:'Tải tệp', downloadAll:'Lưu gói bàn giao vào…', openFolder:'Mở thư mục', fileType:'Loại tệp', generatedAt:'Thời gian tạo', folderOpened:'Đã mở thư mục bàn giao', folderFailed:'Không thể mở thư mục bàn giao', smartEngine:'Đã bật xử lý thông minh', smartOcrOn:'OCR được bật tự động; giữ nguyên định dạng', smartOcrOff:'Không cần OCR; giữ nguyên định dạng', smartZip:'ZIP sẽ được giải nén, phân loại, xử lý và đóng gói lại'
   }
+}
 
-  async function submitOrder(e) {
-    e.preventDefault()
-    setError('')
-    setResult(null)
-    if (!files.length) return setError('请先选择至少一个文件。')
-    if (!form.name.trim() || !form.email.trim()) return setError('请填写姓名和邮箱。')
-    const data = new FormData()
-    files.forEach(file => data.append('files', file))
-    data.append('name', form.name)
-    data.append('email', form.email)
-    data.append('company', form.company)
-    data.append('requirements', form.requirements)
-    data.append('services', JSON.stringify([service]))
-    data.append('translation_json', JSON.stringify({ source: 'auto', target: service === 'translation' ? 'zh_cn' : '' }))
+
+const LANGUAGE_OPTIONS = [
+  ['zh','🇨🇳','简体中文','zh-CN'], ['en','🇺🇸','English','en-US'], ['vi','🇻🇳','Tiếng Việt','vi-VN'],
+  ['zh-TW','🇹🇼','繁體中文','zh-TW'], ['ja','🇯🇵','日本語','ja-JP'], ['ko','🇰🇷','한국어','ko-KR'],
+  ['es','🇪🇸','Español','es-ES'], ['fr','🇫🇷','Français','fr-FR'], ['de','🇩🇪','Deutsch','de-DE'], ['pt','🇵🇹','Português','pt-BR']
+]
+
+const EXTRA_LOCALES = {
+  'zh-TW': {lang:'繁體中文',languageLabel:'介面語言',platform:'平台能力',workflow:'處理流程',pricing:'價格方案',workspace:'企業工作台',processNow:'立即處理',heroTag:`AI 文件智慧 · 版本 ${VERSION}`,heroTitle1:'讓企業文件，',heroTitle2:'自動完成。',heroDesc:'上傳 PDF、Excel、Word、PPT 或圖片。AI 自動完成 OCR、翻譯、資料擷取、格式轉換與品質檢查。',start:'開始處理文件',viewWorkspace:'查看企業工作台',platformTitle:'一個平台，處理所有企業文件',workflowTitle:'從上傳到交付，全流程視覺化',pricingTitle:'商業方案即將開放',ctaTitle:'把重複文件工作交給 AI',freeStart:'免費開始',center:'智慧文件處理中心',settings:'處理設定',create:'建立處理訂單',dashboardTitle:'企業工作台',backHome:'返回首頁',newProject:'新增處理專案',comingSoon:'即將開放',refresh:'重新整理',footer:'面向企業的 AI 文件辨識、翻譯、轉換與資料自動化平台。',brandSubtitle:'企業文件智慧平台',seoTitle:'Document Automation AI｜企業 AI 文件處理平台'},
+  ja: {lang:'日本語',languageLabel:'表示言語',platform:'機能',workflow:'ワークフロー',pricing:'料金',workspace:'企業ワークスペース',processNow:'今すぐ処理',heroTag:`AI ドキュメントインテリジェンス · バージョン ${VERSION}`,heroTitle1:'企業文書を、',heroTitle2:'自動で完成。',heroDesc:'PDF、Excel、Word、PowerPoint、画像をアップロード。AI が OCR、翻訳、抽出、変換、品質確認を自動化します。',start:'文書を処理',viewWorkspace:'ワークスペースを見る',platformTitle:'あらゆる企業文書を一つのプラットフォームで',workflowTitle:'アップロードから納品までを可視化',pricingTitle:'商用プランは近日公開',ctaTitle:'反復的な文書作業を AI に',freeStart:'無料で開始',center:'インテリジェント文書処理センター',settings:'処理設定',create:'処理注文を作成',dashboardTitle:'企業ワークスペース',backHome:'ホームに戻る',newProject:'新しいプロジェクト',comingSoon:'近日公開',refresh:'更新',footer:'文書認識、翻訳、変換、データ自動化のための企業向け AI プラットフォーム。',brandSubtitle:'企業文書インテリジェンス',seoTitle:'Document Automation AI | 企業向け文書処理プラットフォーム'},
+  ko: {lang:'한국어',languageLabel:'인터페이스 언어',platform:'기능',workflow:'워크플로',pricing:'요금',workspace:'기업 작업공간',processNow:'지금 처리',heroTag:`AI 문서 인텔리전스 · 버전 ${VERSION}`,heroTitle1:'기업 문서를,',heroTitle2:'자동으로 완성하세요.',heroDesc:'PDF, Excel, Word, PowerPoint 또는 이미지를 업로드하세요. AI가 OCR, 번역, 추출, 변환 및 품질 검사를 자동화합니다.',start:'문서 처리',viewWorkspace:'작업공간 보기',platformTitle:'모든 기업 문서를 위한 하나의 플랫폼',workflowTitle:'업로드부터 납품까지 보이는 워크플로',pricingTitle:'상용 요금제 출시 예정',ctaTitle:'반복 문서 업무를 AI에게',freeStart:'무료 시작',center:'지능형 문서 처리 센터',settings:'처리 설정',create:'처리 주문 만들기',dashboardTitle:'기업 작업공간',backHome:'홈으로',newProject:'새 프로젝트',comingSoon:'출시 예정',refresh:'새로고침',footer:'문서 인식, 번역, 변환 및 데이터 자동화를 위한 기업용 AI 플랫폼.',brandSubtitle:'기업 문서 인텔리전스',seoTitle:'Document Automation AI | 기업 문서 처리 플랫폼'},
+  es: {lang:'Español',languageLabel:'Idioma de la interfaz',platform:'Capacidades',workflow:'Flujo de trabajo',pricing:'Precios',workspace:'Espacio empresarial',processNow:'Procesar ahora',heroTag:`Inteligencia documental con IA · Versión ${VERSION}`,heroTitle1:'Documentos empresariales,',heroTitle2:'completados automáticamente.',heroDesc:'Sube PDF, Excel, Word, PowerPoint o imágenes. La IA automatiza OCR, traducción, extracción, conversión y control de calidad.',start:'Procesar documentos',viewWorkspace:'Ver espacio de trabajo',platformTitle:'Una plataforma para todos los documentos empresariales',workflowTitle:'Flujo visible desde la carga hasta la entrega',pricingTitle:'Planes comerciales próximamente',ctaTitle:'Deja el trabajo repetitivo a la IA',freeStart:'Comenzar gratis',center:'Centro inteligente de procesamiento documental',settings:'Configuración de procesamiento',create:'Crear orden de procesamiento',dashboardTitle:'Espacio empresarial',backHome:'Volver al inicio',newProject:'Nuevo proyecto',comingSoon:'Próximamente',refresh:'Actualizar',footer:'Plataforma de IA empresarial para reconocimiento, traducción, conversión y automatización documental.',brandSubtitle:'Inteligencia documental empresarial',seoTitle:'Document Automation AI | Plataforma empresarial de documentos'},
+  fr: {lang:'Français',languageLabel:"Langue de l’interface",platform:'Fonctionnalités',workflow:'Flux de travail',pricing:'Tarifs',workspace:'Espace entreprise',processNow:'Traiter maintenant',heroTag:`Intelligence documentaire IA · Version ${VERSION}`,heroTitle1:'Les documents d’entreprise,',heroTitle2:'finalisés automatiquement.',heroDesc:'Importez PDF, Excel, Word, PowerPoint ou images. L’IA automatise OCR, traduction, extraction, conversion et contrôle qualité.',start:'Traiter les documents',viewWorkspace:'Voir l’espace de travail',platformTitle:'Une plateforme pour tous les documents d’entreprise',workflowTitle:'Un flux visible du dépôt à la livraison',pricingTitle:'Offres commerciales bientôt disponibles',ctaTitle:'Confiez les tâches répétitives à l’IA',freeStart:'Commencer gratuitement',center:'Centre intelligent de traitement documentaire',settings:'Paramètres de traitement',create:'Créer une commande',dashboardTitle:'Espace entreprise',backHome:'Retour à l’accueil',newProject:'Nouveau projet',comingSoon:'Bientôt disponible',refresh:'Actualiser',footer:'Plateforme IA d’entreprise pour la reconnaissance, la traduction, la conversion et l’automatisation documentaire.',brandSubtitle:'Intelligence documentaire d’entreprise',seoTitle:'Document Automation AI | Plateforme documentaire d’entreprise'},
+  de: {lang:'Deutsch',languageLabel:'Oberflächensprache',platform:'Funktionen',workflow:'Workflow',pricing:'Preise',workspace:'Unternehmensbereich',processNow:'Jetzt verarbeiten',heroTag:`KI-Dokumentenintelligenz · Version ${VERSION}`,heroTitle1:'Unternehmensdokumente,',heroTitle2:'automatisch erledigt.',heroDesc:'PDF, Excel, Word, PowerPoint oder Bilder hochladen. KI automatisiert OCR, Übersetzung, Extraktion, Konvertierung und Qualitätsprüfung.',start:'Dokumente verarbeiten',viewWorkspace:'Arbeitsbereich öffnen',platformTitle:'Eine Plattform für alle Unternehmensdokumente',workflowTitle:'Transparenter Ablauf vom Upload bis zur Lieferung',pricingTitle:'Kommerzielle Tarife folgen',ctaTitle:'Wiederkehrende Dokumentarbeit an KI übergeben',freeStart:'Kostenlos starten',center:'Intelligentes Dokumentverarbeitungszentrum',settings:'Verarbeitungseinstellungen',create:'Verarbeitungsauftrag erstellen',dashboardTitle:'Unternehmensbereich',backHome:'Zur Startseite',newProject:'Neues Projekt',comingSoon:'Demnächst',refresh:'Aktualisieren',footer:'Enterprise-KI für Dokumentenerkennung, Übersetzung, Konvertierung und Datenautomatisierung.',brandSubtitle:'Enterprise Document Intelligence',seoTitle:'Document Automation AI | Enterprise-Dokumentenplattform'},
+  pt: {lang:'Português',languageLabel:'Idioma da interface',platform:'Recursos',workflow:'Fluxo de trabalho',pricing:'Preços',workspace:'Área empresarial',processNow:'Processar agora',heroTag:`Inteligência documental com IA · Versão ${VERSION}`,heroTitle1:'Documentos empresariais,',heroTitle2:'concluídos automaticamente.',heroDesc:'Envie PDF, Excel, Word, PowerPoint ou imagens. A IA automatiza OCR, tradução, extração, conversão e controle de qualidade.',start:'Processar documentos',viewWorkspace:'Ver área de trabalho',platformTitle:'Uma plataforma para todos os documentos empresariais',workflowTitle:'Fluxo visível do envio à entrega',pricingTitle:'Planos comerciais em breve',ctaTitle:'Entregue o trabalho repetitivo à IA',freeStart:'Começar grátis',center:'Centro inteligente de processamento de documentos',settings:'Configurações de processamento',create:'Criar ordem de processamento',dashboardTitle:'Área empresarial',backHome:'Voltar ao início',newProject:'Novo projeto',comingSoon:'Em breve',refresh:'Atualizar',footer:'Plataforma de IA empresarial para reconhecimento, tradução, conversão e automação documental.',brandSubtitle:'Inteligência documental empresarial',seoTitle:'Document Automation AI | Plataforma empresarial de documentos'}
+}
+Object.entries(EXTRA_LOCALES).forEach(([key,value])=>{I18N[key]={...I18N.en,...value}})
+I18N.zh.brandSubtitle='企业文档智能平台'; I18N.en.brandSubtitle='Enterprise Document Intelligence'; I18N.vi.brandSubtitle='Nền tảng AI tài liệu doanh nghiệp'
+I18N.zh.seoTitle='Document Automation AI｜企业AI文档处理平台'; I18N.en.seoTitle='Document Automation AI | Enterprise Document Intelligence'; I18N.vi.seoTitle='Document Automation AI | Nền tảng xử lý tài liệu AI'
+
+const serviceIcons={ocr:ScanText,translation:Languages,conversion:Workflow,data_cleanup:Sparkles,enterprise_analysis:Code2}
+const serviceKeys={ocr:'serviceOcr',translation:'serviceTranslation',conversion:'serviceConversion',data_cleanup:'serviceCleanup',enterprise_analysis:'serviceAnalysis'}
+const languageKeys={zh:'langZh',en:'langEn',vi:'langVi','zh-en':'langZhEn','zh-vi':'langZhVi',other:'langOther'}
+const formatKeys={xlsx:'Excel',docx:'Word',pdf:'PDF',pptx:'PPT',csv:'CSV',images:'fmtImages'}
+const EVENT_ZH={validate:'检查',analyze:'理解',processing:'处理',translation:'文档翻译',ocr:'OCR识别',cleanup:'智能数据整理',conversion:'格式转换',analysis_report:'企业数据分析',quality:'质量检查',export:'交付',completed:'完成',configuration:'配置'}
+function localizeEventText(text='',locale='zh'){if(locale!=='zh')return text;return text.replace(/^Validated (\d+) source file\(s\)$/,'已校验 $1 个源文件').replace('Document structure analysis completed','文档结构分析完成').replace('AI translation provider connected','AI 翻译引擎连接成功').replace(/^Processing file (\d+)\/(\d+): /,'正在处理文件 $1/$2：').replace(/^Completed file (\d+)\/(\d+): /,'已完成文件 $1/$2：').replace(/^Parallel batch started: (\d+) files, (\d+) workers$/,'并行批处理已启动：$1 个文件，$2 个工作线程').replace('Quality checks completed for generated files','交付文件质量检查完成').replace(/^Generated (\d+) delivery file\(s\)$/,'已生成 $1 个交付文件').replace('Automatic processing completed','自动处理完成')}
+function fileTypeClass(name=''){const ext=(name.split('.').pop()||'').toLowerCase();if(ext==='pdf')return'pdf';if(['doc','docx'].includes(ext))return'word';if(['xls','xlsx','csv'].includes(ext))return'excel';if(['ppt','pptx'].includes(ext))return'ppt';if(['png','jpg','jpeg','bmp','tif','tiff'].includes(ext))return'image';return'file'}
+
+function smartPlanForFiles(files=[]){
+  const names=files.map(f=>(f.name||'').toLowerCase())
+  const exts=names.map(name=>(name.split('.').pop()||'').toLowerCase())
+  const hasImage=exts.some(x=>['png','jpg','jpeg','bmp','tif','tiff'].includes(x))
+  const hasExplicitScan=names.some(name=>name.endsWith('.pdf')&&/(scan|scanned|扫描|影印|photo)/i.test(name))
+  const hasPdf=exts.includes('pdf'),hasZip=exts.includes('zip')
+  return {services:(hasImage||hasExplicitScan)?['ocr']:[],ocrAuto:hasImage||hasExplicitScan,ocrSuggested:hasPdf||hasZip,output:'original',hasZip}
+}
+
+function App(){
+  const [locale,setLocale]=useState(()=>{const saved=localStorage.getItem('da_locale');if(saved&&LANGUAGE_OPTIONS.some(([id])=>id===saved))return saved;const browser=navigator.language||'en';if(browser.startsWith('zh-TW')||browser.startsWith('zh-HK'))return 'zh-TW';return LANGUAGE_OPTIONS.find(([id,,,tag])=>browser.startsWith(tag.split('-')[0]))?.[0]||'en'})
+  const [page,setPage]=useState('home'), [mobile,setMobile]=useState(false), [languageOpen,setLanguageOpen]=useState(false)
+  const [files,setFiles]=useState([]), [services,setServices]=useState([])
+  const [translationTargets,setTranslationTargets]=useState([]), [outputFormats,setOutputFormats]=useState([])
+  const [outputOptions,setOutputOptions]=useState({preserve_layout:true,preserve_formulas:true,preserve_images:true,preserve_comments:true,preserve_links:true,auto_width:false,freeze_header:false})
+  const [form,setForm]=useState({name:'',email:'',company:'',requirements:''})
+  const [submitting,setSubmitting]=useState(false), [error,setError]=useState(''), [orderStatus,setOrderStatus]=useState(null)
+  const t=I18N[locale]||I18N.en
+  useEffect(()=>{localStorage.setItem('da_locale',locale);const option=LANGUAGE_OPTIONS.find(([id])=>id===locale);document.documentElement.lang=option?.[3]||'en-US';document.title=t.seoTitle||`Document Automation AI · ${t.lang}`;document.querySelector('meta[name=description]')?.setAttribute('content',t.heroDesc)},[locale,t.lang,t.seoTitle,t.heroDesc])
+  useEffect(()=>{const close=e=>{if(!e.target.closest('.language-menu'))setLanguageOpen(false)};const esc=e=>{if(e.key==='Escape')setLanguageOpen(false)};document.addEventListener('pointerdown',close);document.addEventListener('keydown',esc);return()=>{document.removeEventListener('pointerdown',close);document.removeEventListener('keydown',esc)}},[])
+  const totalSize=useMemo(()=>files.reduce((s,f)=>s+f.size,0),[files])
+  const addFiles=list=>setFiles(prev=>{const seen=new Set(prev.map(f=>`${f.name}-${f.size}`));return [...prev,...[...list].filter(f=>!seen.has(`${f.name}-${f.size}`))]})
+  const smartPlan=useMemo(()=>smartPlanForFiles(files),[files])
+  useEffect(()=>{if(!files.length){setServices([]);setTranslationTargets([]);setOutputFormats([]);setOutputOptions({preserve_layout:true,preserve_formulas:true,preserve_images:true,preserve_comments:true,preserve_links:true,auto_width:false,freeze_header:false});return}if(smartPlan.ocrAuto)setServices(current=>[...new Set(['ocr',...current])])},[files.length,smartPlan.ocrAuto])
+  async function submitOrder(e){
+    e.preventDefault();setError('')
+    if(!files.length)return setError(t.fileRequired)
+    if(services.includes('translation')&&!translationTargets.length)return setError(t.languageRequired)
+    if(services.includes('conversion')&&!outputFormats.length)return setError(t.formatRequired)
+    if(!form.name.trim()||!form.email.trim())return setError(t.contactRequired)
+    const data=new FormData();files.forEach(f=>data.append('files',f));Object.entries(form).forEach(([k,v])=>data.append(k,v))
+    const resolvedFormats=services.includes('conversion')?outputFormats:['original'];data.append('services',JSON.stringify(services.length?services:['standard']));data.append('translation_json',JSON.stringify({source_language:'auto',target_language:translationTargets[0]||'en',targets:translationTargets}));data.append('conversion_json',JSON.stringify({formats:resolvedFormats,options:outputOptions}))
     setSubmitting(true)
-    try {
-      const response = await fetch(`${API_BASE}/api/orders`, { method: 'POST', body: data })
-      const json = await response.json()
-      if (!response.ok) throw new Error(json.detail || '订单提交失败')
-      setResult(json)
-    } catch (err) {
-      setError(err.message || '订单提交失败')
-    } finally {
-      setSubmitting(false)
-    }
+    const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),180000)
+    try{const r=await fetch(`${API_BASE}/api/orders`,{method:'POST',body:data,signal:controller.signal});const raw=await r.text();let j={};try{j=raw?JSON.parse(raw):{}}catch{j={detail:raw}}if(!r.ok)throw new Error(j.detail||t.submitFailed);setOrderStatus({...j,email:form.email,services:(services.length?services:['standard']),translation_targets:translationTargets,output_formats:(services.includes('conversion')?outputFormats:['original'])});setPage('status')}
+    catch(err){setError(err.name==='AbortError'?(document.documentElement.lang.startsWith('zh')?'上传超过3分钟未完成，请确认后端正常运行后重试。':'Upload timed out after 3 minutes. Check the backend and retry.'):(err.message||t.submitFailed))}finally{clearTimeout(timeout);setSubmitting(false)}
   }
-
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <button className="brand" onClick={() => setPage('home')}>
-          <span className="brand-mark">DA</span>
-          <span><b>Document Automation AI</b><small>Enterprise Document Intelligence</small></span>
-        </button>
-        <nav className={mobile ? 'nav open' : 'nav'}>
-          <a href="#platform" onClick={() => setMobile(false)}>平台能力</a>
-          <a href="#workflow" onClick={() => setMobile(false)}>处理流程</a>
-          <a href="#pricing" onClick={() => setMobile(false)}>价格方案</a>
-          <button className="nav-ghost" onClick={() => { setPage('dashboard'); setMobile(false) }}>企业工作台</button>
-          <button className="nav-primary" onClick={() => { setPage('order'); setMobile(false) }}>立即处理 <ArrowRight size={16}/></button>
-        </nav>
-        <button className="menu" onClick={() => setMobile(!mobile)}>{mobile ? <X/> : <Menu/>}</button>
-      </header>
-
-      {page === 'home' && <Home setPage={setPage} />}
-      {page === 'order' && <OrderCenter files={files} addFiles={addFiles} setFiles={setFiles} totalSize={totalSize} service={service} setService={setService} form={form} setForm={setForm} submitOrder={submitOrder} submitting={submitting} result={result} error={error} />}
-      {page === 'dashboard' && <Dashboard />}
-
-      <footer>
-        <div className="brand footer-brand"><span className="brand-mark">DA</span><span><b>Document Automation AI</b><small>Version 10.5.0</small></span></div>
-        <p>面向企业的 AI 文档识别、翻译、转换与数据自动化平台。</p>
-        <span>© 2026 Document Automation AI</span>
-      </footer>
-    </div>
-  )
+  return <div className="app-shell">
+    <header className="topbar"><button className="brand" onClick={()=>setPage('home')}><span className="brand-mark">DA</span><span><b>Document Automation AI</b><small>{t.brandSubtitle}</small></span></button>
+      <nav className={mobile?'nav open':'nav'}><a href="#platform" onClick={()=>{setPage('home');setMobile(false)}}>{t.platform}</a><a href="#workflow" onClick={()=>{setPage('home');setMobile(false)}}>{t.workflow}</a><a href="#pricing" onClick={()=>{setPage('home');setMobile(false)}}>{t.pricing}</a><button className="nav-ghost" onClick={()=>{setPage('dashboard');setMobile(false)}}>{t.workspace}</button><button className="nav-primary" onClick={()=>{setPage('order');setMobile(false)}}>{t.processNow}<ArrowRight size={16}/></button></nav>
+      <div className="language-menu"><button type="button" className="language-switch" aria-label={t.languageLabel} aria-haspopup="menu" aria-expanded={languageOpen} onClick={e=>{e.stopPropagation();setLanguageOpen(v=>!v)}}><Languages size={17}/><span>{t.lang}</span><ChevronDown size={14} className={languageOpen?'rotated':''}/></button>{languageOpen&&<div className="language-popover" role="menu">{LANGUAGE_OPTIONS.map(([id,flag,label])=><button type="button" role="menuitemradio" aria-checked={locale===id} className={locale===id?'active':''} key={id} onClick={()=>{setLocale(id);setLanguageOpen(false)}}><span><i className="language-flag">{flag}</i>{label}</span>{locale===id&&<Check size={16}/>}</button>)}</div>}</div>
+      <button className="menu" onClick={()=>setMobile(!mobile)}>{mobile?<X/>:<Menu/>}</button></header>
+    {page==='home'&&<Home t={t} setPage={setPage}/>} {page==='order'&&<OrderCenter {...{t,files,addFiles,setFiles,totalSize,services,setServices,translationTargets,setTranslationTargets,outputFormats,setOutputFormats,outputOptions,setOutputOptions,form,setForm,submitOrder,submitting,error,setPage,smartPlan}}/>} {page==='status'&&<OrderStatus t={t} data={orderStatus} setPage={setPage}/>} {page==='dashboard'&&<Dashboard t={t} setPage={setPage}/>} 
+    <footer><div className="brand footer-brand"><span className="brand-mark">DA</span><span><b>Document Automation AI</b><small>Version {VERSION}</small></span></div><p>{t.footer}</p><span>© 2026 Document Automation AI</span></footer>
+  </div>
 }
 
-function Home({ setPage }) {
-  const [demoProgress, setDemoProgress] = useState(18)
-  useEffect(() => {
-    const timer = setInterval(() => setDemoProgress(v => v >= 96 ? 18 : v + 2), 700)
-    return () => clearInterval(timer)
-  }, [])
-  const stage = demoProgress < 36 ? 'OCR 识别' : demoProgress < 72 ? 'AI 翻译' : '版式恢复'
-  return <>
-    <main className="hero">
-      <div className="hero-copy">
-        <div className="eyebrow"><Sparkles size={15}/> AI Document Intelligence · Version 10.5.0</div>
-        <h1>让企业文档，<br/><em>自动完成。</em></h1>
-        <p>上传 PDF、Excel、Word、PPT 或图片。AI 自动完成 OCR、翻译、数据提取、格式转换与质量检查。</p>
-        <div className="hero-actions">
-          <button className="primary-xl" onClick={() => setPage('order')}>开始处理文档 <ArrowRight/></button>
-          <button className="secondary-xl" onClick={() => setPage('dashboard')}><LayoutDashboard/> 查看企业工作台</button>
-        </div>
-        <div className="trust-line"><CircleCheck/> 无需安装 <CircleCheck/> 文件隔离 <CircleCheck/> 中英越支持</div>
-      </div>
-      <div className="hero-stage">
-        <div className="glow"/>
-        <div className="demo-window">
-          <div className="window-head"><span/><span/><span/><b>AI Processing Center</b></div>
-          <div className="demo-file"><FileText/><div><b>Supplier_Report_Q3.pdf</b><small>42 pages · 18.6 MB</small></div><span>上传完成</span></div>
-          <div className="pipeline">
-            <div className="active"><CloudUpload/><b>上传</b><small>100%</small></div>
-            <div className="active"><ScanText/><b>OCR</b><small>完成</small></div>
-            <div className="running"><Languages/><b>{stage}</b><small>处理中 {demoProgress}%</small></div>
-            <div><Sparkles/><b>整理</b><small>等待中</small></div>
-          </div>
-          <div className="progress"><i style={{width:`${demoProgress}%`}}/></div>
-          <div className="demo-result"><CircleCheck/><div><b>预计 {Math.max(4, Math.ceil((100-demoProgress)/2))} 秒后完成</b><small>输出：Excel + 双语 PDF</small></div></div>
-        </div>
-        <div className="float-card card-a"><Zap/><span><b>96.8%</b><small>识别准确率</small></span></div>
-        <div className="float-card card-b"><LockKeyhole/><span><b>安全隔离</b><small>独立文件空间</small></span></div>
-      </div>
-    </main>
-
-    <section className="logo-strip"><span>服务于制造、贸易、财务与跨境团队</span><div><b>NOVA</b><b>ORBIT</b><b>APEX</b><b>VERTEX</b><b>QUANTUM</b></div></section>
-
-    <section id="platform" className="section">
-      <div className="section-head"><span>PLATFORM</span><h2>一个平台，处理所有企业文档</h2><p>从文件上传到最终交付，所有能力统一在同一套工作流中。</p></div>
-      <div className="tool-grid">{tools.map(([Icon,title,desc]) => <article key={title}><Icon/><h3>{title}</h3><p>{desc}</p><a>了解更多 <ArrowRight size={15}/></a></article>)}</div>
-    </section>
-
-    <section id="workflow" className="workflow-section">
-      <div className="section-head light"><span>WORKFLOW</span><h2>从上传到交付，全流程可视化</h2><p>不再依赖手工复制、格式调整和重复检查。</p></div>
-      <div className="steps">{[['01','上传文件','支持多文件与批量任务'],['02','AI 理解','识别结构、语言与内容'],['03','自动处理','OCR、翻译、转换与整理'],['04','质量检查','规则校验与人工复核'],['05','安全交付','下载结果或通过 API 获取']].map(x=><article key={x[0]}><span>{x[0]}</span><h3>{x[1]}</h3><p>{x[2]}</p></article>)}</div>
-    </section>
-
-    <section className="metrics"><article><b>150K+</b><span>已处理页面</span></article><article><b>30+</b><span>支持文件格式</span></article><article><b>12</b><span>支持语言</span></article><article><b>99.9%</b><span>平台可用性目标</span></article></section>
-
-    <section id="pricing" className="section pricing-section">
-      <div className="section-head"><span>PRICING</span><h2>从体验到企业部署</h2><p>选择适合当前业务量的方案，后续可随时升级。</p></div>
-      <div className="pricing-grid">{plans.map((p,i)=><article className={i===1?'featured':''} key={p[0]}>{i===1&&<label>最受欢迎</label>}<h3>{p[0]}</h3><b>{p[1]}<small>{i<2?' / 月':''}</small></b><p>{p[2]}</p><button onClick={() => setPage('order')}>{i===2?'联系企业顾问':'开始使用'}</button><ul>{p[3].map(x=><li key={x}><Check/>{x}</li>)}</ul></article>)}</div>
-    </section>
-
-    <section className="cta"><div><span>READY TO AUTOMATE?</span><h2>把重复文档工作交给 AI</h2><p>从一个文件开始体验，再逐步接入整个企业工作流。</p></div><button onClick={() => setPage('order')}>免费开始 <ArrowRight/></button></section>
-  </>
+function Home({t,setPage}){
+ const tools=[[ScanText,t.serviceOcr,t.toolOcrDesc],[Languages,t.serviceTranslation,t.toolTranslationDesc],[Workflow,t.serviceConversion,t.toolConversionDesc],[Sparkles,t.serviceCleanup,t.toolCleanupDesc],[ShieldCheck,t.toolQuality,t.toolQualityDesc],[Code2,t.toolApi,t.toolApiDesc]]
+ return <><main className="hero"><div className="hero-copy"><div className="eyebrow"><Sparkles size={15}/>{t.heroTag}</div><h1>{t.heroTitle1}<br/><em>{t.heroTitle2}</em></h1><p>{t.heroDesc}</p><div className="hero-actions"><button className="primary-xl" onClick={()=>setPage('order')}>{t.start}<ArrowRight/></button><button className="secondary-xl" onClick={()=>setPage('dashboard')}><LayoutDashboard/>{t.viewWorkspace}</button></div><div className="trust-line"><CircleCheck/>{t.noInstall}<CircleCheck/>{t.isolated}<CircleCheck/>{t.triLang}</div></div><div className="hero-stage"><div className="glow"/><div className="demo-window"><div className="window-head"><span/><span/><span/><b>{t.processingCenterLabel}</b></div><div className="demo-file"><FileText/><div><b>Supplier_Report_Q3.pdf</b><small>42 · 18.6 MB</small></div><span>{t.demoReady}</span></div><div className="pipeline"><div className="active"><CloudUpload/><b>{t.stepUpload}</b><small>100%</small></div><div className="active"><ScanText/><b>OCR</b><small>{t.demoDone}</small></div><div className="running"><Languages/><b>AI</b><small>72%</small></div><div><Sparkles/><b>{t.stepDeliver}</b><small>{t.demoWaiting}</small></div></div><div className="progress"><i style={{width:'72%'}}/></div><div className="demo-result"><CircleCheck/><div><b>{t.demoProcessing}</b><small>{t.demoBilingual}</small></div></div></div></div></main>
+ <section id="platform" className="section"><div className="section-head"><span>{t.platformLabel}</span><h2>{t.platformTitle}</h2><p>{t.platformDesc}</p></div><div className="tool-grid">{tools.map(([Icon,title,desc])=><article key={title}><Icon/><h3>{title}</h3><p>{desc}</p></article>)}</div></section>
+ <section id="workflow" className="workflow-section"><div className="section-head light"><span>{t.workflowLabel}</span><h2>{t.workflowTitle}</h2><p>{t.workflowDesc}</p></div><div className="steps">{[['01',t.stepUpload],['02',t.stepUnderstand],['03',t.stepProcess],['04',t.stepValidate],['05',t.stepDeliver]].map(x=><article key={x[0]}><span>{x[0]}</span><h3>{x[1]}</h3></article>)}</div></section>
+ <section id="pricing" className="section pricing-section"><div className="section-head"><span>{t.pricingLabel}</span><h2>{t.pricingTitle}</h2><p>{t.pricingDesc}</p></div><div className="pricing-grid"><article><h3>{t.comingSoon}</h3><b>—</b><p>{t.pricingDesc}</p><button disabled>{t.comingSoon}</button></article></div></section>
+ <section className="cta"><div><span>{t.readyLabel}</span><h2>{t.ctaTitle}</h2><p>{t.ctaDesc}</p></div><button onClick={()=>setPage('order')}>{t.freeStart}<ArrowRight/></button></section></>
 }
 
-function OrderCenter({ files, addFiles, setFiles, totalSize, service, setService, form, setForm, submitOrder, submitting, result, error }) {
-  return <main className="page-wrap">
-    <div className="page-title"><span>AI PROCESSING CENTER</span><h1>智能文档处理中心</h1><p>上传文件并选择目标，系统会自动创建处理订单。</p></div>
-    <form className="order-layout" onSubmit={submitOrder}>
-      <section className="upload-panel">
-        <label className="dropzone" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();addFiles(e.dataTransfer.files)}}>
-          <input type="file" multiple onChange={e=>addFiles(e.target.files)}/><CloudUpload/><h3>拖拽文件到这里，或点击选择</h3><p>支持 PDF、Word、Excel、PPT、CSV、图片和 ZIP，单文件最大 100MB</p>
-        </label>
-        {files.length>0 && <div className="queue"><div className="queue-head"><b>{files.length} 个文件 · {(totalSize/1024/1024).toFixed(2)} MB</b><button type="button" onClick={()=>setFiles([])}>清空</button></div>{files.map((f,i)=><div className="queue-file" key={`${f.name}-${i}`}><FileText/><span><b>{f.name}</b><small>{(f.size/1024/1024).toFixed(2)} MB</small></span><button type="button" onClick={()=>setFiles(files.filter((_,n)=>n!==i))}><X/></button></div>)}</div>}
-      </section>
-      <aside className="order-card">
-        <h2>处理设置</h2>
-        <div className="service-select">{[['ocr','OCR 与表格识别',ScanText],['translation','文档翻译',Languages],['conversion','格式转换',Workflow],['data_cleanup','数据清理',Sparkles]].map(([id,label,Icon])=><button type="button" className={service===id?'active':''} onClick={()=>setService(id)} key={id}><Icon/>{label}</button>)}</div>
-        <label>姓名<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="请输入联系人姓名"/></label>
-        <label>邮箱<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} placeholder="name@company.com"/></label>
-        <label>公司<input value={form.company} onChange={e=>setForm({...form,company:e.target.value})} placeholder="可选"/></label>
-        <label>处理要求<textarea value={form.requirements} onChange={e=>setForm({...form,requirements:e.target.value})} placeholder="例如：翻译成越南语，保留表格版式，并输出 Excel…"/></label>
-        {error && <div className="alert error">{error}</div>}
-        {result && <div className="alert success"><CircleCheck/><div><b>订单创建成功</b><span>{result.order_number}</span></div></div>}
-        <button className="submit-order" disabled={submitting}>{submitting?'正在提交…':'创建处理订单'} <ArrowRight/></button>
-        <small className="secure-note"><ShieldCheck/> 文件采用独立订单空间保存</small>
-      </aside>
-    </form>
-  </main>
+function OrderCenter({t,files,addFiles,setFiles,totalSize,services,setServices,translationTargets,setTranslationTargets,outputFormats,setOutputFormats,outputOptions,setOutputOptions,form,setForm,submitOrder,submitting,error,setPage,smartPlan}){
+ const toggle=(v,l,s)=>s(l.includes(v)?l.filter(x=>x!==v):[...l,v])
+ return <main className="page-wrap"><button className="back-link" onClick={()=>setPage('home')}><ArrowLeft/>{t.backHome}</button><div className="page-title"><span>{t.processingCenterLabel}</span><h1>{t.center}</h1><p>{t.centerDesc}</p></div><form className="order-layout" onSubmit={submitOrder}><section className="upload-panel"><label className="dropzone" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();addFiles(e.dataTransfer.files)}}><input type="file" multiple onChange={e=>addFiles(e.target.files)}/><CloudUpload/><h3>{t.drop}</h3><p>{t.support}</p></label>{files.length>0&&<div className="queue"><div className="queue-head"><b>{files.length} · {(totalSize/1024/1024).toFixed(2)} MB</b><button type="button" onClick={()=>setFiles([])}>{t.clear}</button></div>{files.map((f,i)=><div className="queue-file" key={`${f.name}-${i}`}><FileText/><span><b>{f.name}</b><small>{(f.size/1024/1024).toFixed(2)} MB</small></span><button type="button" onClick={()=>setFiles(files.filter((_,n)=>n!==i))}><X/></button></div>)}</div>}</section><aside className="order-card"><h2>{t.settings}</h2>{files.length>0&&<div className="smart-plan-card"><Sparkles/><div><b>{document.documentElement.lang.startsWith('zh')?'已检测文件，等待选择处理能力':'Files detected — choose processing options'}</b><p>{smartPlan.ocrAuto?(document.documentElement.lang.startsWith('zh')?'检测到图片或明确的扫描 PDF，已自动启用 OCR；普通 PDF 和 ZIP 请按实际内容选择 OCR。':'OCR is enabled for images and clearly named scanned PDFs; choose it manually for ordinary PDFs or ZIP files.'):(document.documentElement.lang.startsWith('zh')?'普通 Office 文档通常无需 OCR，请选择需要的处理能力。':'Office documents usually do not need OCR; choose the required capabilities.')}</p>{smartPlan.hasZip&&<small>{t.smartZip||'ZIP 将自动解压、分类处理并重新打包'}</small>}</div></div>}<div className="service-select">{Object.keys(serviceIcons).map(id=>{const Icon=serviceIcons[id],label=t[serviceKeys[id]],active=services.includes(id);return <button type="button" className={active?'active':''} onClick={()=>setServices(active?services.filter(x=>x!==id):[...services,id])} key={id}><Icon/>{label}{active&&<Check className="service-check"/>}</button>})}</div><p className="service-hint">{t.selected} {services.length} {t.capabilities}</p>{services.includes('translation')&&<div className="option-group"><b>{t.targetLang}</b><div className="option-chips">{Object.keys(languageKeys).map(id=>{const label=t[languageKeys[id]];return <button type="button" key={id} className={translationTargets.includes(id)?'active':''} onClick={()=>toggle(id,translationTargets,setTranslationTargets)}>{translationTargets.includes(id)&&<Check/>}{label}</button>})}</div></div>}{services.includes('data_cleanup')&&<div className="v19-capability-panel"><b>{document.documentElement.lang.startsWith('zh')?'智能数据整理内容':'Smart data organization'}</b><div className="v19-feature-grid"><span>✓ {document.documentElement.lang.startsWith('zh')?'按 A4 纸张自动整理标题、表头和打印区域':'Detect the real data region without moving cells'}</span><span>✓ {document.documentElement.lang.startsWith('zh')?'自动选择横向或纵向，每页约 40～60 行':'Remove phantom trailing cells and reduce bloated files'}</span><span>✓ {document.documentElement.lang.startsWith('zh')?'自动列宽、换行、行高、页边距和重复表头':'Preserve dimensions, frozen panes and print settings'}</span><span>✓ {document.documentElement.lang.startsWith('zh')?'多页打印，不把几百行强行压缩在一页':'Preserve formulas, styles and merged cells'}</span></div></div>}{services.includes('enterprise_analysis')&&<div className="v19-capability-panel"><b>{document.documentElement.lang.startsWith('zh')?'企业数据分析内容':'Enterprise data analysis'}</b><div className="v19-feature-grid"><span>✓ {document.documentElement.lang.startsWith('zh')?'工作表、行列与非空单元格统计':'Sheet, row, column and cell statistics'}</span><span>✓ {document.documentElement.lang.startsWith('zh')?'公式、空值和重复行检测':'Formula, blank and duplicate detection'}</span><span>✓ {document.documentElement.lang.startsWith('zh')?'自动生成独立分析报告 Excel':'Generate a separate Excel analysis report'}</span><span>✓ {document.documentElement.lang.startsWith('zh')?'原始文件不被修改':'Original files remain unchanged'}</span></div></div>}{services.includes('conversion')&&<><div className="option-group output-format-group"><b>{t.outputFormat}</b><div className="option-chips">{Object.keys(formatKeys).map(id=>{const label=formatKeys[id].startsWith('fmt')?t[formatKeys[id]]:formatKeys[id];return <button type="button" key={id} className={outputFormats.includes(id)?'active':''} onClick={()=>toggle(id,outputFormats,setOutputFormats)}>{outputFormats.includes(id)&&<Check/>}{label}</button>})}</div></div><div className="output-options-panel"><div className="output-options-title"><b>{document.documentElement.lang.startsWith('zh')?'输出选项':'Output options'}</b><small>{document.documentElement.lang.startsWith('zh')?'控制输出文件内部的版式与可编辑内容':'Control layout and editable content inside output files'}</small></div>{[['preserve_layout','保持原始版式（推荐）','保留字体、颜色、边框、行高列宽、合并单元格及排版'],['preserve_formulas','保留公式','Excel 公式继续可编辑'],['preserve_images','保留图片','保留图片及原始位置'],['preserve_comments','保留批注','保留 Excel/Word 批注'],['preserve_links','保留超链接','保留可点击链接'],['auto_width','自动调整列宽','仅对 Excel 输出生效'],['freeze_header','自动冻结标题','仅对 Excel 输出生效']].map(([id,label,desc])=><label className="output-option-row" key={id} title={desc}><input type="checkbox" checked={!!outputOptions[id]} onChange={e=>setOutputOptions({...outputOptions,[id]:e.target.checked})}/><span><b>{label}</b><small>{desc}</small></span></label>)}</div></>}{!services.includes('conversion')&&<div className="auto-output-note"><ShieldCheck/><div><b>{files.length===1?`保持 ${(files[0].name.split('.').pop()||'原文件').toUpperCase()} 版式`:(t.originalMode||t.fmtOriginal)}</b><p>{t.autoOriginal}</p></div></div>}<label>{t.name}<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>{t.email}<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></label><label>{t.company}<input value={form.company} onChange={e=>setForm({...form,company:e.target.value})} placeholder={t.optional}/></label><label>{t.requirements}<textarea value={form.requirements} onChange={e=>setForm({...form,requirements:e.target.value})}/></label>{error&&<div className="alert error">{error}</div>}<button className="submit-order" disabled={submitting||!files.length}>{submitting?t.creating:t.create}<ArrowRight/></button><small className="secure-note"><ShieldCheck/>{t.secure}</small></aside></form></main>
 }
 
-function Dashboard() {
-  const [tab, setTab] = useState('overview')
-  const [toast, setToast] = useState('')
-  const metrics=[['本月处理量','1,284 页','+18%',Gauge],['进行中任务','12 个','3 个需关注',Workflow],['团队成员','8 人','2 位管理员',Users],['API 调用','24,890 次','99.96% 成功',Code2]]
-  const navItems=[['overview','概览',LayoutDashboard],['tasks','处理任务',Workflow],['orders','文档与订单',FileText],['team','团队成员',Users],['api','API 密钥',KeyRound],['billing','订阅与账单',CreditCard]]
-  const notify=(text)=>{setToast(text);setTimeout(()=>setToast(''),2200)}
-  return <main className="dashboard-page">
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">DA</span><span><b>Enterprise</b><small>Workspace</small></span></div><nav>{navItems.map(([id,label,Icon])=><button key={id} className={tab===id?'active':''} onClick={()=>setTab(id)}><Icon/>{label}</button>)}</nav><div className="sidebar-foot"><ShieldCheck/> Enterprise Plan</div></aside>
-    <section className="dashboard-main">
-      <div className="dash-head"><div><span>V10.5 ENTERPRISE WORKSPACE</span><h1>{tab==='overview'?'早上好，欢迎回来':navItems.find(x=>x[0]===tab)?.[1]}</h1><p>企业文档自动化的实时运行与管理中心。</p></div><button onClick={()=>notify('新任务面板已准备')}><Sparkles/> 创建新任务 <ArrowRight/></button></div>
-      {tab==='overview' && <>
-        <div className="metric-grid">{metrics.map(([t,v,s,Icon])=><article key={t}><div><span>{t}</span><Icon/></div><b>{v}</b><small>{s}</small></article>)}</div>
-        <div className="dash-grid"><article className="activity-card"><div className="card-head"><div><h2>处理活动</h2><p>最近 7 天处理页面数</p></div><select><option>最近 7 天</option></select></div><div className="chart"><i style={{height:'42%'}}/><i style={{height:'56%'}}/><i style={{height:'49%'}}/><i style={{height:'72%'}}/><i style={{height:'64%'}}/><i style={{height:'88%'}}/><i style={{height:'76%'}}/></div><div className="chart-days"><span>周一</span><span>周二</span><span>周三</span><span>周四</span><span>周五</span><span>周六</span><span>周日</span></div></article>
-        <article className="usage-card"><div className="card-head"><div><h2>套餐用量</h2><p>Enterprise 月度额度</p></div><Gauge/></div><div className="usage-ring"><div><b>64%</b><span>已使用</span></div></div><div className="usage-row"><span>6,420 / 10,000 页</span><b>剩余 3,580</b></div></article></div>
-        <RecentTasks />
-      </>}
-      {tab==='tasks' && <ProcessingCenter notify={notify}/>} 
-      {tab==='orders' && <RecentTasks expanded/>}
-      {tab==='team' && <TeamPanel notify={notify}/>} 
-      {tab==='api' && <ApiPanel notify={notify}/>} 
-      {tab==='billing' && <BillingPanel notify={notify}/>} 
-      {toast && <div className="toast"><CircleCheck/>{toast}</div>}
-    </section>
-  </main>
+function OrderStatus({t,data,setPage}){
+ const [tracking,setTracking]=useState(data),[trackError,setTrackError]=useState(''),[deliveryMessage,setDeliveryMessage]=useState(''),[downloadInfo,setDownloadInfo]=useState(null),[downloading,setDownloading]=useState(false),[analysisOpen,setAnalysisOpen]=useState(false),[deliveryPage,setDeliveryPage]=useState(1),[deliveryQuery,setDeliveryQuery]=useState(''),[deliveryFilter,setDeliveryFilter]=useState('success')
+ const downloadAll=async()=>{
+  setDownloading(true);setDeliveryMessage('');
+  try{
+   const url=`${API_BASE}/api/track/delivery/download-all?order_number=${encodeURIComponent(tracking.order_number)}&email=${encodeURIComponent(tracking.email)}`;
+   const response=await fetch(url);if(!response.ok){const text=await response.text();throw new Error(text||'下载失败')}
+   const blob=await response.blob();
+   const disposition=response.headers.get('content-disposition')||'';
+   const match=disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+   const filename=decodeURIComponent((match?.[1]||`${tracking.order_number}_delivery.zip`).replace(/\"/g,''));
+   if(window.showSaveFilePicker){
+    const handle=await window.showSaveFilePicker({suggestedName:filename,types:[{description:'ZIP archive',accept:{'application/zip':['.zip']}}]});
+    const writable=await handle.createWritable();await writable.write(blob);await writable.close();
+    setDownloadInfo({filename,folder:document.documentElement.lang.startsWith('zh')?'你刚刚选择的保存位置':'The location you selected'});
+   }else{
+    const objectUrl=URL.createObjectURL(blob);const anchor=document.createElement('a');anchor.href=objectUrl;anchor.download=filename;document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),30000);
+    setDownloadInfo({filename,folder:document.documentElement.lang.startsWith('zh')?'请在浏览器设置中开启“下载前询问保存位置”':'Enable “Ask where to save each file” in browser settings'});
+   }
+  }catch(error){if(error?.name!=='AbortError')setDeliveryMessage(error.message||'下载失败')}finally{setDownloading(false)}
+ }
+ const openOutputFolder=async(target='project',fileId=null)=>{
+  setDeliveryMessage('');
+  try{
+   const params=new URLSearchParams({order_number:tracking.order_number,email:tracking.email,target});
+   if(fileId!==null)params.set('file_id',String(fileId));
+   const r=await fetch(`${API_BASE}/api/track/delivery/open-folder?${params.toString()}`,{method:'POST'});
+   const j=await r.json();if(!r.ok)throw new Error(j.detail||t.folderFailed);
+   setDeliveryMessage(document.documentElement.lang.startsWith('zh')?(target==='package'?'已打开交付包所在位置':target==='file'?'已定位交付文件':'已打开项目输出目录'):t.folderOpened)
+  }catch(e){setDeliveryMessage(e.message||t.folderFailed)}
+ }
+ useEffect(()=>{if(!data?.order_number||!data?.email)return;let stop=false;const load=async()=>{try{const r=await fetch(`${API_BASE}/api/track?order_number=${encodeURIComponent(data.order_number)}&email=${encodeURIComponent(data.email)}`);const j=await r.json();if(!r.ok)throw new Error(j.detail||t.submitFailed);if(!stop){setTracking({...data,...j});setTrackError('')}}catch(e){if(!stop)setTrackError(e.message)}};load();const timer=setInterval(load,1500);return()=>{stop=true;clearInterval(timer)}},[data,t.submitFailed])
+ if(!tracking)return <main className="status-page"><div className="status-card"><h1>{t.noOrder}</h1><button onClick={()=>setPage('order')}>{t.backCenter}</button></div></main>
+ const job=tracking.processing_job||{}, result=job.result||{}, analysis=tracking.ai_analysis||data?.ai_analysis||{}, state=job.state||tracking.status||'processing', completed=state==='completed'||state==='quality_review', partial=state==='partial_completed'||Boolean(result.partial_success), failed=state==='failed', terminal=completed||partial||failed, progress=Number(job.progress||(terminal?100:0)), outputs=tracking.output_files||[];const durations=(job.steps||[]).map(x=>Number(x.duration_ms||0)).filter(Boolean),stepTotalMs=durations.reduce((a,b)=>a+b,0),wallMs=job.created_at&&job.updated_at?Math.max(0,new Date(job.updated_at)-new Date(job.created_at)):0,totalMs=Math.max(stepTotalMs,wallMs),fileTotal=tracking.files?.length||0,ocrFiles=(analysis.files||[]).filter(f=>f.format==='图片'||f.details?.likely_scanned).length
+ const failures=result.failures||[],successfulOutputs=outputs.filter(file=>!String(file.original_name||'').toLowerCase().includes('error_report')),successfulCount=Number(result.successful_output_count??successfulOutputs.length),failureCount=Number(result.failure_count??failures.length),filteredOutputs=successfulOutputs.filter(file=>(file.original_name||'').toLowerCase().includes(deliveryQuery.toLowerCase())),pageSize=100,totalDeliveryPages=Math.max(1,Math.ceil(filteredOutputs.length/pageSize)),visibleOutputs=filteredOutputs.slice((deliveryPage-1)*pageSize,deliveryPage*pageSize),sourceNames=(tracking.files||[]).map(file=>file.original_name||file.name).filter(Boolean)
+ return <main className="status-page"><section className="status-card wide-status"><div className={`status-icon ${failed?'failed':partial?'partial':''}`}>{failed?<X/>:terminal?<CircleCheck/>:<Workflow/>}</div><span className="status-kicker">{t.liveOrderLabel}</span><h1>{failed?t.failed:partial?(document.documentElement.lang.startsWith('zh')?'项目部分完成':'Project partially completed'):completed?t.completed:t.processing}</h1><p>{failed?(document.documentElement.lang.startsWith('zh')?'没有生成可交付文件，请查看失败原因后重新处理。':'No deliverable files were generated. Review the failures and retry.'):partial?(document.documentElement.lang.startsWith('zh')?`成功 ${successfulCount} 个，失败 ${failureCount} 个；仅成功文件可以交付。`:`${successfulCount} succeeded and ${failureCount} failed; only successful files are deliverable.`):completed?t.completedDesc:t.processingDesc}</p><div className="order-number"><small>{t.orderNo}</small><b>{tracking.order_number}</b></div><div className="live-progress"><div><b>{document.documentElement.lang.startsWith('zh')?(EVENT_ZH[job.current_step]||job.current_step||t.statusProcessing):(job.current_step||t.statusProcessing)}</b><span>{progress}%</span></div><i><em style={{width:`${progress}%`}}/></i></div>{job.steps?.length>0&&<section className="task-engine"><div className="task-engine-head"><div><span>{t.taskEngine||'TASK ENGINE'}</span><h2>{t.taskFlow}</h2></div><b>{progress}%</b></div><div className="task-steps">{job.steps.map((step,index)=>{const state=step.status||'pending';const label={validate:t.stepValidate,analyze:t.stepUnderstand,ocr:t.serviceOcr,translation:t.serviceTranslation,cleanup:t.serviceCleanup,conversion:(document.documentElement.lang.startsWith('zh')?'格式转换':'Format conversion'),layout:t.stepProcess,quality:t.toolQuality,export:t.stepDeliver,review:t.stepValidate}[step.step_key]||step.label;const stateText=state==='completed'?t.stepCompleted:state==='running'?t.stepRunning:state==='failed'?t.stepFailed:t.stepPending;return <article className={`task-step ${state}`} key={step.step_key}><i>{state==='completed'?<Check/>:state==='failed'?<X/>:index+1}</i><div><b>{label}</b><small>{stateText}{step.duration_ms?` · ${step.duration_ms<100?'<0.1':(step.duration_ms/1000).toFixed(1)}s`:''}</small>{step.message&&<p>{localizeEventText(step.message,document.documentElement.lang.startsWith('zh')?'zh':'en')}</p>}</div></article>})}</div></section>}<div className="status-grid summary-grid"><div><small>{t.currentStatus}</small><b>{(job.state||tracking.status)==='completed'?t.statusCompleted:(job.state||tracking.status)==='failed'?t.statusFailed:t.statusProcessing}</b></div><div><small>{t.successCount||t.fileCount}</small><b>{successfulCount}{t.items}</b></div><div><small>{t.failedCount||t.statusFailed}</small><b>{failureCount}{t.items}</b></div><div><small>{t.deliveryCount}</small><b>{successfulOutputs.length}{t.items}</b></div><div><small>{t.ocrCount||t.serviceOcr}</small><b>{ocrFiles}{t.items}</b></div><div><small>{t.totalDuration||t.taskDuration}</small><b>{totalMs?(totalMs/1000).toFixed(1)+'s':'—'}</b></div></div><section className="source-summary"><div><b>{document.documentElement.lang.startsWith('zh')?'本次上传文件':'Uploaded files'}</b><span>{fileTotal||analysis.file_count||0}</span></div><p>{sourceNames.slice(0,6).join('、')}{sourceNames.length>6?(document.documentElement.lang.startsWith('zh')?` 等 ${sourceNames.length} 个文件`:` and ${sourceNames.length-6} more`):''}</p></section>{analysis?.files?.length>0&&<section className="analysis-panel"><div className="analysis-head"><div><span>{t.analysisLabel||'DOCUMENT ANALYZER'}</span><h2>{t.analysisTitle||'Document analysis result'}</h2><p>{analysis.summary}</p></div><b className={`complexity complexity-${analysis.complexity}`}>{t.analysisComplexity||'Complexity'}: {analysis.complexity}</b></div><div className="analysis-summary-grid"><div><small>{t.analysisCategory||'Category'}</small><b>{analysis.document_category||'—'}</b></div><div><small>{t.analysisFormats||'Formats'}</small><b>{(analysis.input_formats||[]).join(', ')||'—'}</b></div><div><small>{t.analysisLanguages||'Languages'}</small><b>{(analysis.detected_languages||[]).join(', ')||'—'}</b></div><div><small>{t.analysisFiles||'Files analyzed'}</small><b>{analysis.file_count||0}</b></div></div><div className="analysis-compact-head"><b>{document.documentElement.lang.startsWith('zh')?`本次分析 ${analysis.files.length} 个文件`:`${analysis.files.length} files analyzed`}</b><button type="button" onClick={()=>setAnalysisOpen(v=>!v)}>{analysisOpen?(document.documentElement.lang.startsWith('zh')?'收起文件明细':'Collapse'):(document.documentElement.lang.startsWith('zh')?'展开文件明细':'Show details')}</button></div>{analysisOpen&&<div className="analysis-files compact">{analysis.files.slice(0,50).map((file,index)=><article key={`${file.name}-${index}`}><div className="analysis-file-title"><FileText/><span><b>{file.name}</b><small>{file.format} · {(file.size_bytes/1024/1024).toFixed(2)} MB</small></span></div><div className="analysis-metrics">{Object.entries(file.details||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).slice(0,6).map(([k,v])=><span key={k}><small>{t[`metric_${k}`]||k.replaceAll('_',' ')}</small><b>{typeof v==='boolean'?(v?t.yes:t.no):String(v)}</b></span>)}</div>{file.warnings?.length>0&&<div className="analysis-warning">{file.warnings.map((w,i)=><p key={i}>⚠ {w}</p>)}</div>}</article>)}</div>}{!terminal&&<div className="recommended-workflow"><b>{t.analysisWorkflow||'Recommended workflow'}</b><div>{(analysis.recommended_workflow||[]).map((step,i)=><span key={i}><i>{i+1}</i>{step}</span>)}</div></div>}</section>}{partial&&<div className="alert warning">{document.documentElement.lang.startsWith('zh')?`部分完成：成功交付 ${result.successful_output_count||Math.max(0,outputs.length-1)} 个文件，${result.failure_count||0} 项失败。请在失败项目中查看具体原因。`:`Partially completed: ${result.successful_output_count||Math.max(0,outputs.length-1)} files delivered, ${result.failure_count||0} failures. Review the failed items for details.`}</div>}{trackError&&<div className="alert error">{trackError}</div>}{job.events?.length>0&&<div className="event-log"><b>{t.liveLog}</b>{job.events.slice(-6).reverse().map((e,i)=><div key={i}><span>{(document.documentElement.lang.startsWith('zh')?EVENT_ZH[e.step]:null)||e.step}</span><p>{localizeEventText(e.message,document.documentElement.lang.startsWith('zh')?'zh':'en')}</p></div>)}</div>}{terminal&&<div className="delivery-panel"><div className="delivery-heading"><div><h2>{t.delivery}</h2><p>{t.deliveryDesc}</p></div>{successfulOutputs.length>0&&<button type="button" className="delivery-main-button" onClick={downloadAll} disabled={downloading}><Archive/>{downloading?(document.documentElement.lang.startsWith('zh')?'正在打包下载…':'Preparing download…'):t.downloadAll}</button>}</div>{(successfulOutputs.length||failures.length)?<><div className="delivery-toolbar"><div className="delivery-tabs"><button type="button" className={deliveryFilter==='success'?'active':''} onClick={()=>setDeliveryFilter('success')}>{document.documentElement.lang.startsWith('zh')?`成功文件（${successfulOutputs.length}）`:`Successful (${successfulOutputs.length})`}</button><button type="button" className={deliveryFilter==='failed'?'active':''} onClick={()=>setDeliveryFilter('failed')}>{document.documentElement.lang.startsWith('zh')?`失败项目（${failures.length}）`:`Failed (${failures.length})`}</button></div>{deliveryFilter==='success'&&<input value={deliveryQuery} onChange={e=>{setDeliveryQuery(e.target.value);setDeliveryPage(1)}} placeholder={document.documentElement.lang.startsWith('zh')?'搜索文件名…':'Search files…'}/>}</div>{deliveryFilter==='success'?<><div className="delivery-files compact">{visibleOutputs.map(file=>{const downloadUrl=`${API_BASE}/api/track/output-files/${file.id}/download?order_number=${encodeURIComponent(tracking.order_number)}&email=${encodeURIComponent(tracking.email)}`;const ext=(file.original_name.split('.').pop()||'FILE').toUpperCase();const created=file.created_at?new Date(file.created_at).toLocaleString():'';return <article key={file.id} className="delivery-file-card"><div className={`delivery-file-icon ${fileTypeClass(file.original_name)}`}><FileText/></div><div className="delivery-file-info"><b>{file.original_name}</b><div><span>{t.fileType}: {ext}</span><span>{(file.size_bytes/1024).toFixed(1)} KB</span>{created&&<span>{t.generatedAt}: {created}</span>}</div></div><div className="delivery-file-actions"><a href={downloadUrl}><Download/>{t.downloadFile}</a><button type="button" onClick={()=>openOutputFolder('file',file.id)}><FolderOpen/>{t.openFolder}</button></div></article>})}</div>{totalDeliveryPages>1&&<div className="pagination"><button type="button" disabled={deliveryPage===1} onClick={()=>setDeliveryPage(p=>Math.max(1,p-1))}>‹</button><span>{deliveryPage} / {totalDeliveryPages}</span><button type="button" disabled={deliveryPage===totalDeliveryPages} onClick={()=>setDeliveryPage(p=>Math.min(totalDeliveryPages,p+1))}>›</button></div>}</>:<div className="failure-list">{failures.length?failures.map((item,index)=><article key={index}><X/><div><b>{item.source_name||'-'}</b><small>{item.format||'processing'}</small><p>{item.error||'Unknown error'}</p></div></article>):<p>{document.documentElement.lang.startsWith('zh')?'没有失败项目。':'No failed items.'}</p>}</div>}</>:<div className="alert error">{t.noOutput}</div>}{successfulOutputs.length===1&&<div className="delivery-footer-actions"><button type="button" className="delivery-main-button" onClick={downloadAll} disabled={downloading}><Archive/>{downloading?(document.documentElement.lang.startsWith('zh')?'正在打包下载…':'Preparing download…'):t.downloadAll}</button></div>}{deliveryMessage&&<p className="delivery-message">{deliveryMessage}</p>}</div>}{downloadInfo&&<div className="download-modal-backdrop"><div className="download-modal"><CircleCheck/><h2>{document.documentElement.lang.startsWith('zh')?'交付包保存完成':'Delivery package saved'}</h2><p>{document.documentElement.lang.startsWith('zh')?'交付包已经保存。':'The delivery package has been saved.'}</p><div><small>{document.documentElement.lang.startsWith('zh')?'文件名':'File name'}</small><b>{downloadInfo.filename}</b></div><div><small>{document.documentElement.lang.startsWith('zh')?'查找位置':'Find it in'}</small><b>{downloadInfo.folder}</b></div><div className="download-modal-actions"><button type="button" onClick={downloadAll}><Download/>{document.documentElement.lang.startsWith('zh')?'重新选择位置保存':'Choose another location'}</button><button type="button" onClick={()=>setDownloadInfo(null)}>{document.documentElement.lang.startsWith('zh')?'关闭':'Close'}</button></div><small className="download-browser-note">{document.documentElement.lang.startsWith('zh')?'交付 ZIP 只保存在你刚刚通过 Windows“另存为”选择的位置，软件不会再在 C 盘 outputs 目录生成副本。':'The ZIP is saved only to the location selected in the system Save As dialog; no project-output copy is created.'}</small></div></div>}<div className="status-actions"><button className="secondary-xl" onClick={()=>setPage('home')}><ArrowLeft/>{t.backHome}</button><button className="primary-xl" onClick={()=>setPage('order')}>{t.newProject}</button><button className="secondary-xl" onClick={()=>setPage('dashboard')}>{t.workspace}</button></div><small className="track-note">{t.saveOrder}{tracking.order_number}</small></section></main>
 }
 
-function RecentTasks({expanded=false}) {
-  const rows=[['Supplier Contract.pdf','翻译 + OCR','86%','处理中'],['Finance_Report_Q2.xlsx','数据清理','100%','已完成'],['Machine_Manual.docx','多语言翻译','42%','处理中'],['Invoice_Batch.zip','OCR 提取','100%','已完成'],['Quality_Log.csv','数据校验','68%','处理中']]
-  return <article className="recent-card"><div className="card-head"><div><h2>{expanded?'全部文档与订单':'最近任务'}</h2><p>最新文档处理状态</p></div><button>导出记录</button></div><div className="task-row header"><span>任务</span><span>类型</span><span>进度</span><span>状态</span></div>{rows.map((x,i)=><div className="task-row" key={x[0]}><span><FileText/><b>{x[0]}</b></span><span>{x[1]}</span><span><i><em style={{width:x[2]}}/></i>{x[2]}</span><span className={x[3]==='已完成'?'done':'processing'}>{x[3]}</span></div>)}</article>
+function TranslationSettings({t}){
+ const fallbackProviders=[
+  {id:'deepseek',label:'DeepSeek',models:['deepseek-chat','deepseek-reasoner'],model:'deepseek-chat',base_url:'https://api.deepseek.com/v1'},
+  {id:'openai',label:'OpenAI',models:['gpt-4.1-mini','gpt-4.1','gpt-4o-mini'],model:'gpt-4.1-mini',base_url:'https://api.openai.com/v1'},
+  {id:'gemini',label:'Google Gemini',models:['gemini-2.5-flash','gemini-2.5-pro'],model:'gemini-2.5-flash',base_url:'https://generativelanguage.googleapis.com/v1beta'},
+  {id:'claude',label:'Anthropic Claude',models:['claude-3-5-haiku-latest','claude-sonnet-4-20250514'],model:'claude-3-5-haiku-latest',base_url:'https://api.anthropic.com/v1'},
+  {id:'openrouter',label:'OpenRouter',models:['openai/gpt-4.1-mini','deepseek/deepseek-chat-v3-0324','google/gemini-2.5-flash','anthropic/claude-3.5-haiku'],model:'openai/gpt-4.1-mini',base_url:'https://openrouter.ai/api/v1'}
+ ]
+ const [form,setForm]=useState({admin:'',provider:'deepseek',api_key:'',model:'deepseek-chat',base_url:'https://api.deepseek.com/v1'}),[providers,setProviders]=useState(fallbackProviders),[profiles,setProfiles]=useState({}),[message,setMessage]=useState(''),[busy,setBusy]=useState(false)
+ const call=async(path,method='GET',body)=>{const r=await fetch(`${API_BASE}${path}`,{method,headers:{'Content-Type':'application/json','x-admin-key':form.admin},body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok)throw new Error(j.detail||t.settingsFailed);return j}
+ useEffect(()=>{call('/api/admin/translation-settings').then(j=>{const list=j.providers?.length?j.providers:fallbackProviders;setProviders(list);setProfiles(j.profiles||{});const p=j.provider&&j.provider!=='none'?j.provider:'deepseek',meta=list.find(x=>x.id===p)||list[0],profile=j.profiles?.[p]||{};setForm(v=>({...v,provider:p,api_key:'',model:profile.model||j.model||meta.model,base_url:profile.base_url||j.base_url||meta.base_url}))}).catch(()=>{})},[])
+ const chooseProvider=p=>{const meta=providers.find(x=>x.id===p)||fallbackProviders.find(x=>x.id===p),profile=profiles[p]||{};setMessage('');setForm(v=>({...v,provider:p,api_key:'',model:profile.model||meta?.model||'',base_url:profile.base_url||meta?.base_url||''}))}
+ const save=async()=>{setBusy(true);setMessage('');try{const j=await call('/api/admin/translation-settings','PUT',{provider:form.provider,api_key:form.api_key,model:form.model,base_url:form.base_url});setProfiles(j.settings?.profiles||profiles);setForm(v=>({...v,api_key:''}));setMessage(t.settingsSaved);return true}catch(e){setMessage(e.message);return false}finally{setBusy(false)}}
+ const test=async()=>{setBusy(true);setMessage('');try{await call('/api/admin/translation-settings','PUT',{provider:form.provider,api_key:form.api_key,model:form.model,base_url:form.base_url});await call('/api/admin/translation-settings/test','POST');setForm(v=>({...v,api_key:''}));setMessage(t.connectionOk)}catch(e){setMessage(e.message)}finally{setBusy(false)}}
+ const current=providers.find(x=>x.id===form.provider)||fallbackProviders[0],configured=profiles?.[form.provider]?.configured
+ return <article className="translation-settings"><h2>{t.aiSettings}</h2><div className="provider-tabs">{providers.map(p=><button type="button" key={p.id} className={form.provider===p.id?'active':''} onClick={()=>chooseProvider(p.id)}><span>{p.label}</span><small>{profiles?.[p.id]?.configured?'✓':'○'}</small></button>)}</div><div className="settings-grid"><label>{t.adminPassword}<input type="password" value={form.admin} onChange={e=>setForm({...form,admin:e.target.value})}/></label><label>{t.provider}<select value={form.provider} onChange={e=>chooseProvider(e.target.value)}>{providers.map(p=><option value={p.id} key={p.id}>{p.label}</option>)}</select></label><label>{t.apiKey}<input type="password" value={form.api_key} onChange={e=>setForm({...form,api_key:e.target.value})} placeholder={configured?'•••••••• (已保存，留空保持不变)':''}/></label><label>{t.model}<select value={form.model} onChange={e=>setForm({...form,model:e.target.value})}>{(current?.models||[current?.model]).map(m=><option value={m} key={m}>{m}</option>)}</select></label></div><div className="settings-actions"><button onClick={save} disabled={busy}>{t.saveSettings}</button><button onClick={test} disabled={busy}>{t.testConnection}</button></div>{message&&<p className="settings-message">{message}</p>}</article>
 }
 
-function ProcessingCenter({notify}) {
-  const jobs=[['Supplier Contract.pdf','AI 翻译',86,'预计 18 秒'],['Machine_Manual.docx','OCR + 版式恢复',42,'预计 1 分 06 秒'],['Invoice_Batch.zip','表格提取',100,'已完成']]
-  return <div className="panel-stack"><article className="recent-card"><div className="card-head"><div><h2>AI Processing Center</h2><p>多任务队列、实时状态和错误重试</p></div><button onClick={()=>notify('已刷新任务状态')}>刷新状态</button></div>{jobs.map(([name,type,p,time])=><div className="job-card" key={name}><div><FileText/><span><b>{name}</b><small>{type}</small></span></div><div className="job-progress"><i><em style={{width:`${p}%`}}/></i><span>{p}%</span></div><small>{time}</small><button onClick={()=>notify(p===100?'文件已准备下载':'任务已暂停')}>{p===100?'下载':'暂停'}</button></div>)}</article></div>
+function Dashboard({t,setPage}){
+ const [orders,setOrders]=useState([]),[loading,setLoading]=useState(false),[expanded,setExpanded]=useState(false),[query,setQuery]=useState(''),[page,setOrderPage]=useState(1)
+ const isZh=document.documentElement.lang.startsWith('zh')
+ const load=()=>{setLoading(true);fetch(`${API_BASE}/api/dashboard/recent-orders`).then(r=>r.ok?r.json():Promise.reject()).then(j=>setOrders(j.orders||[])).catch(()=>setOrders([])).finally(()=>setLoading(false))}
+ useEffect(load,[])
+ const serviceLabel=id=>({ocr:isZh?'OCR':'OCR',translation:isZh?'翻译':'Translation',conversion:isZh?'转换':'Conversion',data_cleanup:isZh?'智能整理':'Smart organize',enterprise_analysis:isZh?'数据分析':'Data analysis',cleanup:isZh?'智能整理':'Smart organize'}[id]||id)
+ const statusInfo=o=>{
+  const raw=String(o.status||'').toLowerCase(),label=String(o.status_label||'').toLowerCase()
+  if(raw.includes('fail')||label.includes('失败')) return {text:isZh?'失败':'Failed',kind:'failed'}
+  if(raw.includes('complete')||label.includes('完成')) return {text:isZh?'已完成':'Completed',kind:'done'}
+  if(raw.includes('confirm')||label.includes('confirm')) return {text:isZh?'已确认':'Confirmed',kind:'confirmed'}
+  return {text:isZh?'处理中':'Processing',kind:'processing'}
+ }
+ const filtered=orders.filter(o=>`${o.file_name||''} ${o.order_number||''}`.toLowerCase().includes(query.trim().toLowerCase()))
+ const preview=orders.slice(0,5),pageSize=10,totalPages=Math.max(1,Math.ceil(filtered.length/pageSize)),safePage=Math.min(page,totalPages)
+ const visible=expanded?filtered.slice((safePage-1)*pageSize,safePage*pageSize):preview
+ const toggleExpanded=()=>{setExpanded(v=>!v);setQuery('');setOrderPage(1)}
+ return <main className="dashboard-page simple-dashboard"><section className="dashboard-main"><div className="dash-head"><div><span>V{VERSION} {t.workspaceLabel}</span><h1>{t.dashboardTitle}</h1><p>{t.dashboardDesc}</p></div><button onClick={()=>setPage('order')}><Sparkles/>{t.newProject}<ArrowRight/></button></div><article className={`recent-card ${expanded?'expanded':''}`}><div className="card-head"><div><h2>{t.recentOrders} <small>({orders.length})</small></h2><p>{isZh?'首页仅展示最近 5 条，全部订单可搜索和分页查看。':'The dashboard shows the latest 5 orders. View all orders with search and pagination.'}</p></div><div className="recent-head-actions"><button onClick={load} disabled={loading}>{loading?(isZh?'刷新中…':'Refreshing…'):t.refresh}</button><button className="view-all-button" onClick={toggleExpanded}>{expanded?(isZh?'收起':'Collapse'):(isZh?`查看全部 (${orders.length})`:`View all (${orders.length})`)}</button></div></div>{expanded&&<div className="order-toolbar"><input value={query} onChange={e=>{setQuery(e.target.value);setOrderPage(1)}} placeholder={isZh?'搜索文件名或订单号':'Search file name or order number'}/><span>{isZh?`找到 ${filtered.length} 条`:`${filtered.length} found`}</span></div>}{visible.length?visible.map(o=>{const status=statusInfo(o);const name=o.file_name||o.order_number;return <div className="task-row compact-order-row" key={`${o.order_number}-${name}`}><span className="order-file" title={name}><FileText/><b>{name}</b></span><span className="service-badges">{(o.services||[]).map(id=><i key={id}>{serviceLabel(id)}</i>)}</span><span className="order-progress">{status.kind==='done'?<CircleCheck/>:<><em style={{width:`${Math.min(100,Math.max(0,o.progress||0))}%`}}/><b>{o.progress||0}%</b></>}</span><span className={`order-status ${status.kind}`}>{status.text}</span></div>}):<div className="empty-state">{query?(isZh?'没有匹配的订单。':'No matching orders.'):t.noRealOrders}</div>}{expanded&&totalPages>1&&<div className="order-pagination"><button disabled={safePage<=1} onClick={()=>setOrderPage(p=>Math.max(1,p-1))}>‹</button><span>{safePage} / {totalPages}</span><button disabled={safePage>=totalPages} onClick={()=>setOrderPage(p=>Math.min(totalPages,p+1))}>›</button></div>}</article><TranslationSettings t={t}/><div className="pricing-grid"><article><h3>{t.team}</h3><p>{t.comingSoon}</p><button disabled>{t.comingSoon}</button></article><article><h3>{t.api}</h3><p>{t.comingSoon}</p><button disabled>{t.comingSoon}</button></article><article><h3>{t.billing}</h3><p>{t.comingSoon}</p><button disabled>{t.comingSoon}</button></article></div></section></main>
 }
-
-function TeamPanel({notify}) {return <article className="recent-card"><div className="card-head"><div><h2>团队成员</h2><p>管理成员与工作区权限</p></div><button onClick={()=>notify('邀请链接已创建')}>邀请成员</button></div>{[['Lan Nguyen','Owner','在线'],['Operations Team','Admin','在线'],['Finance Reviewer','Reviewer','2 小时前']].map(x=><div className="member-row" key={x[0]}><span className="avatar">{x[0][0]}</span><div><b>{x[0]}</b><small>{x[1]}</small></div><span>{x[2]}</span><button>管理</button></div>)}</article>}
-function ApiPanel({notify}) {return <article className="recent-card"><div className="card-head"><div><h2>API 密钥</h2><p>将文档处理接入企业系统</p></div><button onClick={()=>notify('新 API Key 已创建并仅显示一次')}>创建密钥</button></div><div className="api-key"><Code2/><div><b>Production API</b><small>da_live_••••••••••••9F2A</small></div><span>最近使用：今天</span><button>撤销</button></div></article>}
-function BillingPanel({notify}) {return <div className="billing-grid"><article className="recent-card"><h2>Enterprise Plan</h2><p>10,000 页/月 · 8 个席位 · API 访问</p><b className="bill-price">$299<small>/月</small></b><button onClick={()=>notify('套餐管理页面已打开')}>管理套餐</button></article><article className="recent-card"><h2>本月账单</h2><p>下次结算日期：2026-08-01</p><b className="bill-price">$299</b><button onClick={()=>notify('发票已生成')}>下载发票</button></article></div>}
 
 export default App

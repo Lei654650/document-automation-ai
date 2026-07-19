@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import mimetypes
 import os
 import secrets
 import shutil
+import subprocess
+import zipfile
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -32,11 +36,17 @@ from app.engines.translation_engine import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
-APP_VERSION = "10.5.0"
+APP_VERSION = "21.3.0"
 CLOUD_MODE = os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
-PERSISTENT_ROOT = Path(_data_root).expanduser().resolve() if _data_root else BASE_DIR
+if _data_root:
+    PERSISTENT_ROOT = Path(_data_root).expanduser().resolve()
+elif os.name == "nt" and os.getenv("LOCALAPPDATA"):
+    # Keep customer settings, orders and outputs outside the replaceable project folder.
+    PERSISTENT_ROOT = (Path(os.environ["LOCALAPPDATA"]) / "DocumentAutomationAI").resolve()
+else:
+    PERSISTENT_ROOT = BASE_DIR
 DATA_DIR = PERSISTENT_ROOT / "data"
 UPLOAD_DIR = PERSISTENT_ROOT / "uploads"
 OUTPUT_DIR = PERSISTENT_ROOT / "outputs"
@@ -56,7 +66,7 @@ ALLOWED_SUFFIXES = {
 }
 VALID_STATUSES = {
     "waiting_quote", "quoted", "confirmed", "processing",
-    "quality_review", "completed", "cancelled"
+    "quality_review", "partial_completed", "completed", "failed", "cancelled"
 }
 
 app = FastAPI(title="Document Automation AI API", version=APP_VERSION)
@@ -101,9 +111,22 @@ class AITranslationSettingsUpdate(BaseModel):
 
 
 
-def require_admin(x_admin_key: Annotated[str | None, Header()] = None) -> None:
+def require_admin(
+    request: Request,
+    x_admin_key: Annotated[str | None, Header()] = None,
+) -> None:
+    """Protect administrator endpoints.
+
+    The packaged Windows application is a localhost-only desktop deployment, so
+    administrators should not be locked out after replacing the project folder.
+    Cloud deployments still require the configured ADMIN_PASSWORD header.
+    """
+    client_host = request.client.host if request.client else ""
+    is_local_client = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    if not CLOUD_MODE and is_local_client:
+        return
     if not x_admin_key or not secrets.compare_digest(x_admin_key, ADMIN_PASSWORD):
-        raise HTTPException(status_code=401, detail="Administrator password is incorrect.")
+        raise HTTPException(status_code=401, detail="Administrator authentication failed. Check the administrator password.")
 
 
 def public_order(order_number: str, email: str) -> dict:
@@ -120,7 +143,9 @@ def public_order(order_number: str, email: str) -> dict:
             "quote_amount": data["quote_amount"], "quote_currency": data["quote_currency"],
             "quote_note": data["quote_note"], "created_at": data["created_at"],
             "updated_at": data["updated_at"], "services": data["services"],
-            "output_files": data["output_files"],
+            "translation": data["translation"], "conversion": data["conversion"],
+            "files": data["files"], "output_files": data["output_files"],
+            "processing_job": data["processing_job"],
         }
 
 def utc_now() -> str:
@@ -128,10 +153,33 @@ def utc_now() -> str:
 
 
 def get_db() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
+    # SQLite is reliable for this local product when connections wait briefly for
+    # concurrent writers instead of failing immediately. WAL also keeps reads
+    # responsive while an upload or processing event is being committed.
+    connection = sqlite3.connect(DB_PATH, timeout=30.0, isolation_level=None)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
     return connection
+
+
+def run_db_write(operation, attempts: int = 6):
+    """Run a short SQLite write transaction with bounded lock retries."""
+    delay = 0.2
+    for attempt in range(attempts):
+        try:
+            with get_db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                result = operation(db)
+                db.commit()
+                return result
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -190,6 +238,7 @@ def initialize_db() -> None:
         ensure_column(db, "orders", "admin_note", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "orders", "updated_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "orders", "translation_json", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(db, "orders", "conversion_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(db, "orders", "ai_analysis_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(db, "orders", "suggested_quote_json", "TEXT NOT NULL DEFAULT '{}'")
         db.executescript(
@@ -220,6 +269,22 @@ def initialize_db() -> None:
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(job_id) REFERENCES processing_jobs(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS processing_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                step_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                progress INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(job_id) REFERENCES processing_jobs(id) ON DELETE CASCADE,
+                UNIQUE(job_id, step_key)
             );
             """
         )
@@ -260,7 +325,16 @@ def initialize_db() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    initialize_db()
+    delay = 0.25
+    for attempt in range(6):
+        try:
+            initialize_db()
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 5:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
     # In-process workers cannot survive a container restart. Mark interrupted jobs clearly.
     with get_db() as db:
         interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing')").fetchall()
@@ -319,10 +393,15 @@ def row_to_order(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "SELECT level, step, message, created_at FROM processing_events WHERE job_id = ? ORDER BY id DESC LIMIT 100",
             (job_row["id"],),
         ).fetchall()
+        step_rows = db.execute(
+            "SELECT step_key, label, position, status, progress, started_at, finished_at, duration_ms, message, error FROM processing_steps WHERE job_id = ? ORDER BY position",
+            (job_row["id"],),
+        ).fetchall()
         latest_job = {
             "id": job_row["id"], "state": job_row["state"], "progress": job_row["progress"],
             "current_step": job_row["current_step"] if "current_step" in job_row.keys() else job_row["state"],
             "plan": json.loads(job_row["plan_json"] or "[]"),
+            "steps": [dict(item) for item in step_rows],
             "blockers": json.loads(job_row["blockers_json"] or "[]"),
             "result": json.loads(job_row["result_json"] or "{}"),
             "events": [dict(item) for item in reversed(event_rows)],
@@ -340,6 +419,7 @@ def row_to_order(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
         "requirements": row["requirements"],
         "services": json.loads(row["services_json"]),
         "translation": json.loads(row["translation_json"] or "{}"),
+        "conversion": json.loads(row["conversion_json"] or "{}"),
         "ai_analysis": json.loads(row["ai_analysis_json"] or "{}"),
         "suggested_quote": json.loads(row["suggested_quote_json"] or "{}"),
         "status": row["status"],
@@ -380,6 +460,52 @@ async def save_upload(upload: UploadFile, folder: Path) -> tuple[str, str, int]:
     return original_name, str(stored_path), total_size
 
 
+ZIP_MAX_FILES = max(10, int(os.getenv("ZIP_MAX_FILES", "250")))
+ZIP_MAX_DEPTH = max(1, min(int(os.getenv("ZIP_MAX_DEPTH", "3")), 5))
+
+
+def _safe_extract_zip(zip_path: Path, destination: Path, depth: int = 0) -> list[tuple[str, str, int]]:
+    """Safely expand enterprise ZIP uploads and return supported leaf files.
+
+    Directory traversal, encrypted entries, excessive file counts and unsupported
+    files are rejected or skipped. Nested ZIP files are supported up to a bounded
+    depth so one customer project can preserve its directory structure.
+    """
+    if depth >= ZIP_MAX_DEPTH:
+        return []
+    destination.mkdir(parents=True, exist_ok=True)
+    extracted: list[tuple[str, str, int]] = []
+    with zipfile.ZipFile(zip_path) as archive:
+        members = [m for m in archive.infolist() if not m.is_dir()]
+        if len(members) > ZIP_MAX_FILES:
+            raise HTTPException(status_code=400, detail=f"ZIP contains too many files (max {ZIP_MAX_FILES}).")
+        for member in members:
+            if member.flag_bits & 0x1:
+                raise HTTPException(status_code=400, detail="Encrypted ZIP files are not supported.")
+            relative = Path(member.filename.replace('\\', '/'))
+            if relative.is_absolute() or '..' in relative.parts:
+                raise HTTPException(status_code=400, detail="Unsafe path found inside ZIP.")
+            target = (destination / relative).resolve()
+            if destination.resolve() not in target.parents:
+                raise HTTPException(status_code=400, detail="Unsafe ZIP entry path.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as src, target.open('wb') as dst:
+                shutil.copyfileobj(src, dst)
+            suffix = target.suffix.lower()
+            if suffix == '.zip':
+                nested_dir = target.parent / f"{target.stem}_expanded"
+                extracted.extend(_safe_extract_zip(target, nested_dir, depth + 1))
+                continue
+            if suffix not in ALLOWED_SUFFIXES or suffix == '.zip':
+                continue
+            size = target.stat().st_size
+            if size > MAX_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"{relative.name} exceeds {MAX_FILE_SIZE_MB} MB.")
+            display_name = str(relative).replace('\\', '/')
+            extracted.append((display_name, str(target), size))
+    return extracted
+
+
 @app.post("/api/orders")
 async def create_order(
     files: Annotated[list[UploadFile], File(...)],
@@ -392,6 +518,7 @@ async def create_order(
     deadline: Annotated[str, Form()] = "",
     requirements: Annotated[str, Form()] = "",
     translation_json: Annotated[str, Form()] = "{}",
+    conversion_json: Annotated[str, Form()] = "{}",
 ) -> dict:
     if not name.strip() or not email.strip():
         raise HTTPException(status_code=400, detail="Name and email are required.")
@@ -403,85 +530,104 @@ async def create_order(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid service selection.") from exc
     if not isinstance(selected_services, list) or not selected_services:
-        raise HTTPException(status_code=400, detail="At least one service is required.")
+        selected_services = ["standard"]
     try:
         translation_data = json.loads(translation_json or "{}")
+        conversion_data = json.loads(conversion_json or "{}")
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid translation settings.") from exc
-    if not isinstance(translation_data, dict):
-        raise HTTPException(status_code=400, detail="Invalid translation settings.")
+        raise HTTPException(status_code=400, detail="Invalid processing settings.") from exc
+    if not isinstance(translation_data, dict) or not isinstance(conversion_data, dict):
+        raise HTTPException(status_code=400, detail="Invalid processing settings.")
 
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
     order_folder = UPLOAD_DIR / order_number
-    saved_files: list[dict] = []
+    prepared_rows: list[tuple[str, str, int, str]] = []
     analysis_paths: list[tuple[str, str]] = []
 
+    # Save and inspect potentially large files before opening any database write
+    # transaction. This prevents a 47 MB workbook upload from locking SQLite.
     try:
-        with get_db() as db:
+        for upload in files:
+            original_name, stored_path, total_size = await save_upload(upload, order_folder)
+            suffix = Path(original_name).suffix.lower()
+            upload_rows = [(original_name, stored_path, total_size, upload.content_type or "")]
+            if suffix == ".zip":
+                expanded_dir = order_folder / f"{Path(original_name).stem}_expanded"
+                expanded = _safe_extract_zip(Path(stored_path), expanded_dir)
+                if not expanded:
+                    raise HTTPException(status_code=400, detail=f"{original_name} contains no supported documents.")
+                upload_rows = [(n, p, z, mimetypes.guess_type(n)[0] or "") for n, p, z in expanded]
+            prepared_rows.extend(upload_rows)
+            analysis_paths.extend((n, p) for n, p, _, _ in upload_rows)
+
+        ai_analysis = analyze_order_files(analysis_paths, selected_services, requirements.strip(), translation_data)
+        suggested_quote = suggest_quote(ai_analysis, selected_services)
+
+        def insert_order(db: sqlite3.Connection):
             cursor = db.execute(
                 """
                 INSERT INTO orders (
                     order_number, name, company, email, whatsapp, country,
-                    deadline, requirements, services_json, translation_json, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting_quote', ?, ?)
+                    deadline, requirements, services_json, translation_json, conversion_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting_quote', ?, ?)
                 """,
-                (
-                    order_number, name.strip(), company.strip(), email.strip(),
-                    whatsapp.strip(), country.strip(), deadline.strip(),
-                    requirements.strip(), json.dumps(selected_services, ensure_ascii=False),
-                    json.dumps(translation_data, ensure_ascii=False), created_at, created_at,
-                ),
+                (order_number, name.strip(), company.strip(), email.strip(), whatsapp.strip(),
+                 country.strip(), deadline.strip(), requirements.strip(),
+                 json.dumps(selected_services, ensure_ascii=False),
+                 json.dumps(translation_data, ensure_ascii=False),
+                 json.dumps(conversion_data, ensure_ascii=False), created_at, created_at),
             )
             order_id = cursor.lastrowid
-
-            for upload in files:
-                original_name, stored_path, total_size = await save_upload(upload, order_folder)
-                suffix = Path(original_name).suffix.lower()
+            saved_files = []
+            for row_name, row_path, row_size, row_content_type in prepared_rows:
                 file_cursor = db.execute(
-                    """
-                    INSERT INTO order_files (
-                        order_id, original_name, stored_name, stored_path,
-                        content_type, size_bytes, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        order_id, original_name, Path(stored_path).name, stored_path,
-                        upload.content_type or "", total_size, created_at,
-                    ),
+                    """INSERT INTO order_files (order_id, original_name, stored_name, stored_path,
+                    content_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (order_id, row_name, Path(row_path).name, row_path, row_content_type, row_size, created_at),
                 )
-                saved_files.append({
-                    "id": file_cursor.lastrowid,
-                    "original_name": original_name,
-                    "size_bytes": total_size,
-                })
-                analysis_paths.append((original_name, stored_path))
+                saved_files.append({"id": file_cursor.lastrowid, "original_name": row_name, "size_bytes": row_size})
+            db.execute("UPDATE orders SET ai_analysis_json=?, suggested_quote_json=? WHERE id=?",
+                       (json.dumps(ai_analysis, ensure_ascii=False), json.dumps(suggested_quote, ensure_ascii=False), order_id))
+            return order_id, saved_files
 
-            ai_analysis = analyze_order_files(
-                analysis_paths, selected_services, requirements.strip(), translation_data
-            )
-            suggested_quote = suggest_quote(ai_analysis, selected_services)
-            db.execute(
-                "UPDATE orders SET ai_analysis_json = ?, suggested_quote_json = ? WHERE id = ?",
-                (
-                    json.dumps(ai_analysis, ensure_ascii=False),
-                    json.dumps(suggested_quote, ensure_ascii=False),
-                    order_id,
-                ),
-            )
-            db.commit()
+        order_id, saved_files = run_db_write(insert_order)
     except Exception:
         shutil.rmtree(order_folder, ignore_errors=True)
         raise
 
+    processing = start_processing(order_id)
     return {
-        "success": True,
-        "order_number": order_number,
-        "status": "waiting_quote",
-        "files": saved_files,
-        "ai_analysis": ai_analysis,
-        "suggested_quote": suggested_quote,
+        "success": True, "order_id": order_id, "order_number": order_number,
+        "status": "processing", "files": saved_files, "ai_analysis": ai_analysis,
+        "suggested_quote": suggested_quote, "services": selected_services,
+        "translation": translation_data, "conversion": conversion_data,
+        "processing_job": processing,
     }
+
+
+@app.get("/api/dashboard/recent-orders")
+def dashboard_recent_orders() -> dict:
+    status_labels = {
+        "waiting_quote": "等待处理", "quoted": "已报价", "processing": "处理中",
+        "completed": "已完成", "cancelled": "已取消", "failed": "失败",
+    }
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 20").fetchall()
+        items = []
+        for row in rows:
+            order = row_to_order(db, row)
+            progress = 100 if order["status"] == "completed" else (order.get("processing_job") or {}).get("progress", 0)
+            items.append({
+                "order_number": order["order_number"],
+                "file_name": (order["files"][0]["original_name"] if order["files"] else order["order_number"]),
+                "services": order["services"],
+                "status": order["status"],
+                "status_label": status_labels.get(order["status"], order["status"]),
+                "progress": progress,
+                "created_at": order["created_at"],
+            })
+        return {"orders": items, "total": len(items)}
 
 
 @app.get("/api/orders", dependencies=[Depends(require_admin)])
@@ -618,14 +764,31 @@ def test_ai_translation() -> dict:
 def _job_event(job_id: int, progress: int, step: str, message: str, level: str = "info") -> None:
     timestamp = utc_now()
     with get_db() as db:
-        db.execute(
-            "UPDATE processing_jobs SET progress = ?, current_step = ?, updated_at = ? WHERE id = ?",
-            (max(0, min(100, progress)), step, timestamp, job_id),
-        )
-        db.execute(
-            "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, ?, ?, ?, ?)",
-            (job_id, level, step, message, timestamp),
-        )
+        target = db.execute("SELECT position FROM processing_steps WHERE job_id=? AND step_key=?", (job_id, step)).fetchone()
+        target_position = int(target["position"]) if target is not None else 10_000
+        current = db.execute("SELECT step_key, started_at, position FROM processing_steps WHERE job_id = ? AND status = 'running' ORDER BY position LIMIT 1", (job_id,)).fetchone()
+        # Batch orders process one complete file at a time, so events may return to
+        # an earlier stage for the next file. Never mark a later stage completed
+        # merely because an earlier-stage event arrives. Reset later stages to
+        # pending so the UI always reflects the real current pipeline position.
+        if current is not None and current["step_key"] != step and int(current["position"]) < target_position:
+            started = current["started_at"] or timestamp
+            try:
+                duration_ms = max(1, int((datetime.fromisoformat(timestamp) - datetime.fromisoformat(started)).total_seconds() * 1000))
+            except ValueError:
+                duration_ms = 0
+            db.execute("UPDATE processing_steps SET status='completed', progress=100, finished_at=?, duration_ms=? WHERE job_id=? AND step_key=?", (timestamp, duration_ms, job_id, current["step_key"]))
+        if target is not None:
+            db.execute("UPDATE processing_steps SET status='pending', progress=0, started_at='', finished_at='', duration_ms=0, message='', error='' WHERE job_id=? AND position>? AND status!='failed'", (job_id, target_position))
+        row = db.execute("SELECT status, started_at FROM processing_steps WHERE job_id=? AND step_key=?", (job_id, step)).fetchone()
+        if row is not None:
+            if level == 'error' or step == 'failed':
+                db.execute("UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key=?", (timestamp, message, message, job_id, step))
+            else:
+                started_at = row["started_at"] or timestamp
+                db.execute("UPDATE processing_steps SET status='running', progress=?, started_at=?, message=? WHERE job_id=? AND step_key=?", (max(1, min(99, progress)), started_at, message, job_id, step))
+        db.execute("UPDATE processing_jobs SET progress = ?, current_step = ?, state = CASE WHEN state='queued' THEN 'processing' ELSE state END, updated_at = ? WHERE id = ?", (max(0, min(100, progress)), step, timestamp, job_id))
+        db.execute("INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, ?, ?, ?, ?)", (job_id, level, step, message, timestamp))
         db.commit()
 
 
@@ -639,7 +802,18 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
             progress_callback=lambda progress, step, message: _job_event(job_id, progress, step, message),
         )
         finished_at = utc_now()
-        mapped_status = "completed" if result["state"] == "completed" else ("quality_review" if result["state"] == "quality_review" else "processing")
+        if result["state"] == "completed":
+            mapped_status = "completed"
+        elif result["state"] == "partial_completed":
+            mapped_status = "partial_completed"
+        elif result["state"] == "quality_review":
+            mapped_status = "quality_review"
+        elif result["state"] == "failed":
+            mapped_status = "failed"
+        elif result["state"] == "waiting_configuration":
+            mapped_status = "confirmed"
+        else:
+            mapped_status = "processing"
         with get_db() as db:
             for output in result.get("outputs", []):
                 path = Path(output["path"])
@@ -655,6 +829,18 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
                         "INSERT INTO output_files (order_id, original_name, stored_name, stored_path, content_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (order_id, path.name, path.name, str(path), content_type, path.stat().st_size, finished_at),
                     )
+            if result["state"] in {"completed", "quality_review"}:
+                db.execute("UPDATE processing_steps SET status='completed', progress=100, finished_at=CASE WHEN finished_at='' THEN ? ELSE finished_at END WHERE job_id=? AND status IN ('pending','running')", (finished_at, job_id))
+            elif result["state"] == "partial_completed":
+                db.execute("UPDATE processing_steps SET status='completed', progress=100, finished_at=CASE WHEN finished_at='' THEN ? ELSE finished_at END WHERE job_id=? AND status IN ('pending','running') AND step_key NOT IN ('quality','export')", (finished_at, job_id))
+                db.execute("UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key='quality'", (finished_at, result.get('completion_message','部分文件未通过质量检查'), result.get('completion_message','部分文件未通过质量检查'), job_id))
+                db.execute("UPDATE processing_steps SET status='completed', progress=100, finished_at=?, message=? WHERE job_id=? AND step_key='export'", (finished_at, f"已准备 {result.get('successful_output_count',0)} 个成功文件", job_id))
+            elif result["state"] == "failed":
+                db.execute("UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key IN ('quality','export')", (finished_at, result.get('completion_message','处理失败'), result.get('completion_message','处理失败'), job_id))
+                db.execute("UPDATE processing_steps SET status='pending', progress=0 WHERE job_id=? AND status='running'", (job_id,))
+            elif result["state"] == "waiting_configuration":
+                # Preserve completed validation/analysis steps and leave remaining work pending.
+                db.execute("UPDATE processing_steps SET status='pending', progress=0, started_at='', message='' WHERE job_id=? AND status='running'", (job_id,))
             db.execute(
                 "UPDATE processing_jobs SET state = ?, progress = ?, current_step = ?, blockers_json = ?, result_json = ?, updated_at = ? WHERE id = ?",
                 (
@@ -702,6 +888,11 @@ def start_processing(order_id: int) -> dict:
             (order_id, json.dumps(plan, ensure_ascii=False), created_at, created_at),
         )
         job_id = cursor.lastrowid
+        for position, item in enumerate(plan):
+            db.execute(
+                "INSERT INTO processing_steps (job_id, step_key, label, position, status, progress, started_at, finished_at, duration_ms, message, error) VALUES (?, ?, ?, ?, 'pending', 0, '', '', 0, '', '')",
+                (job_id, item["id"], item["label"], position),
+            )
         db.execute(
             "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, 'info', 'queued', 'Processing job queued', ?)",
             (job_id, created_at),
@@ -797,6 +988,98 @@ def _download_from_table(table: Literal["order_files", "output_files"], file_id:
         filename=row["original_name"],
         media_type=row["content_type"] or "application/octet-stream",
     )
+
+
+
+def _verified_output_rows(order_number: str, email: str) -> tuple[dict, list[sqlite3.Row]]:
+    data = public_order(order_number, email)
+    output_ids = [item["id"] for item in data["output_files"]]
+    if not output_ids:
+        raise HTTPException(status_code=404, detail="No delivery files are available for this order.")
+    placeholders = ",".join("?" for _ in output_ids)
+    with get_db() as db:
+        rows = db.execute(
+            f"SELECT id, original_name, stored_path, content_type, size_bytes, created_at FROM output_files WHERE id IN ({placeholders}) ORDER BY id",
+            output_ids,
+        ).fetchall()
+    return data, rows
+
+
+@app.get("/api/track/delivery/download-all")
+def public_delivery_zip(order_number: str = Query(...), email: str = Query(...)) -> StreamingResponse:
+    """Stream a delivery ZIP without creating a persistent copy on C: or in outputs.
+
+    The browser receives the archive and writes it only to the path explicitly
+    selected by the user through the system Save As dialog.
+    """
+    data, rows = _verified_output_rows(order_number, email)
+    package = io.BytesIO()
+    valid_count = 0
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        used_names: set[str] = set()
+        for row in rows:
+            source = Path(row["stored_path"])
+            if not source.exists() or not source.is_file():
+                continue
+            name = Path(row["original_name"]).name
+            if name in used_names:
+                name = f"{source.stem}_{row['id']}{source.suffix}"
+            used_names.add(name)
+            archive.write(source, arcname=name)
+            valid_count += 1
+    if not valid_count:
+        raise HTTPException(status_code=404, detail="No valid delivery files were found.")
+    package.seek(0)
+    filename = f"{data['order_number']}_delivery.zip"
+    headers = {
+        "Content-Disposition": f"attachment; filename={filename}",
+        "Cache-Control": "no-store",
+        "X-Delivery-Storage": "browser-selected-location-only",
+    }
+    return StreamingResponse(package, media_type="application/zip", headers=headers)
+
+
+@app.post("/api/track/delivery/open-folder")
+def open_delivery_folder(
+    request: Request,
+    order_number: str = Query(...),
+    email: str = Query(...),
+    target: str = Query("project", pattern="^(project|package|file)$"),
+    file_id: int | None = Query(None),
+) -> dict:
+    """Open the exact Windows folder the user expects.
+
+    project: opens the order root, not the internal job_xx implementation folder.
+    package: selects the generated delivery ZIP inside delivery_packages.
+    file: selects one requested output file.
+    """
+    if CLOUD_MODE or os.name != "nt":
+        raise HTTPException(status_code=400, detail="Opening a local folder is only available in the Windows desktop deployment.")
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(status_code=403, detail="This action is only allowed from the local computer.")
+    data, rows = _verified_output_rows(order_number, email)
+    order_root = OUTPUT_DIR / data["order_number"]
+
+    selected: Path | None = None
+    folder = order_root
+    if target == "package":
+        raise HTTPException(status_code=400, detail="交付包只保存在你通过另存为选择的位置，软件不会在 C 盘保留副本。")
+    elif target == "file" and file_id is not None:
+        row = next((row for row in rows if int(row["id"]) == int(file_id)), None)
+        if row:
+            candidate = Path(row["stored_path"])
+            if candidate.exists():
+                selected = candidate
+                folder = candidate.parent
+    else:
+        folder.mkdir(parents=True, exist_ok=True)
+
+    if selected is not None:
+        subprocess.Popen(["explorer", "/select,", str(selected)])
+    else:
+        subprocess.Popen(["explorer", str(folder)])
+    return {"success": True, "folder": str(folder), "selected": str(selected) if selected else None, "target": target}
 
 @app.get("/api/admin/enterprise-overview", dependencies=[Depends(require_admin)])
 def enterprise_overview() -> dict:

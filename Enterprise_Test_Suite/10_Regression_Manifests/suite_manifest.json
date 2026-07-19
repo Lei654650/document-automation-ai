@@ -1,0 +1,237 @@
+[
+  {
+    "path": "README.md",
+    "size_bytes": 308,
+    "category": "Enterprise_Test_Suite"
+  },
+  {
+    "path": "01_Word/01_Long_Equipment_Purchase_Contract.docx",
+    "size_bytes": 40167,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/02_FAT_SAT_Combined_Report.docx",
+    "size_bytes": 39877,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/03_Multilingual_Operations_Manual.docx",
+    "size_bytes": 40020,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/04_PLC_Software_Design_Specification.docx",
+    "size_bytes": 39731,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/05_Robot_Cell_Safety_Risk_Assessment.docx",
+    "size_bytes": 39670,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/06_Preventive_Maintenance_Handbook.docx",
+    "size_bytes": 39875,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/07_Supplier_Quality_Audit_Report.docx",
+    "size_bytes": 39601,
+    "category": "01_Word"
+  },
+  {
+    "path": "01_Word/08_Change_Control_and_Deviation_Log.docx",
+    "size_bytes": 39601,
+    "category": "01_Word"
+  },
+  {
+    "path": "02_Excel/01_Complex_BOM_MultiSheet.xlsx",
+    "size_bytes": 129753,
+    "category": "02_Excel"
+  },
+  {
+    "path": "02_Excel/02_Production_KPI_Formulas.xlsx",
+    "size_bytes": 88426,
+    "category": "02_Excel"
+  },
+  {
+    "path": "02_Excel/03_Inventory_Traceability.xlsx",
+    "size_bytes": 123364,
+    "category": "02_Excel"
+  },
+  {
+    "path": "03_PPT/01_Automation_Solution_Proposal_40_Slides.pptx",
+    "size_bytes": 85233,
+    "category": "03_PPT"
+  },
+  {
+    "path": "03_PPT/02_FAT_Management_Review_30_Slides.pptx",
+    "size_bytes": 70760,
+    "category": "03_PPT"
+  },
+  {
+    "path": "03_PPT/03_Operator_Training_Deck_35_Slides.pptx",
+    "size_bytes": 77993,
+    "category": "03_PPT"
+  },
+  {
+    "path": "03_PPT/04_Maintenance_Strategy_25_Slides.pptx",
+    "size_bytes": 63525,
+    "category": "03_PPT"
+  },
+  {
+    "path": "04_PDF/01_Long_Technical_Contract_80_Pages.pdf",
+    "size_bytes": 86130,
+    "category": "04_PDF"
+  },
+  {
+    "path": "04_PDF/02_Two_Column_Compliance_Report.pdf",
+    "size_bytes": 57071,
+    "category": "04_PDF"
+  },
+  {
+    "path": "04_PDF/03_Landscape_Engineering_Drawings.pdf",
+    "size_bytes": 32876,
+    "category": "04_PDF"
+  },
+  {
+    "path": "04_PDF/04_Mixed_Table_Text_Report.pdf",
+    "size_bytes": 59461,
+    "category": "04_PDF"
+  },
+  {
+    "path": "04_PDF/05_Multilingual_Quality_Report.pdf",
+    "size_bytes": 50842,
+    "category": "04_PDF"
+  },
+  {
+    "path": "05_ScanPDF/01_MultiPage_Scanned_Document.pdf",
+    "size_bytes": 1662454,
+    "category": "05_ScanPDF"
+  },
+  {
+    "path": "05_ScanPDF/02_MultiPage_Scanned_Document.pdf",
+    "size_bytes": 1637879,
+    "category": "05_ScanPDF"
+  },
+  {
+    "path": "05_ScanPDF/03_MultiPage_Scanned_Document.pdf",
+    "size_bytes": 1596916,
+    "category": "05_ScanPDF"
+  },
+  {
+    "path": "06_Image/01_OCR_Scan_Rotation_2_Blur_0.png",
+    "size_bytes": 217035,
+    "category": "06_Image"
+  },
+  {
+    "path": "06_Image/02_OCR_Scan_Rotation_-4_Blur_1.png",
+    "size_bytes": 413314,
+    "category": "06_Image"
+  },
+  {
+    "path": "06_Image/03_OCR_Scan_Rotation_0_Blur_2.png",
+    "size_bytes": 208469,
+    "category": "06_Image"
+  },
+  {
+    "path": "06_Image/04_OCR_Scan_Rotation_7_Blur_1.png",
+    "size_bytes": 421297,
+    "category": "06_Image"
+  },
+  {
+    "path": "06_Image/05_OCR_Scan_Rotation_0_Blur_0.png",
+    "size_bytes": 153189,
+    "category": "06_Image"
+  },
+  {
+    "path": "06_Image/06_OCR_Scan_Rotation_3_Blur_2.png",
+    "size_bytes": 278418,
+    "category": "06_Image"
+  },
+  {
+    "path": "07_CSV/01_Enterprise_Data_10000_Rows.csv",
+    "size_bytes": 667212,
+    "category": "07_CSV"
+  },
+  {
+    "path": "07_CSV/02_Enterprise_Data_10000_Rows.csv",
+    "size_bytes": 667212,
+    "category": "07_CSV"
+  },
+  {
+    "path": "07_CSV/03_Enterprise_Data_10000_Rows.csv",
+    "size_bytes": 667212,
+    "category": "07_CSV"
+  },
+  {
+    "path": "07_CSV/04_Enterprise_Data_10000_Rows.csv",
+    "size_bytes": 667212,
+    "category": "07_CSV"
+  },
+  {
+    "path": "08_ZIP/01_Nested_Enterprise_Package.zip",
+    "size_bytes": 37523,
+    "category": "08_ZIP"
+  },
+  {
+    "path": "08_ZIP/02_Nested_Enterprise_Package.zip",
+    "size_bytes": 37523,
+    "category": "08_ZIP"
+  },
+  {
+    "path": "08_ZIP/03_Nested_Enterprise_Package.zip",
+    "size_bytes": 37523,
+    "category": "08_ZIP"
+  },
+  {
+    "path": "09_Error_Cases/01_empty.pdf",
+    "size_bytes": 0,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "09_Error_Cases/02_fake_pdf.pdf",
+    "size_bytes": 17,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "09_Error_Cases/03_corrupt_docx.docx",
+    "size_bytes": 10,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "09_Error_Cases/04_corrupt_xlsx.xlsx",
+    "size_bytes": 10,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "09_Error_Cases/05_no_extension",
+    "size_bytes": 17,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "09_Error_Cases/06_special_chars_中文_#_&_test.txt",
+    "size_bytes": 16,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "09_Error_Cases/generate_runtime_long_path.py",
+    "size_bytes": 238,
+    "category": "09_Error_Cases"
+  },
+  {
+    "path": "10_Regression_Manifests/49_file_smoke_test.txt",
+    "size_bytes": 1725,
+    "category": "10_Regression_Manifests"
+  },
+  {
+    "path": "10_Regression_Manifests/100_file_regression.txt",
+    "size_bytes": 4375,
+    "category": "10_Regression_Manifests"
+  },
+  {
+    "path": "10_Regression_Manifests/300_file_pressure_plan.txt",
+    "size_bytes": 99,
+    "category": "10_Regression_Manifests"
+  }
+]
