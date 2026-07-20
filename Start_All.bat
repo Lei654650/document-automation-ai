@@ -12,10 +12,10 @@ set "NPM_RUN=%ROOT%Npm_Run.bat"
 cd /d "%ROOT%"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 if not exist "%RUNTIME%" mkdir "%RUNTIME%"
-title Document Automation AI V20.0.1
+title Document Automation AI V23.0 Enterprise
 
 echo ============================================================
-echo Document Automation AI V20.0.1 - One Click Start
+echo Document Automation AI V23.0 Enterprise - One Click Start
 echo ============================================================
 echo Project root: %ROOT%
 echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
@@ -23,7 +23,7 @@ echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
 rem Never trust setup.ready by itself. Verify the real runtime files.
 set "NEED_SETUP=0"
 if not exist "%VENV_PY%" set "NEED_SETUP=1"
-if not exist "%FRONTEND%\node_modules\vite\bin\vite.js" set "NEED_SETUP=1"
+if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" set "NEED_SETUP=1"
 if not exist "%FRONTEND%\node_modules\react\package.json" set "NEED_SETUP=1"
 
 if "%NEED_SETUP%"=="1" (
@@ -49,7 +49,7 @@ if not exist "%VENV_PY%" (
   pause
   exit /b 1
 )
-if not exist "%FRONTEND%\node_modules\vite\bin\vite.js" (
+if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (
   echo [ERROR] Frontend dependencies are still missing after setup.
   echo Check logs\setup.log.
   pause

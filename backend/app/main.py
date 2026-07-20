@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import urllib.error
+import urllib.parse
+import urllib.request
 import io
 import json
 import mimetypes
@@ -12,6 +16,7 @@ import zipfile
 import sqlite3
 import threading
 import time
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +29,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from app.services.document_analyzer import analyze_order_files
+from app.services.runtime_service import storage_diagnostics
 from app.engines.quote_engine import suggest_quote
 from app.engines.job_engine import build_plan, run_local_job
 from app.engines.ocr_engine import capability as ocr_capability
@@ -36,11 +42,16 @@ from app.engines.translation_engine import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
-APP_VERSION = "21.3.0"
-CLOUD_MODE = os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
+APP_VERSION = "24.0.0"
+IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
-if _data_root:
+if IS_VERCEL:
+    # Vercel's deployed bundle (/var/task) is read-only. Only /tmp is writable.
+    # Files stored here are temporary and may disappear after a serverless instance is recycled.
+    PERSISTENT_ROOT = (Path(tempfile.gettempdir()) / "document-automation-ai").resolve()
+elif _data_root:
     PERSISTENT_ROOT = Path(_data_root).expanduser().resolve()
 elif os.name == "nt" and os.getenv("LOCALAPPDATA"):
     # Keep customer settings, orders and outputs outside the replaceable project folder.
@@ -55,6 +66,17 @@ MAX_FILE_SIZE_MB = max(1, int(os.getenv("MAX_FILE_SIZE_MB", "100")))
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 FRONTEND_DIST = BASE_DIR / "static"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
+PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
+PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "").strip()
+PAYMENT_CANCEL_URL = os.getenv("PAYMENT_CANCEL_URL", "").strip()
+PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "false").lower() in {"1", "true", "yes", "on"}
+ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "false").lower() in {"1", "true", "yes", "on"}
+JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "1800")))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,6 +120,133 @@ class TeamMemberCreate(BaseModel):
     name: str
     email: str
     role: str = "member"
+
+
+class CheckoutCreate(BaseModel):
+    plan_id: str
+    customer_name: str = ""
+    customer_email: str
+    locale: str = "zh"
+
+
+class DemoPaymentConfirm(BaseModel):
+    payment_number: str
+    customer_email: str
+
+
+class FreePlanActivate(BaseModel):
+    customer_name: str = ""
+    customer_email: str
+    locale: str = "zh"
+
+
+class SalesLeadCreate(BaseModel):
+    customer_name: str
+    customer_email: str
+    company: str = ""
+    phone: str = ""
+    requirements: str = ""
+    locale: str = "zh"
+
+
+class CreditEstimateRequest(BaseModel):
+    pages: int = Field(default=1, ge=1, le=100000)
+    file_size_mb: float = Field(default=1, ge=0)
+    services: list[str] = []
+    file_count: int = Field(default=1, ge=1, le=10000)
+
+
+class WalletAdjustment(BaseModel):
+    customer_email: str
+    credits: int
+    note: str = "Administrator adjustment"
+
+
+PAYMENT_PLANS = {
+    "free": {"name": "Free", "kind": "subscription", "billing": "monthly", "amount_cents": 0, "currency": "usd", "credits": 500, "team_members": 1, "file_limit_mb": 10, "features": ["basic_conversion", "standard_queue"]},
+    "starter_monthly": {"name": "Starter", "kind": "subscription", "billing": "monthly", "amount_cents": 1900, "currency": "usd", "credits": 2000, "team_members": 1, "file_limit_mb": 50, "features": ["ocr", "translation", "batch_10"]},
+    "starter_yearly": {"name": "Starter", "kind": "subscription", "billing": "yearly", "amount_cents": 19000, "currency": "usd", "credits": 24000, "team_members": 1, "file_limit_mb": 50, "features": ["ocr", "translation", "batch_10"]},
+    "professional_monthly": {"name": "Professional", "kind": "subscription", "billing": "monthly", "amount_cents": 5900, "currency": "usd", "credits": 8000, "team_members": 3, "file_limit_mb": 200, "features": ["advanced_ocr", "layout_preservation", "batch_100", "basic_api", "priority_queue"]},
+    "professional_yearly": {"name": "Professional", "kind": "subscription", "billing": "yearly", "amount_cents": 59000, "currency": "usd", "credits": 96000, "team_members": 3, "file_limit_mb": 200, "features": ["advanced_ocr", "layout_preservation", "batch_100", "basic_api", "priority_queue"]},
+    "business_monthly": {"name": "Business", "kind": "subscription", "billing": "monthly", "amount_cents": 14900, "currency": "usd", "credits": 30000, "team_members": 10, "file_limit_mb": 500, "features": ["team", "advanced_api", "priority_queue", "analytics", "invoice"]},
+    "business_yearly": {"name": "Business", "kind": "subscription", "billing": "yearly", "amount_cents": 149000, "currency": "usd", "credits": 360000, "team_members": 10, "file_limit_mb": 500, "features": ["team", "advanced_api", "priority_queue", "analytics", "invoice"]},
+    "enterprise": {"name": "Enterprise", "kind": "contact", "billing": "custom", "amount_cents": 0, "currency": "usd", "credits": 0, "team_members": 0, "file_limit_mb": 0, "features": ["private_deployment", "sso", "sla", "custom_integration"]},
+    "credits_1000": {"name": "1,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 1500, "currency": "usd", "credits": 1000, "valid_days": 365, "features": []},
+    "credits_5000": {"name": "5,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 5900, "currency": "usd", "credits": 5000, "valid_days": 365, "features": []},
+    "credits_20000": {"name": "20,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 19900, "currency": "usd", "credits": 20000, "valid_days": 730, "features": []},
+}
+
+
+def payment_provider() -> str:
+    if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
+        return "paypal"
+    if STRIPE_SECRET_KEY:
+        return "stripe"
+    return "demo"
+
+
+def paypal_api_base() -> str:
+    return "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
+
+
+def paypal_request(path: str, method: str = "GET", payload: dict | None = None, access_token: str = "") -> dict:
+    url = paypal_api_base() + path
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json", "Accept": "application/json", "Prefer": "return=representation"}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"PayPal API error {exc.code}: {detail[:800]}") from exc
+
+
+def paypal_access_token() -> str:
+    credentials = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode()).decode()
+    request = urllib.request.Request(
+        paypal_api_base() + "/v1/oauth2/token",
+        data=b"grant_type=client_credentials",
+        method="POST",
+        headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            return body["access_token"]
+    except Exception as exc:
+        raise RuntimeError(f"Unable to authenticate with PayPal: {exc}") from exc
+
+
+def mark_payment_paid(payment_number: str, provider_session_id: str = "", provider_payment_id: str = "") -> bool:
+    def operation(db):
+        row = db.execute("SELECT * FROM payment_orders WHERE payment_number=?", (payment_number,)).fetchone()
+        if row is None:
+            return False
+        if row["status"] == "paid":
+            return True
+        now = utc_now()
+        plan = PAYMENT_PLANS.get(row["plan_id"], {})
+        email = row["customer_email"].strip().lower()
+        db.execute("UPDATE payment_orders SET status='paid', provider_session_id=COALESCE(NULLIF(?,''),provider_session_id), provider_payment_id=COALESCE(NULLIF(?,''),provider_payment_id), paid_at=?, updated_at=? WHERE id=?", (provider_session_id, provider_payment_id, now, now, row["id"]))
+        wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        if wallet is None:
+            db.execute("INSERT INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
+            wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        bucket = "purchased" if plan.get("kind") == "credit_pack" else "subscription"
+        column = "purchased_credits" if bucket == "purchased" else "subscription_credits"
+        if plan.get("kind") == "subscription":
+            db.execute(f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', updated_at=? WHERE customer_email=?", (row["credits"], row["plan_id"], now, email))
+        else:
+            db.execute(f"UPDATE customer_wallets SET {column}={column}+?, updated_at=? WHERE customer_email=?", (row["credits"], now, email))
+        balance = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()["total"]
+        db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,"credit",bucket,row["credits"],balance,payment_number,"Payment credited",now))
+        db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "payment.paid", json.dumps({"provider_session_id": provider_session_id, "provider_payment_id": provider_payment_id, "wallet_balance": balance}), now))
+        return True
+    return bool(run_db_write(operation))
 
 
 class AITranslationSettingsUpdate(BaseModel):
@@ -314,6 +463,81 @@ def initialize_db() -> None:
                 created_at TEXT NOT NULL,
                 last_used_at TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS payment_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_number TEXT UNIQUE NOT NULL,
+                plan_id TEXT NOT NULL,
+                plan_name TEXT NOT NULL,
+                customer_name TEXT NOT NULL DEFAULT '',
+                customer_email TEXT NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                credits INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                provider_session_id TEXT NOT NULL DEFAULT '',
+                provider_payment_id TEXT NOT NULL DEFAULT '',
+                checkout_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                paid_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS payment_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_order_id INTEGER,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(payment_order_id) REFERENCES payment_orders(id) ON DELETE SET NULL
+            );
+            """
+        )
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS customer_wallets (
+                customer_email TEXT PRIMARY KEY,
+                subscription_credits INTEGER NOT NULL DEFAULT 0,
+                purchased_credits INTEGER NOT NULL DEFAULT 0,
+                bonus_credits INTEGER NOT NULL DEFAULT 0,
+                plan_id TEXT NOT NULL DEFAULT 'free',
+                plan_status TEXT NOT NULL DEFAULT 'active',
+                current_period_end TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS credit_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_email TEXT NOT NULL,
+                transaction_type TEXT NOT NULL,
+                bucket TEXT NOT NULL,
+                credits INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                reference TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_credit_ledger_email ON credit_ledger(customer_email, id DESC);
+            CREATE TABLE IF NOT EXISTS sales_leads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_name TEXT NOT NULL,
+                customer_email TEXT NOT NULL,
+                company TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '',
+                requirements TEXT NOT NULL DEFAULT '',
+                locale TEXT NOT NULL DEFAULT 'zh',
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sales_leads_email ON sales_leads(customer_email, id DESC);
+            CREATE TABLE IF NOT EXISTS credit_reservations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL UNIQUE,
+                customer_email TEXT NOT NULL,
+                credits INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+            );
             """
         )
         db.execute(
@@ -342,7 +566,7 @@ def startup() -> None:
             timestamp = utc_now()
             db.execute(
                 "UPDATE processing_jobs SET state='failed', progress=100, current_step='interrupted', blockers_json=?, updated_at=? WHERE id=?",
-                (json.dumps(["Processing was interrupted by a server restart. Start the job again."], ensure_ascii=False), timestamp, row["id"]),
+                (json.dumps(["Processing was interrupted by a runtime restart. Retry the job; completed source files remain available."], ensure_ascii=False), timestamp, row["id"]),
             )
             db.execute(
                 "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, 'error', 'interrupted', ?, ?)",
@@ -363,11 +587,46 @@ def public_config() -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
+    storage = storage_diagnostics(PERSISTENT_ROOT, DB_PATH, UPLOAD_DIR, OUTPUT_DIR)
+    translation = translation_capability().__dict__
+    readiness = "ready"
+    warnings = []
+    if not storage["writable"]:
+        readiness = "blocked"
+        warnings.append("Runtime storage is not writable.")
+    if storage["temporary_storage"]:
+        readiness = "degraded" if readiness == "ready" else readiness
+        warnings.append("Serverless temporary storage is active; configure durable database and object storage for production retention.")
+    if not translation.get("configured"):
+        warnings.append("AI translation provider is not configured.")
     return {
-        "status": "ok",
+        "status": "ok" if readiness != "blocked" else "error",
+        "readiness": readiness,
         "version": APP_VERSION,
+        "cloud_mode": CLOUD_MODE,
+        "storage": storage,
         "ocr": ocr_capability().__dict__,
-        "translation": translation_capability().__dict__,
+        "translation": translation,
+        "payments": {"configured": payment_provider() in {"stripe", "paypal"}, "provider": payment_provider()},
+        "credits_enforced": ENFORCE_CREDITS,
+        "warnings": warnings,
+    }
+
+
+@app.get("/api/readiness")
+def readiness() -> dict:
+    data = health()
+    return {
+        "ready": data["readiness"] == "ready",
+        "readiness": data["readiness"],
+        "version": APP_VERSION,
+        "checks": {
+            "runtime_storage": data["storage"]["writable"],
+            "durable_storage": data["storage"]["durable_storage_configured"],
+            "translation": data["translation"].get("configured", False),
+            "payments": data["payments"]["configured"],
+        },
+        "warnings": data["warnings"],
     }
 
 
@@ -506,6 +765,54 @@ def _safe_extract_zip(zip_path: Path, destination: Path, depth: int = 0) -> list
     return extracted
 
 
+def _estimate_order_credits(analysis: dict, services: list[str], file_count: int, total_size_bytes: int) -> int:
+    rates = {"conversion": 1, "ocr": 2, "translation": 3, "data_cleanup": 2, "enterprise_analysis": 4, "layout_preserve": 2, "layout_preservation": 2, "image_enhancement": 1}
+    pages = int(analysis.get("total_pages") or analysis.get("pages") or file_count or 1)
+    per_page = 1 + sum(rates.get(str(service), 0) for service in services)
+    size_surcharge = max(0, int((total_size_bytes / 1024 / 1024) // 25))
+    return max(1, pages * per_page + size_surcharge)
+
+
+def _wallet_total(db: sqlite3.Connection, email: str) -> int:
+    row = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+    return int(row["total"] if row else 0)
+
+
+def _reserve_credits(db: sqlite3.Connection, order_id: int, email: str, credits: int) -> None:
+    now = utc_now()
+    db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,updated_at) VALUES (?,500,'free',?)", (email, now))
+    available = _wallet_total(db, email)
+    if available < credits:
+        raise HTTPException(status_code=402, detail=f"Insufficient DA Credits. Required {credits}, available {available}.")
+    remaining = credits
+    for column, bucket in (("bonus_credits", "bonus"), ("subscription_credits", "subscription"), ("purchased_credits", "purchased")):
+        row = db.execute(f"SELECT {column} AS value FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        take = min(remaining, int(row["value"] or 0))
+        if take:
+            db.execute(f"UPDATE customer_wallets SET {column}={column}-?,updated_at=? WHERE customer_email=?", (take, now, email))
+            remaining -= take
+        if remaining <= 0:
+            break
+    balance = _wallet_total(db, email)
+    db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,"reservation","mixed",-credits,balance,str(order_id),"Reserved for document processing",now))
+    db.execute("INSERT INTO credit_reservations (order_id,customer_email,credits,status,created_at,updated_at) VALUES (?,?,?,'reserved',?,?)", (order_id,email,credits,now,now))
+
+
+def _settle_or_refund_credits(db: sqlite3.Connection, order_id: int, final_state: str) -> None:
+    row = db.execute("SELECT * FROM credit_reservations WHERE order_id=?", (order_id,)).fetchone()
+    if row is None or row["status"] != "reserved":
+        return
+    now = utc_now()
+    if final_state in {"completed", "partial_completed", "quality_review"}:
+        db.execute("UPDATE credit_reservations SET status='settled',updated_at=? WHERE order_id=?", (now,order_id))
+        return
+    credits, email = int(row["credits"]), row["customer_email"]
+    db.execute("UPDATE customer_wallets SET purchased_credits=purchased_credits+?,updated_at=? WHERE customer_email=?", (credits,now,email))
+    balance = _wallet_total(db,email)
+    db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,"refund","purchased",credits,balance,str(order_id),"Automatic refund after unsuccessful processing",now))
+    db.execute("UPDATE credit_reservations SET status='refunded',updated_at=? WHERE order_id=?", (now,order_id))
+
+
 @app.post("/api/orders")
 async def create_order(
     files: Annotated[list[UploadFile], File(...)],
@@ -563,6 +870,7 @@ async def create_order(
 
         ai_analysis = analyze_order_files(analysis_paths, selected_services, requirements.strip(), translation_data)
         suggested_quote = suggest_quote(ai_analysis, selected_services)
+        estimated_credits = _estimate_order_credits(ai_analysis, selected_services, len(prepared_rows), sum(row[2] for row in prepared_rows))
 
         def insert_order(db: sqlite3.Connection):
             cursor = db.execute(
@@ -588,7 +896,9 @@ async def create_order(
                 )
                 saved_files.append({"id": file_cursor.lastrowid, "original_name": row_name, "size_bytes": row_size})
             db.execute("UPDATE orders SET ai_analysis_json=?, suggested_quote_json=? WHERE id=?",
-                       (json.dumps(ai_analysis, ensure_ascii=False), json.dumps(suggested_quote, ensure_ascii=False), order_id))
+                       (json.dumps({**ai_analysis, "estimated_credits": estimated_credits}, ensure_ascii=False), json.dumps(suggested_quote, ensure_ascii=False), order_id))
+            if ENFORCE_CREDITS:
+                _reserve_credits(db, order_id, email.strip().lower(), estimated_credits)
             return order_id, saved_files
 
         order_id, saved_files = run_db_write(insert_order)
@@ -600,7 +910,7 @@ async def create_order(
     return {
         "success": True, "order_id": order_id, "order_number": order_number,
         "status": "processing", "files": saved_files, "ai_analysis": ai_analysis,
-        "suggested_quote": suggested_quote, "services": selected_services,
+        "suggested_quote": suggested_quote, "estimated_credits": estimated_credits, "credits_enforced": ENFORCE_CREDITS, "services": selected_services,
         "translation": translation_data, "conversion": conversion_data,
         "processing_job": processing,
     }
@@ -850,6 +1160,8 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
                 ),
             )
             db.execute("UPDATE orders SET status = ?, updated_at = ? WHERE id = ?", (mapped_status, finished_at, order_id))
+            if ENFORCE_CREDITS:
+                _settle_or_refund_credits(db, order_id, result["state"])
             db.commit()
     except Exception as exc:
         finished_at = utc_now()
@@ -860,6 +1172,8 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
                 (json.dumps([str(exc)], ensure_ascii=False), json.dumps({"error": str(exc)}, ensure_ascii=False), finished_at, job_id),
             )
             db.execute("UPDATE orders SET status = 'confirmed', updated_at = ? WHERE id = ?", (finished_at, order_id))
+            if ENFORCE_CREDITS:
+                _settle_or_refund_credits(db, order_id, "failed")
             db.commit()
 
 
@@ -899,6 +1213,27 @@ def start_processing(order_id: int) -> dict:
         )
         db.execute("UPDATE orders SET status = 'processing', updated_at = ? WHERE id = ?", (created_at, order_id))
         db.commit()
+
+    # Serverless runtimes freeze or terminate background threads as soon as the
+    # HTTP response is returned. That was the cause of cloud jobs stopping at
+    # 32% after the validation/analyse stages. Run the worker inside the active
+    # request on Vercel so it cannot be abandoned halfway through. Local and
+    # long-running container deployments keep the responsive background thread.
+    if IS_VERCEL:
+        _run_processing_worker(job_id, order_id, order, source_paths)
+        with get_db() as db:
+            finished = db.execute(
+                "SELECT state, progress, current_step FROM processing_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return {
+            "success": True,
+            "job_id": job_id,
+            "state": finished["state"] if finished else "failed",
+            "progress": int(finished["progress"] if finished else 100),
+            "current_step": finished["current_step"] if finished else "failed",
+            "serverless_inline": True,
+        }
 
     thread = threading.Thread(
         target=_run_processing_worker,
@@ -1081,6 +1416,285 @@ def open_delivery_folder(
         subprocess.Popen(["explorer", str(folder)])
     return {"success": True, "folder": str(folder), "selected": str(selected) if selected else None, "target": target}
 
+@app.get("/api/payments/config")
+def payment_config() -> dict:
+    provider = payment_provider()
+    return {
+        "provider": provider,
+        "configured": provider in {"stripe", "paypal"},
+        "provider_label": "PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo"),
+        "paypal_mode": PAYPAL_MODE if provider == "paypal" else "",
+        "test_mode": PAYMENT_TEST_MODE,
+        "currency": "USD",
+        "version": APP_VERSION,
+        "plans": [{"id": key, **value} for key, value in PAYMENT_PLANS.items()],
+    }
+
+
+@app.post("/api/credits/estimate")
+def estimate_credits(payload: CreditEstimateRequest) -> dict:
+    rates = {"conversion": 1, "ocr": 2, "translation": 3, "data_cleanup": 2, "enterprise_analysis": 4, "layout_preservation": 2, "image_enhancement": 1}
+    per_page = 1 + sum(rates.get(service, 0) for service in payload.services)
+    size_surcharge = max(0, int(payload.file_size_mb // 25))
+    total = max(1, payload.pages * per_page * payload.file_count + size_surcharge)
+    return {"estimated_credits": total, "breakdown": {"pages": payload.pages, "files": payload.file_count, "per_page": per_page, "size_surcharge": size_surcharge}, "currency": "DA Credits"}
+
+
+@app.get("/api/wallet")
+def wallet(customer_email: str = Query(...)) -> dict:
+    email = customer_email.strip().lower()
+    with get_db() as db:
+        row = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        if row is None:
+            now = utc_now()
+            db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,updated_at) VALUES (?,500,'free',?)", (email, now))
+            db.commit()
+            row = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        ledger = [dict(x) for x in db.execute("SELECT * FROM credit_ledger WHERE customer_email=? ORDER BY id DESC LIMIT 50", (email,)).fetchall()]
+    data = dict(row)
+    data["total_credits"] = data["subscription_credits"] + data["purchased_credits"] + data["bonus_credits"]
+    data["ledger"] = ledger
+    return data
+
+
+@app.post("/api/plans/free-activate")
+def activate_free_plan(payload: FreePlanActivate) -> dict:
+    email = payload.customer_email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid customer email is required.")
+    now = utc_now()
+    def operation(db):
+        row = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        if row is None:
+            db.execute("INSERT INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,500,'free','active',?)", (email, now))
+            db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,'credit','subscription',500,500,'free-plan','Free plan activated',now))
+        else:
+            db.execute("UPDATE customer_wallets SET plan_id='free', plan_status='active', updated_at=? WHERE customer_email=?", (now,email))
+        wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        return dict(wallet)
+    wallet = run_db_write(operation)
+    wallet["total_credits"] = wallet["subscription_credits"] + wallet["purchased_credits"] + wallet["bonus_credits"]
+    return {"success": True, "message": "Free plan activated.", "wallet": wallet}
+
+
+@app.post("/api/sales/contact")
+def create_sales_lead(payload: SalesLeadCreate) -> dict:
+    email = payload.customer_email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid customer email is required.")
+    if not payload.customer_name.strip():
+        raise HTTPException(status_code=400, detail="Customer name is required.")
+    now = utc_now()
+    with get_db() as db:
+        cursor = db.execute("INSERT INTO sales_leads (customer_name,customer_email,company,phone,requirements,locale,status,created_at) VALUES (?,?,?,?,?,?, 'new',?)", (payload.customer_name.strip(),email,payload.company.strip(),payload.phone.strip(),payload.requirements.strip(),payload.locale.strip() or 'zh',now))
+        db.commit()
+        lead_id = cursor.lastrowid
+    return {"success": True, "lead_id": lead_id, "message": "Sales request received."}
+
+
+@app.post("/api/payments/checkout")
+def create_checkout(payload: CheckoutCreate, request: Request) -> dict:
+    plan = PAYMENT_PLANS.get(payload.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=400, detail="Invalid payment plan.")
+    if "@" not in payload.customer_email:
+        raise HTTPException(status_code=400, detail="A valid customer email is required.")
+    payment_number = "PAY-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + secrets.token_hex(4).upper()
+    base_url = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+    provider = payment_provider()
+    if plan.get("kind") == "contact":
+        raise HTTPException(status_code=400, detail="Enterprise plans require a sales consultation.")
+    if plan.get("amount_cents", 0) <= 0:
+        raise HTTPException(status_code=400, detail="The Free plan does not require checkout.")
+    if provider not in {"stripe", "paypal"} and not PAYMENT_TEST_MODE:
+        raise HTTPException(status_code=503, detail="Real payment is not configured yet. Add PayPal or Stripe credentials in the server environment.")
+    session_id = ""
+    if provider == "paypal":
+        try:
+            token = paypal_access_token()
+            return_url = PAYMENT_SUCCESS_URL or f"{base_url}/?payment=paypal-return&payment_number={urllib.parse.quote(payment_number)}&email={urllib.parse.quote(payload.customer_email.strip().lower())}"
+            cancel_url = PAYMENT_CANCEL_URL or f"{base_url}/?payment=cancelled"
+            paypal_order = paypal_request(
+                "/v2/checkout/orders",
+                "POST",
+                {
+                    "intent": "CAPTURE",
+                    "purchase_units": [{
+                        "reference_id": payment_number,
+                        "custom_id": payment_number,
+                        "description": f"Document Automation AI {plan['name']} · {plan['credits']:,} DA Credits",
+                        "amount": {"currency_code": plan["currency"].upper(), "value": f"{plan['amount_cents'] / 100:.2f}"},
+                    }],
+                    "payment_source": {"paypal": {"experience_context": {"brand_name": "Document Automation AI", "user_action": "PAY_NOW", "return_url": return_url, "cancel_url": cancel_url}}},
+                },
+                token,
+            )
+            session_id = paypal_order.get("id", "")
+            checkout_url = next((link.get("href", "") for link in paypal_order.get("links", []) if link.get("rel") == "payer-action"), "")
+            if not session_id or not checkout_url:
+                raise RuntimeError("PayPal did not return an approval URL.")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"PayPal checkout creation failed: {exc}")
+    elif provider == "stripe":
+        try:
+            import stripe
+            stripe.api_key = STRIPE_SECRET_KEY
+            success_url = PAYMENT_SUCCESS_URL or f"{base_url}/?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
+            cancel_url = PAYMENT_CANCEL_URL or f"{base_url}/?payment=cancelled"
+            price_data = {"currency": plan["currency"], "unit_amount": plan["amount_cents"], "product_data": {"name": f"Document Automation AI {plan['name']}", "description": f"{plan['credits']:,} DA Credits"}}
+            mode = "payment"
+            if plan.get("kind") == "subscription":
+                mode = "subscription"
+                price_data["recurring"] = {"interval": "year" if plan.get("billing") == "yearly" else "month"}
+            session = stripe.checkout.Session.create(
+                mode=mode, customer_email=payload.customer_email.strip().lower(), client_reference_id=payment_number,
+                metadata={"payment_number": payment_number, "plan_id": payload.plan_id, "credits": str(plan["credits"])},
+                subscription_data={"metadata": {"payment_number": payment_number, "plan_id": payload.plan_id}} if mode == "subscription" else None,
+                line_items=[{"price_data": price_data, "quantity": 1}], success_url=success_url, cancel_url=cancel_url,
+            )
+            session_id = session.id
+            checkout_url = session.url
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Stripe checkout creation failed: {exc}")
+    else:
+        checkout_url = f"{base_url}/?payment=demo&payment_number={payment_number}&email={payload.customer_email.strip().lower()}"
+    now = utc_now()
+    with get_db() as db:
+        db.execute("INSERT INTO payment_orders (payment_number,plan_id,plan_name,customer_name,customer_email,amount_cents,currency,credits,provider,provider_session_id,checkout_url,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (payment_number,payload.plan_id,plan["name"],payload.customer_name.strip(),payload.customer_email.strip().lower(),plan["amount_cents"],plan["currency"].upper(),plan["credits"],provider,session_id,checkout_url,"pending",now,now))
+        db.commit()
+    return {"payment_number": payment_number, "checkout_url": checkout_url, "provider": provider, "test_mode": PAYMENT_TEST_MODE}
+
+
+@app.post("/api/payments/demo-confirm")
+def confirm_demo_payment(payload: DemoPaymentConfirm) -> dict:
+    if payment_provider() != "demo" or not PAYMENT_TEST_MODE:
+        raise HTTPException(status_code=403, detail="Demo payment confirmation is disabled.")
+    with get_db() as db:
+        row = db.execute("SELECT customer_email FROM payment_orders WHERE payment_number=?", (payload.payment_number,)).fetchone()
+    if row is None or row["customer_email"].lower() != payload.customer_email.strip().lower():
+        raise HTTPException(status_code=404, detail="Payment order was not found.")
+    mark_payment_paid(payload.payment_number, provider_payment_id="demo_" + secrets.token_hex(6))
+    return {"success": True, "payment_number": payload.payment_number, "status": "paid"}
+
+
+@app.get("/api/payments/status")
+def payment_status(payment_number: str = Query(...), email: str = Query(...)) -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT payment_number,plan_id,plan_name,customer_email,amount_cents,currency,credits,provider,status,created_at,paid_at FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)", (payment_number.strip(),email.strip())).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Payment order was not found.")
+    return dict(row)
+
+
+@app.post("/api/payments/paypal/capture")
+def capture_paypal_payment(payment_number: str = Query(...), order_id: str = Query(...), email: str = Query(...)) -> dict:
+    if payment_provider() != "paypal":
+        raise HTTPException(status_code=503, detail="PayPal is not configured.")
+    with get_db() as db:
+        row = db.execute("SELECT * FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)", (payment_number.strip(), email.strip())).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Payment order was not found.")
+    if row["status"] == "paid":
+        return {"success": True, "status": "paid", "payment_number": payment_number}
+    if row["provider"] != "paypal" or row["provider_session_id"] != order_id:
+        raise HTTPException(status_code=400, detail="PayPal order does not match this payment.")
+    try:
+        token = paypal_access_token()
+        result = paypal_request(f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture", "POST", {}, token)
+        status = result.get("status", "")
+        capture = (((result.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
+        capture_id = capture.get("id", "")
+        capture_status = capture.get("status", "")
+        if status != "COMPLETED" and capture_status != "COMPLETED":
+            raise RuntimeError(f"PayPal capture is not complete: {status or capture_status}")
+        mark_payment_paid(payment_number, order_id, capture_id)
+        return {"success": True, "status": "paid", "payment_number": payment_number, "provider_payment_id": capture_id}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"PayPal capture failed: {exc}")
+
+
+@app.post("/api/payments/paypal/webhook")
+async def paypal_webhook(request: Request):
+    if payment_provider() != "paypal" or not PAYPAL_WEBHOOK_ID:
+        raise HTTPException(status_code=503, detail="PayPal webhook is not configured.")
+    event = await request.json()
+    try:
+        token = paypal_access_token()
+        verification = paypal_request("/v1/notifications/verify-webhook-signature", "POST", {
+            "auth_algo": request.headers.get("paypal-auth-algo", ""),
+            "cert_url": request.headers.get("paypal-cert-url", ""),
+            "transmission_id": request.headers.get("paypal-transmission-id", ""),
+            "transmission_sig": request.headers.get("paypal-transmission-sig", ""),
+            "transmission_time": request.headers.get("paypal-transmission-time", ""),
+            "webhook_id": PAYPAL_WEBHOOK_ID,
+            "webhook_event": event,
+        }, token)
+        if verification.get("verification_status") != "SUCCESS":
+            raise HTTPException(status_code=400, detail="Invalid PayPal webhook signature.")
+        if event.get("event_type") == "PAYMENT.CAPTURE.COMPLETED":
+            resource = event.get("resource") or {}
+            order_id = ((resource.get("supplementary_data") or {}).get("related_ids") or {}).get("order_id", "")
+            with get_db() as db:
+                row = db.execute("SELECT payment_number FROM payment_orders WHERE provider='paypal' AND provider_session_id=?", (order_id,)).fetchone()
+            if row:
+                mark_payment_paid(row["payment_number"], order_id, resource.get("id", ""))
+        return {"received": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PayPal webhook processing failed: {exc}")
+
+
+@app.post("/api/payments/stripe/webhook")
+async def stripe_webhook(request: Request):
+    if not STRIPE_SECRET_KEY or not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Stripe webhook is not configured.")
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    try:
+        import stripe
+        event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}")
+    event_type = event.get("type", "")
+    obj = event.get("data", {}).get("object", {})
+    if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"} and obj.get("payment_status") == "paid":
+        payment_number = (obj.get("metadata") or {}).get("payment_number") or obj.get("client_reference_id")
+        if payment_number:
+            mark_payment_paid(payment_number, obj.get("id", ""), obj.get("payment_intent", "") or "")
+    return {"received": True}
+
+
+@app.post("/api/admin/wallet-adjustment", dependencies=[Depends(require_admin)])
+def admin_wallet_adjustment(payload: WalletAdjustment) -> dict:
+    email = payload.customer_email.strip().lower()
+    def operation(db):
+        now = utc_now()
+        db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
+        db.execute("UPDATE customer_wallets SET bonus_credits=MAX(0,bonus_credits+?),updated_at=? WHERE customer_email=?", (payload.credits,now,email))
+        row=db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?",(email,)).fetchone()
+        db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)",(email,"adjustment","bonus",payload.credits,row["total"],"ADMIN",payload.note,now))
+        return row["total"]
+    return {"success":True,"customer_email":email,"total_credits":run_db_write(operation)}
+
+
+@app.get("/api/admin/commercial-summary", dependencies=[Depends(require_admin)])
+def commercial_summary() -> dict:
+    with get_db() as db:
+        paid=db.execute("SELECT COUNT(*) count,COALESCE(SUM(amount_cents),0) revenue FROM payment_orders WHERE status='paid'").fetchone()
+        pending=db.execute("SELECT COUNT(*) count FROM payment_orders WHERE status='pending'").fetchone()
+        wallets=db.execute("SELECT COUNT(*) count,COALESCE(SUM(subscription_credits+purchased_credits+bonus_credits),0) credits FROM customer_wallets").fetchone()
+        plans=[dict(x) for x in db.execute("SELECT plan_id,COUNT(*) customers FROM customer_wallets GROUP BY plan_id ORDER BY customers DESC").fetchall()]
+    return {"paid_orders":paid["count"],"revenue_cents":paid["revenue"],"pending_orders":pending["count"],"wallets":wallets["count"],"outstanding_credits":wallets["credits"],"plan_distribution":plans}
+
+
+@app.get("/api/admin/payments", dependencies=[Depends(require_admin)])
+def admin_payments(limit: int = Query(default=100, ge=1, le=500)) -> dict:
+    with get_db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM payment_orders ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+    return {"payments": rows, "provider": payment_provider(), "test_mode": PAYMENT_TEST_MODE}
+
+
 @app.get("/api/admin/enterprise-overview", dependencies=[Depends(require_admin)])
 def enterprise_overview() -> dict:
     with get_db() as db:
@@ -1096,7 +1710,7 @@ def enterprise_overview() -> dict:
     return {
         "workspace": dict(workspace), "team": team, "api_keys": keys,
         "usage": {"credits_used": used, "credits_limit": limit, "orders": totals["total"], "completed": totals["completed"], "storage_bytes": file_bytes + output_bytes, "processing_jobs": jobs},
-        "billing": {"plan": workspace["plan"], "status": "active", "payment_provider": "not_connected", "next_invoice": None},
+        "billing": {"plan": workspace["plan"], "status": "active", "payment_provider": payment_provider(), "test_mode": PAYMENT_TEST_MODE, "next_invoice": None},
     }
 
 

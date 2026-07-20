@@ -7,13 +7,13 @@ set "LOGDIR=%ROOT%logs"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 cd /d "%FRONTEND%"
-title Document Automation AI Frontend
-if not exist "%FRONTEND%\node_modules\vite\bin\vite.js" (
+title Document Automation AI V23.0 Enterprise Frontend
+if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (
   echo Frontend runtime is missing. Starting automatic repair...
   call "%ROOT%Setup_Once.bat" --automatic
   if errorlevel 1 exit /b 1
 )
-if not exist "%FRONTEND%\node_modules\vite\bin\vite.js" (
+if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (
   echo [ERROR] Frontend dependencies could not be installed. Check logs\setup.log.
   pause
   exit /b 1

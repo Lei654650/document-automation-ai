@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import tempfile
 import urllib.error
 import urllib.request
 import sqlite3
@@ -15,8 +16,11 @@ from threading import Lock
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
-if _data_root:
+if IS_VERCEL:
+    PERSISTENT_ROOT = (Path(tempfile.gettempdir()) / "document-automation-ai").resolve()
+elif _data_root:
     PERSISTENT_ROOT = Path(_data_root).expanduser().resolve()
 elif os.name == "nt" and os.getenv("LOCALAPPDATA"):
     PERSISTENT_ROOT = (Path(os.environ["LOCALAPPDATA"]) / "DocumentAutomationAI").resolve()

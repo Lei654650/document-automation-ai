@@ -15,7 +15,7 @@ if not exist "%RUNTIME%" mkdir "%RUNTIME%"
 >"%LOG%" echo ===== Document Automation AI setup started %date% %time% =====
 
 echo ============================================================
-echo Document Automation AI V20.0.1 - Automatic Setup
+echo Document Automation AI V23.0 Enterprise - Automatic Setup
 echo ============================================================
 echo This setup is launched automatically whenever required runtime files are missing.
 echo.
@@ -118,6 +118,8 @@ if errorlevel 1 (
 
 echo [3/4] Installing frontend dependencies...
 cd /d "%FRONTEND%"
+rem A ZIP may contain node_modules created on Linux. Remove it so npm installs Windows launchers and native packages.
+if exist node_modules rmdir /s /q node_modules >>"%LOG%" 2>&1
 if exist package-lock.json (
   call "%NPM_RUN%" ci --no-audit --no-fund >>"%LOG%" 2>&1
 ) else (
