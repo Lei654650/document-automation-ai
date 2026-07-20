@@ -7,7 +7,7 @@ import {
 import './App.css'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
-const VERSION = '24.0.0'
+const VERSION = '25.0.0'
 
 const I18N = {
   zh: {
@@ -20,7 +20,7 @@ const I18N = {
     pricingTitle:'商业套餐即将开放', pricingDesc:'当前版本用于产品验收。套餐、额度和支付将在商业化版本中接通。',
     ctaTitle:'把重复文档工作交给 AI', ctaDesc:'从一个文件开始体验，再逐步接入整个企业工作流。', freeStart:'免费开始',
     backHome:'返回首页', center:'智能文档处理中心', centerDesc:'上传文件并选择目标，系统会自动创建处理订单。',
-    drop:'拖拽文件到这里，或点击选择', support:'支持 PDF、Word、Excel、PPT、CSV、图片和 ZIP，单文件最大 100MB', clear:'清空',
+    drop:'拖拽文件到这里，或点击选择', support:'支持 PDF、Word、Excel、PPT、CSV、图片和 ZIP，单文件最大 100MB（大文件自动分片上传）', clear:'清空',
     settings:'处理设置', selected:'已选择', capabilities:'项处理能力', targetLang:'目标语言（可多选）', outputFormat:'输出格式（可多选）',
     name:'姓名', email:'邮箱', company:'公司', optional:'可选', requirements:'处理要求', create:'创建处理订单', creating:'正在上传文件，请稍候…', secure:'文件采用独立订单空间保存',
     fileRequired:'请先选择至少一个文件。', languageRequired:'请选择至少一种目标语言。', formatRequired:'请选择至少一种输出格式。', contactRequired:'请填写姓名和邮箱。', submitFailed:'订单提交失败',
@@ -41,7 +41,7 @@ const I18N = {
     pricingTitle:'Commercial plans coming soon', pricingDesc:'This release is for product acceptance. Plans, quotas and payments will be connected in the commercial release.',
     ctaTitle:'Give repetitive document work to AI', ctaDesc:'Start with one file, then connect the full enterprise workflow.', freeStart:'Start free',
     backHome:'Back home', center:'Intelligent Document Processing Center', centerDesc:'Upload files and choose your goals. The system will create a processing order.',
-    drop:'Drop files here, or click to select', support:'PDF, Word, Excel, PPT, CSV, images and ZIP. Maximum 100 MB per file.', clear:'Clear',
+    drop:'Drop files here, or click to select', support:'PDF, Word, Excel, PPT, CSV, images and ZIP. Maximum 100 MB per file; large files upload in resumable chunks.', clear:'Clear',
     settings:'Processing settings', selected:'Selected', capabilities:'capabilities', targetLang:'Target languages (multiple)', outputFormat:'Output formats (multiple)',
     name:'Name', email:'Email', company:'Company', optional:'Optional', requirements:'Requirements', create:'Create processing order', creating:'Uploading and creating order…', secure:'Files are stored in an isolated order workspace',
     fileRequired:'Select at least one file.', languageRequired:'Select at least one target language.', formatRequired:'Select at least one output format.', contactRequired:'Enter your name and email.', submitFailed:'Order submission failed',
@@ -62,7 +62,7 @@ const I18N = {
     pricingTitle:'Gói thương mại sắp ra mắt', pricingDesc:'Phiên bản này dùng để nghiệm thu sản phẩm. Gói, hạn mức và thanh toán sẽ được kết nối ở bản thương mại.',
     ctaTitle:'Giao công việc tài liệu lặp lại cho AI', ctaDesc:'Bắt đầu với một tệp rồi kết nối toàn bộ quy trình doanh nghiệp.', freeStart:'Bắt đầu miễn phí',
     backHome:'Về trang chủ', center:'Trung tâm xử lý tài liệu thông minh', centerDesc:'Tải tệp lên và chọn mục tiêu. Hệ thống sẽ tự tạo đơn xử lý.',
-    drop:'Kéo tệp vào đây hoặc nhấp để chọn', support:'Hỗ trợ PDF, Word, Excel, PPT, CSV, hình ảnh và ZIP; tối đa 100 MB mỗi tệp.', clear:'Xóa hết',
+    drop:'Kéo tệp vào đây hoặc nhấp để chọn', support:'Hỗ trợ PDF, Word, Excel, PPT, CSV, hình ảnh và ZIP; tối đa 100 MB mỗi tệp; tệp lớn được tải lên theo từng phần.', clear:'Xóa hết',
     settings:'Cài đặt xử lý', selected:'Đã chọn', capabilities:'năng lực', targetLang:'Ngôn ngữ đích (chọn nhiều)', outputFormat:'Định dạng đầu ra (chọn nhiều)',
     name:'Họ tên', email:'Email', company:'Công ty', optional:'Không bắt buộc', requirements:'Yêu cầu xử lý', create:'Tạo đơn xử lý', creating:'Đang tải lên và tạo đơn…', secure:'Tệp được lưu trong không gian riêng của từng đơn',
     fileRequired:'Vui lòng chọn ít nhất một tệp.', languageRequired:'Vui lòng chọn ít nhất một ngôn ngữ đích.', formatRequired:'Vui lòng chọn ít nhất một định dạng đầu ra.', contactRequired:'Vui lòng nhập họ tên và email.', submitFailed:'Gửi đơn thất bại',
@@ -133,11 +133,23 @@ function App(){
     if(services.includes('translation')&&!translationTargets.length)return setError(t.languageRequired)
     if(services.includes('conversion')&&!outputFormats.length)return setError(t.formatRequired)
     if(!form.name.trim()||!form.email.trim())return setError(t.contactRequired)
-    const data=new FormData();files.forEach(f=>data.append('files',f));Object.entries(form).forEach(([k,v])=>data.append(k,v))
-    const resolvedFormats=services.includes('conversion')?outputFormats:['original'];data.append('services',JSON.stringify(services.length?services:['standard']));data.append('translation_json',JSON.stringify({source_language:'auto',target_language:translationTargets[0]||'en',targets:translationTargets}));data.append('conversion_json',JSON.stringify({formats:resolvedFormats,options:outputOptions}))
+    const resolvedFormats=services.includes('conversion')?outputFormats:['original'];const translation={source_language:'auto',target_language:translationTargets[0]||'en',targets:translationTargets};const conversion={formats:resolvedFormats,options:outputOptions}
     setSubmitting(true)
     const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),900000)
-    try{const r=await fetch(`${API_BASE}/api/orders`,{method:'POST',body:data,signal:controller.signal});const raw=await r.text();let j={};try{j=raw?JSON.parse(raw):{}}catch{j={detail:raw}}if(!r.ok)throw new Error(j.detail||t.submitFailed);setOrderStatus({...j,email:form.email,services:(services.length?services:['standard']),translation_targets:translationTargets,output_formats:(services.includes('conversion')?outputFormats:['original'])});setPage('status')}
+    try{
+      let r
+      if(files.some(f=>f.size>3*1024*1024)||totalSize>3*1024*1024){
+        const uploadIds=[];const chunkSize=2*1024*1024
+        for(const file of files){
+          let init=await fetch(`${API_BASE}/api/uploads/init`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,size_bytes:file.size,content_type:file.type||'application/octet-stream'}),signal:controller.signal});let meta=await init.json();if(!init.ok)throw new Error(meta.detail||t.submitFailed)
+          for(let offset=0,index=0;offset<file.size;offset+=chunkSize,index++){const part=file.slice(offset,Math.min(file.size,offset+chunkSize));const cr=await fetch(`${API_BASE}/api/uploads/${meta.upload_id}/chunks/${index}`,{method:'PUT',headers:{'Content-Type':'application/octet-stream'},body:part,signal:controller.signal});const cj=await cr.json();if(!cr.ok)throw new Error(cj.detail||t.submitFailed)}
+          const done=await fetch(`${API_BASE}/api/uploads/${meta.upload_id}/complete`,{method:'POST',signal:controller.signal});const dj=await done.json();if(!done.ok)throw new Error(dj.detail||t.submitFailed);uploadIds.push(meta.upload_id)
+        }
+        r=await fetch(`${API_BASE}/api/orders/from-uploads`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_ids:uploadIds,...form,services:services.length?services:['standard'],translation,conversion}),signal:controller.signal})
+      }else{
+        const data=new FormData();files.forEach(f=>data.append('files',f));Object.entries(form).forEach(([k,v])=>data.append(k,v));data.append('services',JSON.stringify(services.length?services:['standard']));data.append('translation_json',JSON.stringify(translation));data.append('conversion_json',JSON.stringify(conversion));r=await fetch(`${API_BASE}/api/orders`,{method:'POST',body:data,signal:controller.signal})
+      }
+      const raw=await r.text();let j={};try{j=raw?JSON.parse(raw):{}}catch{j={detail:raw}}if(!r.ok)throw new Error(j.detail||t.submitFailed);setOrderStatus({...j,email:form.email,services:(services.length?services:['standard']),translation_targets:translationTargets,output_formats:(services.includes('conversion')?outputFormats:['original'])});setPage('status')}
     catch(err){setError(err.name==='AbortError'?(document.documentElement.lang.startsWith('zh')?'云端处理超过15分钟未完成，请检查文件规模、AI 配置或后端日志后重试。':'Cloud processing timed out after 15 minutes. Check file size, AI settings, or backend logs and retry.'):(err.message||t.submitFailed))}finally{clearTimeout(timeout);setSubmitting(false)}
   }
   return <div className="app-shell">

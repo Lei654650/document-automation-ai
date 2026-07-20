@@ -42,7 +42,7 @@ from app.engines.translation_engine import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
-APP_VERSION = "24.0.0"
+APP_VERSION = "25.0.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -76,7 +76,7 @@ PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "").strip()
 PAYMENT_CANCEL_URL = os.getenv("PAYMENT_CANCEL_URL", "").strip()
 PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "false").lower() in {"1", "true", "yes", "on"}
-JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "1800")))
+JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "300")))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -160,6 +160,26 @@ class WalletAdjustment(BaseModel):
     customer_email: str
     credits: int
     note: str = "Administrator adjustment"
+
+
+class UploadInitRequest(BaseModel):
+    filename: str
+    size_bytes: int = Field(ge=1)
+    content_type: str = "application/octet-stream"
+
+
+class ChunkedOrderCreate(BaseModel):
+    upload_ids: list[str]
+    name: str
+    email: str
+    services: list[str] = []
+    company: str = ""
+    whatsapp: str = ""
+    country: str = ""
+    deadline: str = ""
+    requirements: str = ""
+    translation: dict = {}
+    conversion: dict = {}
 
 
 PAYMENT_PLANS = {
@@ -582,6 +602,8 @@ def public_config() -> dict:
         "cloud_mode": CLOUD_MODE,
         "public_base_url": PUBLIC_BASE_URL,
         "max_file_size_mb": MAX_FILE_SIZE_MB,
+        "chunk_upload": True,
+        "recommended_chunk_size_bytes": 2 * 1024 * 1024,
     }
 
 
@@ -811,6 +833,132 @@ def _settle_or_refund_credits(db: sqlite3.Connection, order_id: int, final_state
     balance = _wallet_total(db,email)
     db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,"refund","purchased",credits,balance,str(order_id),"Automatic refund after unsuccessful processing",now))
     db.execute("UPDATE credit_reservations SET status='refunded',updated_at=? WHERE order_id=?", (now,order_id))
+
+
+UPLOAD_SESSION_DIR = UPLOAD_DIR / "_sessions"
+UPLOAD_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+CHUNK_SIZE_LIMIT = 3 * 1024 * 1024
+
+
+def _session_meta_path(upload_id: str) -> Path:
+    return UPLOAD_SESSION_DIR / upload_id / "meta.json"
+
+
+def _read_upload_meta(upload_id: str) -> dict:
+    if not upload_id or any(ch not in "0123456789abcdef" for ch in upload_id.lower()):
+        raise HTTPException(status_code=400, detail="Invalid upload session.")
+    path = _session_meta_path(upload_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Upload session expired or was not found. Please upload the file again.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.post("/api/uploads/init")
+def init_chunk_upload(payload: UploadInitRequest) -> dict:
+    filename = Path(payload.filename).name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or 'unknown'}")
+    if payload.size_bytes > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"{filename} exceeds {MAX_FILE_SIZE_MB} MB.")
+    upload_id = uuid.uuid4().hex
+    folder = UPLOAD_SESSION_DIR / upload_id
+    folder.mkdir(parents=True, exist_ok=False)
+    meta = {"upload_id": upload_id, "filename": filename, "size_bytes": payload.size_bytes, "content_type": payload.content_type, "received_bytes": 0, "next_index": 0, "created_at": utc_now(), "complete": False}
+    _session_meta_path(upload_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    return {"upload_id": upload_id, "chunk_size": 2 * 1024 * 1024}
+
+
+@app.put("/api/uploads/{upload_id}/chunks/{chunk_index}")
+async def upload_chunk(upload_id: str, chunk_index: int, request: Request) -> dict:
+    meta = _read_upload_meta(upload_id)
+    if meta.get("complete"):
+        return {"success": True, "received_bytes": meta["received_bytes"], "complete": True}
+    if chunk_index != int(meta.get("next_index", 0)):
+        raise HTTPException(status_code=409, detail=f"Expected chunk {meta.get('next_index', 0)}, received {chunk_index}.")
+    body = await request.body()
+    if not body or len(body) > CHUNK_SIZE_LIMIT:
+        raise HTTPException(status_code=413, detail="Chunk must be between 1 byte and 3 MB.")
+    new_total = int(meta.get("received_bytes", 0)) + len(body)
+    if new_total > int(meta["size_bytes"]) or new_total > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="Uploaded data exceeds the declared file size.")
+    folder = UPLOAD_SESSION_DIR / upload_id
+    with (folder / "payload.bin").open("ab") as out:
+        out.write(body)
+    meta["received_bytes"] = new_total
+    meta["next_index"] = chunk_index + 1
+    _session_meta_path(upload_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    return {"success": True, "received_bytes": new_total, "size_bytes": meta["size_bytes"]}
+
+
+@app.post("/api/uploads/{upload_id}/complete")
+def complete_chunk_upload(upload_id: str) -> dict:
+    meta = _read_upload_meta(upload_id)
+    if int(meta.get("received_bytes", 0)) != int(meta["size_bytes"]):
+        raise HTTPException(status_code=409, detail=f"Upload incomplete: {meta.get('received_bytes', 0)} of {meta['size_bytes']} bytes received.")
+    payload = UPLOAD_SESSION_DIR / upload_id / "payload.bin"
+    if not payload.exists() or payload.stat().st_size != int(meta["size_bytes"]):
+        raise HTTPException(status_code=409, detail="Uploaded file could not be verified.")
+    meta["complete"] = True
+    meta["completed_at"] = utc_now()
+    _session_meta_path(upload_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    return {"success": True, "upload_id": upload_id, "filename": meta["filename"], "size_bytes": meta["size_bytes"]}
+
+
+def _create_order_from_paths(payload: ChunkedOrderCreate) -> dict:
+    if not payload.name.strip() or not payload.email.strip():
+        raise HTTPException(status_code=400, detail="Name and email are required.")
+    if not payload.upload_ids:
+        raise HTTPException(status_code=400, detail="At least one uploaded file is required.")
+    selected_services = payload.services or ["standard"]
+    order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    created_at = utc_now()
+    order_folder = UPLOAD_DIR / order_number
+    order_folder.mkdir(parents=True, exist_ok=True)
+    prepared_rows = []
+    analysis_paths = []
+    consumed_sessions = []
+    try:
+        for upload_id in payload.upload_ids:
+            meta = _read_upload_meta(upload_id)
+            if not meta.get("complete"):
+                raise HTTPException(status_code=409, detail=f"{meta.get('filename','File')} upload is incomplete.")
+            source = UPLOAD_SESSION_DIR / upload_id / "payload.bin"
+            suffix = Path(meta["filename"]).suffix.lower()
+            stored_path = order_folder / f"{uuid.uuid4().hex}{suffix}"
+            shutil.move(str(source), stored_path)
+            upload_rows = [(meta["filename"], str(stored_path), int(meta["size_bytes"]), meta.get("content_type", ""))]
+            if suffix == ".zip":
+                expanded = _safe_extract_zip(stored_path, order_folder / f"{Path(meta['filename']).stem}_expanded")
+                if not expanded:
+                    raise HTTPException(status_code=400, detail=f"{meta['filename']} contains no supported documents.")
+                upload_rows = [(n, p, z, mimetypes.guess_type(n)[0] or "") for n,p,z in expanded]
+            prepared_rows.extend(upload_rows)
+            analysis_paths.extend((n,p) for n,p,_,_ in upload_rows)
+            consumed_sessions.append(upload_id)
+        ai_analysis = analyze_order_files(analysis_paths, selected_services, payload.requirements.strip(), payload.translation)
+        suggested_quote = suggest_quote(ai_analysis, selected_services)
+        estimated_credits = _estimate_order_credits(ai_analysis, selected_services, len(prepared_rows), sum(r[2] for r in prepared_rows))
+        def insert_order(db):
+            cur=db.execute("""INSERT INTO orders (order_number,name,company,email,whatsapp,country,deadline,requirements,services_json,translation_json,conversion_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'waiting_quote',?,?)""",(order_number,payload.name.strip(),payload.company.strip(),payload.email.strip(),payload.whatsapp.strip(),payload.country.strip(),payload.deadline.strip(),payload.requirements.strip(),json.dumps(selected_services,ensure_ascii=False),json.dumps(payload.translation,ensure_ascii=False),json.dumps(payload.conversion,ensure_ascii=False),created_at,created_at))
+            order_id=cur.lastrowid; saved=[]
+            for n,p,z,ct in prepared_rows:
+                fc=db.execute("INSERT INTO order_files (order_id,original_name,stored_name,stored_path,content_type,size_bytes,created_at) VALUES (?,?,?,?,?,?,?)",(order_id,n,Path(p).name,p,ct,z,created_at));saved.append({"id":fc.lastrowid,"original_name":n,"size_bytes":z})
+            db.execute("UPDATE orders SET ai_analysis_json=?,suggested_quote_json=? WHERE id=?",(json.dumps({**ai_analysis,"estimated_credits":estimated_credits},ensure_ascii=False),json.dumps(suggested_quote,ensure_ascii=False),order_id))
+            if ENFORCE_CREDITS:_reserve_credits(db,order_id,payload.email.strip().lower(),estimated_credits)
+            return order_id,saved
+        order_id,saved_files=run_db_write(insert_order)
+        for upload_id in consumed_sessions: shutil.rmtree(UPLOAD_SESSION_DIR/upload_id,ignore_errors=True)
+        processing=start_processing(order_id)
+        return {"success":True,"order_id":order_id,"order_number":order_number,"status":"processing","files":saved_files,"ai_analysis":ai_analysis,"suggested_quote":suggested_quote,"estimated_credits":estimated_credits,"credits_enforced":ENFORCE_CREDITS,"services":selected_services,"translation":payload.translation,"conversion":payload.conversion,"processing_job":processing}
+    except Exception:
+        shutil.rmtree(order_folder,ignore_errors=True)
+        raise
+
+
+@app.post("/api/orders/from-uploads")
+def create_order_from_uploads(payload: ChunkedOrderCreate) -> dict:
+    return _create_order_from_paths(payload)
 
 
 @app.post("/api/orders")
@@ -1243,6 +1391,22 @@ def start_processing(order_id: int) -> dict:
     )
     thread.start()
     return {"success": True, "job_id": job_id, "state": "queued", "progress": 0}
+
+
+@app.post("/api/orders/{order_id}/recover")
+def recover_stalled_order(order_id: int) -> dict:
+    with get_db() as db:
+        row=db.execute("SELECT id,state,progress,updated_at FROM processing_jobs WHERE order_id=? ORDER BY id DESC LIMIT 1",(order_id,)).fetchone()
+        if row is None: raise HTTPException(status_code=404,detail="Processing job not found.")
+        if row["state"] not in {"queued","processing"}: return {"success":True,"state":row["state"],"already_terminal":True}
+        try: age=(datetime.now(timezone.utc)-datetime.fromisoformat(row["updated_at"])).total_seconds()
+        except Exception: age=JOB_STALE_SECONDS+1
+        if age < JOB_STALE_SECONDS: return {"success":True,"state":row["state"],"progress":row["progress"],"stale":False}
+        now=utc_now();msg="Processing stopped responding and was safely closed. Retry the order; source files are preserved."
+        db.execute("UPDATE processing_jobs SET state='failed',progress=100,current_step='stalled',blockers_json=?,updated_at=? WHERE id=?",(json.dumps([msg]),now,row["id"]))
+        db.execute("UPDATE orders SET status='failed',updated_at=? WHERE id=?",(now,order_id))
+        db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?,'error','stalled',?,?)",(row["id"],msg,now));db.commit()
+    return {"success":True,"state":"failed","stale":True,"message":msg}
 
 
 @app.get("/api/orders/{order_id}/jobs", dependencies=[Depends(require_admin)])
