@@ -304,6 +304,19 @@ def _memory_get_many(source: str, target: str, texts: list[str]) -> dict[str, st
     return result
 
 
+
+
+def _memory_delete_many(source: str, target: str, texts: list[str]) -> None:
+    """Delete poisoned or invalid persistent translations for the given texts."""
+    if not texts:
+        return
+    keys=[_memory_key(source,target,text) for text in dict.fromkeys(texts)]
+    with _CACHE_LOCK, _memory_connect() as db:
+        for start in range(0,len(keys),500):
+            chunk=keys[start:start+500]
+            marks=",".join("?" for _ in chunk)
+            db.execute(f"DELETE FROM translation_memory WHERE cache_key IN ({marks})", chunk)
+
 def _memory_put_many(source: str, target: str, rows: dict[str, str], provider: str, model: str) -> None:
     if not rows:
         return
@@ -358,6 +371,19 @@ class TranslationClient:
         invalid = {"\ufffd", "\u25a1", "\u25a0"}
         if any(ch in translated for ch in invalid):
             raise RuntimeError("The AI provider returned invalid replacement glyphs. Translation was rejected.")
+
+
+    def invalidate(self, texts: list[str]) -> None:
+        """Remove cached translations so retries must contact the provider again.
+
+        This is used when an earlier run cached the untranslated Chinese source
+        under a target-only language key. Without invalidation every retry would
+        keep returning the same poisoned cache entry.
+        """
+        unique=list(dict.fromkeys(str(text) for text in texts if str(text).strip()))
+        for text in unique:
+            self.cache.pop(text, None)
+        _memory_delete_many(self.source_language_code, self.target_language_code, unique)
 
     def translate_many(self, texts: list[str]) -> list[str]:
         """Translate unique text with persistent memory and bounded parallel API batches."""

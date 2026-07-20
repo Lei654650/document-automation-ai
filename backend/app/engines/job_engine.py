@@ -634,16 +634,91 @@ def _translate_reconstructed_xlsx(source: Path, destination: Path, client: Trans
         mapping={}; pending=[]
         for src in sources:
             fixed=_glossary_vi(src) if target_code=='zh-vi' else ''
-            if fixed and not _CJK_RE.search(fixed): mapping[src]=fixed
-            else: pending.append(src)
-        if pending:
-            translated=client.translate_many(pending)
-            for src,dst in zip(pending,translated):
+            if fixed and not _CJK_RE.search(fixed):
+                mapping[src]=fixed
+            else:
+                pending.append(src)
+
+        # Reconstructed workbooks already have a dedicated target-language
+        # column.  A bilingual client (zh-vi / zh-en) must therefore be reduced
+        # to a target-only client; otherwise providers may echo the Chinese
+        # source beside the translation and the quality gate incorrectly treats
+        # the result as untranslated.
+        working_client = client
+        final_code = 'vi' if target_code == 'zh-vi' else 'en'
+        if pending and isinstance(client, TranslationClient):
+            working_client = TranslationClient(
+                source_language=getattr(client, 'source_language_code', 'auto'),
+                target_language=final_code,
+            )
+
+        def accept_translations(items, values):
+            unresolved=[]
+            for src,dst in zip(items,values):
                 value=_clean_translation_candidate(src,str(dst or ''))
-                if value and not _CJK_RE.search(value): mapping[src]=value
-        failures=[src for src in sources if not mapping.get(src)]
+                if value and not _CJK_RE.search(value) and value.strip() != src.strip():
+                    mapping[src]=value
+                else:
+                    unresolved.append(src)
+            return unresolved
+
+        unresolved=list(pending)
+        if unresolved:
+            translated=working_client.translate_many(unresolved)
+            unresolved=accept_translations(unresolved, translated)
+
+        # Providers occasionally return the source text unchanged for a few
+        # items in a large batch. Retry only those items in small batches, then
+        # one-by-one. This avoids rejecting an otherwise valid workbook because
+        # of transient model omissions.
+        if unresolved:
+            # A previous version could persist untranslated Chinese source text
+            # in the target-only translation memory. Clear those poisoned rows
+            # before retrying, otherwise every retry simply returns the same
+            # invalid cached value and the workbook fails quality inspection.
+            invalidate = getattr(working_client, 'invalidate', None)
+            if callable(invalidate):
+                invalidate(unresolved)
+            retry_sources=list(unresolved)
+            unresolved=[]
+            for start in range(0,len(retry_sources),12):
+                batch=retry_sources[start:start+12]
+                values=working_client.translate_many(batch)
+                unresolved.extend(accept_translations(batch,values))
+        if unresolved:
+            invalidate = getattr(working_client, 'invalidate', None)
+            if callable(invalidate):
+                invalidate(unresolved)
+            retry_sources=list(unresolved)
+            unresolved=[]
+            for src in retry_sources:
+                values=working_client.translate_many([src])
+                unresolved.extend(accept_translations([src],values))
+
+        # Final deterministic repair for short PLC/HMI labels. AI providers can
+        # occasionally echo a small number of Chinese labels even after direct
+        # retries. Structured automation labels are safely composed from the
+        # embedded engineering terminology so transient API omissions no longer
+        # block the complete workbook.
+        still_unresolved=[]
+        for src in unresolved:
+            repaired=_automation_vi_fallback(src)
+            if repaired:
+                mapping[src]=repaired
+            else:
+                still_unresolved.append(src)
+        unresolved=still_unresolved
+
+        # Quality inspection and cleanup must use the same definition of useful
+        # content. Placeholders such as 备用 / 预留 are discarded rather than
+        # counted as missing translations.
+        failures=[src for src in unresolved if not _is_meaningless_reconstructed_value(src)]
         if failures:
-            raise RuntimeError(f'企业重构翻译未完成：仍有 {len(failures)} 条中文没有目标语言，示例：{failures[:5]}')
+            sample='；'.join(failures[:20])
+            raise RuntimeError(
+                f'企业重构翻译未完成：仍有 {len(failures)} 条有效中文没有目标语言；'
+                f'未翻译示例（最多20条）：{sample}'
+            )
         for ws,row,col,text in pairs:
             cell=ws.cell(row,col); cell.value=mapping[text]
             cell.font=Font(name='Arial',size=10.5)
@@ -1494,6 +1569,47 @@ def _clean_reconstructed_value(value: object) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _source_only_reconstructed_value(value: object) -> str:
+    """Return the Chinese/source part from legacy glued bilingual cells.
+
+    PLC/HMI exports often contain values such as ``备用Dự phòng`` or
+    ``前门关闭Cửa trước đã đóng``.  Reconstruction must classify and dedupe
+    the Chinese engineering meaning, not carry the historical mixed string
+    into the new customer workbook.
+    """
+    text = _clean_reconstructed_value(value)
+    if not text:
+        return ''
+    pair = _split_existing_bilingual_text(text)
+    if pair:
+        text = pair[0]
+    return re.sub(r'\s+', ' ', text).strip(' |：:—-')
+
+
+def _is_meaningless_reconstructed_value(value: object) -> bool:
+    text = _source_only_reconstructed_value(value)
+    if not text:
+        return True
+    compact = re.sub(r'[\s_\-#（）()]+', '', text).lower()
+    if compact in {'0', 'na', 'n/a', 'none', 'null', 'xxx'}:
+        return True
+    if re.fullmatch(r'(?:备用|預備|预留|保留|spare|reserve|dựphòng)(?:\d+)?', compact, re.I):
+        return True
+    if re.fullmatch(r'\d+(?:-\d+)?', compact):
+        return True
+    return False
+
+
+def _normalize_station_code(value: object) -> str:
+    # Match the station number before removing the attached Vietnamese label;
+    # exports commonly use values such as ``工位 Trạm 2-1``.
+    text = _clean_reconstructed_value(value)
+    match = re.search(r'工位(?:\s*[A-Za-zÀ-ỹ]+)*\s*(\d+)(?:\s*-\s*(\d+))?', text, re.I)
+    if not match:
+        return ''
+    return f"工位{match.group(1)}" + (f"-{match.group(2)}" if match.group(2) is not None else '')
+
+
 def _engineering_system(name: str) -> str:
     value = str(name or '')
     rules = [
@@ -1550,6 +1666,73 @@ def _glossary_vi(text: object) -> str:
     return result if changed and not _CJK_RE.search(result) else ''
 
 
+
+
+def _existing_reconstructed_translation(value: object) -> str:
+    """Return a usable existing Latin translation from a legacy bilingual cell."""
+    text = _clean_reconstructed_value(value)
+    if not text:
+        return ''
+    pair = _split_existing_bilingual_text(text)
+    if not pair:
+        return ''
+    candidate = _clean_translation_candidate(pair[0], pair[1])
+    return candidate if candidate and not _CJK_RE.search(candidate) else ''
+
+
+_AUTOMATION_VI_TOKENS = {
+    '安全继电器':'rơ-le an toàn','安全门':'cửa an toàn','急停':'dừng khẩn cấp',
+    '下料':'xả liệu','上料':'nạp liệu','搬运':'vận chuyển','组装':'lắp ráp','翻转':'lật',
+    '载具':'đồ gá','料盘':'khay vật liệu','小车':'xe con','升降机':'thang nâng',
+    '夹爪':'kẹp gắp','气缸':'xi lanh','插销':'chốt','顶升':'nâng đỡ','阻挡':'chặn',
+    '伸出':'đưa ra','旋转':'xoay','下压':'ép xuống','定位':'định vị','真空':'chân không',
+    '皮带':'băng tải','光栅':'rèm quang an toàn','旋钮':'núm xoay','面板':'bảng điều khiển',
+    '产品':'sản phẩm','来料':'vật liệu đến','进料':'đầu vào','出料':'đầu ra','入料':'nạp liệu',
+    '流入':'đi vào','流出':'đi ra','检测':'kiểm tra','有料':'có vật liệu','高度':'chiều cao',
+    '报警':'cảnh báo','感应':'cảm biến','信号':'tín hiệu','状态':'trạng thái',
+    '关闭':'đóng','打开':'mở','启动':'khởi động','停止':'dừng','暂停':'tạm dừng','复位':'đặt lại',
+    '原位':'vị trí gốc','动位':'vị trí tác động','回位':'vị trí về','出位':'vị trí ra',
+    '降位':'vị trí hạ','升位':'vị trí nâng','松位':'vị trí nhả','夹位':'vị trí kẹp',
+    '到位':'đã đến vị trí','左':'trái','右':'phải','前':'trước','后':'sau','上':'trên','下':'dưới',
+    '中':'giữa','层':'tầng','侧':'bên','人工':'thủ công','自动':'tự động','轴':'trục',
+    '存料':'lưu vật liệu','销钉':'chốt định vị','切换':'chuyển đổi','锁螺丝':'siết vít',
+    '锁附':'siết khóa','压力':'áp suất','位移':'độ dịch chuyển','手动模式':'chế độ thủ công',
+    '手动':'thủ công','模式':'chế độ','请切换到':'vui lòng chuyển sang','未初始化':'chưa khởi tạo',
+    '初始化':'khởi tạo','操作':'thao tác','故障中':'đang có lỗi','解除故障后':'sau khi xóa lỗi',
+    '故障':'lỗi','弹窗条件':'điều kiện cửa sổ bật lên','完成':'hoàn thành','未选择':'chưa chọn',
+    '记忆清除':'xóa bộ nhớ','清料':'dọn vật liệu','遮挡':'bị che chắn','未使能':'chưa được cho phép',
+    '使能':'cho phép','未回原点':'chưa về điểm gốc','回原点':'về điểm gốc','超负限':'vượt giới hạn âm',
+    '超正限':'vượt giới hạn dương','报错':'báo lỗi','拍照':'chụp ảnh','无料':'không có vật liệu',
+    '人工确认':'xác nhận thủ công','扫产品码':'quét mã sản phẩm','扫治具码':'quét mã đồ gá',
+    '扫描':'quét','视觉引导':'dẫn hướng thị giác','请选择':'vui lòng chọn','选择':'chọn',
+    '不在':'không ở','请':'vui lòng','或':'hoặc','安全':'an toàn','一':'1','二':'2',
+    '上传':'tải lên','条件不满足':'điều kiện chưa được đáp ứng','不满足':'chưa được đáp ứng',
+    '下降':'hạ xuống','上升':'nâng lên','缩回':'thu về','伸出':'đưa ra','向':'hướng',
+    '真空信号':'tín hiệu chân không','真空信':'tín hiệu chân không','治具':'đồ gá','产品码':'mã sản phẩm','治具码':'mã đồ gá',
+    '其他系统':'hệ thống khác','其他':'khác','系统':'hệ thống','模组':'mô-đun',
+}
+
+def _automation_vi_fallback(text: object) -> str:
+    """Deterministic final fallback for short PLC/HMI labels.
+
+    It is intentionally used only after provider retries fail.  The output is
+    target-language-only and prevents a handful of transient provider echoes
+    from blocking an otherwise complete engineering workbook.
+    """
+    value = _source_only_reconstructed_value(text)
+    value = value.replace('载右具', '载具右')
+    if not value or not _CJK_RE.search(value):
+        return value
+    result=value
+    changed=False
+    for zh,vi in sorted({**_AUTOMATION_ZH_VI, **_AUTOMATION_VI_TOKENS}.items(), key=lambda x: len(x[0]), reverse=True):
+        if zh in result:
+            result=result.replace(zh, f' {vi} ')
+            changed=True
+    result=re.sub(r'\s+', ' ', result).strip()
+    # Preserve engineering codes/numbers, but never accept residual Chinese.
+    return result if changed and not _CJK_RE.search(result) else ''
+
 def _bilingual_header(zh: str, vi: str) -> str:
     return f'{zh}\n{vi}'
 
@@ -1605,7 +1788,7 @@ def _reconstruct_plc_configuration(source: Path, destination: Path, callback: Pr
         if not wb.worksheets:
             return None
         ws = wb.worksheets[0]
-        probe = {str(ws.cell(r, 1).value or '').strip() for r in range(1, min(ws.max_row, 180) + 1)}
+        probe = {_source_only_reconstructed_value(ws.cell(r, 1).value) for r in range(1, min(ws.max_row, 180) + 1)}
         required = {'输入名称', '轴名称', '气缸名称', '工位名称'}
         if len(required & probe) < 3:
             return None
@@ -1619,65 +1802,75 @@ def _reconstruct_plc_configuration(source: Path, destination: Path, callback: Pr
 
         plc_rows=[]
         for r in range(4, min(ws.max_row, 35) + 1):
-            for c in range(2, min(ws.max_column, 65) + 1):
-                code, name = _split_code_name(ws.cell(r, c).value)
-                name=_clean_reconstructed_value(name)
-                if code.startswith('X') and name and name not in {'备用','0'}:
+            for c in range(2, min(ws.max_column, 256) + 1):
+                code, raw_name = _split_code_name(ws.cell(r, c).value)
+                name=_source_only_reconstructed_value(raw_name)
+                if code.startswith('X') and not _is_meaningless_reconstructed_value(name):
                     category=_classify_plc_function(name); system=_engineering_system(name)
                     plc_rows.append([code,name,_glossary_vi(name),category,_glossary_vi(category),system,_glossary_vi(system),f'{get_column_letter(c)}{r}'])
+        # An address identifies one physical signal.  Keep the first meaningful
+        # occurrence and discard duplicated export blocks.
+        plc_unique={}
+        for row in plc_rows:
+            plc_unique.setdefault(row[0], row)
+        plc_rows=list(plc_unique.values())
 
         equipment_rows=[]
         equipment_map={'轴名称':'运动轴','气缸名称':'气缸','真空名称':'真空','感应器名称':'感应器','相机名称':'相机','皮带线名称':'皮带线','AOI名称':'AOI/视觉','安全门名称':'安全门','风扇名称':'风扇','扫码器名称':'扫码器','压力传感器名称':'压力传感器','位移传感器名称':'位移传感器','电批名称':'电批'}
         for r in range(1,min(ws.max_row,100)+1):
-            category=equipment_map.get(str(ws.cell(r,1).value or '').strip())
+            category=equipment_map.get(_source_only_reconstructed_value(ws.cell(r,1).value))
             if not category: continue
             seen=set()
-            for c in range(2,min(ws.max_column,65)+1):
-                code,name=_split_code_name(ws.cell(r,c).value); name=_clean_reconstructed_value(name)
-                if not (code or name) or name in {'0','备用'}: continue
-                key=(code,name)
+            for c in range(2,min(ws.max_column,256)+1):
+                code,raw_name=_split_code_name(ws.cell(r,c).value); name=_source_only_reconstructed_value(raw_name)
+                if not (code or name) or _is_meaningless_reconstructed_value(name or code): continue
+                key=(category,code,name)
                 if key in seen: continue
                 seen.add(key)
                 display=name or code; system=_engineering_system(category+display)
                 equipment_rows.append([category,_glossary_vi(category),code,display,_glossary_vi(display),system,_glossary_vi(system),'已配置',_glossary_vi('已配置')])
 
         cylinder_rows=[]
-        for c in range(2,min(ws.max_column,65)+1):
-            code,name=_split_code_name(ws.cell(37,c).value); name=_clean_reconstructed_value(name)
-            if not (code or name): continue
-            vals=[_clean_reconstructed_value(ws.cell(rr,c).value) for rr in range(50,56)]
+        for c in range(2,min(ws.max_column,256)+1):
+            code,raw_name=_split_code_name(ws.cell(37,c).value); name=_source_only_reconstructed_value(raw_name)
+            if not (code or name) or _is_meaningless_reconstructed_value(name or code): continue
+            vals=[_source_only_reconstructed_value(ws.cell(rr,c).value) for rr in range(50,56)]
             if not any(vals) and not name: continue
             system=_engineering_system(name+'气缸')
             cylinder_rows.append([code,name,_glossary_vi(name),vals[0],vals[1],vals[2],_glossary_vi(vals[2]),vals[3],_glossary_vi(vals[3]),vals[4],vals[5],system,_glossary_vi(system)])
 
         station_rows=[]
         current_code=current_name=''
-        for r in range(86,min(ws.max_row,260)+1):
-            code=_clean_reconstructed_value(ws.cell(r,1).value)
-            name=_clean_reconstructed_value(ws.cell(r,2).value)
-            if not code or not name or code=='工位名称': continue
+        station_seen=set()
+        for r in range(86,min(ws.max_row,320)+1):
+            code=_normalize_station_code(ws.cell(r,1).value)
+            name=_source_only_reconstructed_value(ws.cell(r,2).value)
+            if not code or _is_meaningless_reconstructed_value(name): continue
             if re.fullmatch(r'工位\d+',code):
-                if re.fullmatch(r'\d+#',name): continue
                 current_code,current_name=code,name
             elif re.fullmatch(r'工位\d+-\d+',code):
-                if not current_code or re.fullmatch(r'\d+-\d+#',name): continue
+                if not current_code: continue
+                key=(current_code,code,name)
+                if key in station_seen: continue
+                station_seen.add(key)
                 system=_engineering_system(current_name+name)
                 station_rows.append([current_code,current_name,_glossary_vi(current_name),code,name,_glossary_vi(name),system,_glossary_vi(system)])
         with_children={r[0] for r in station_rows}
-        for r in range(86,min(ws.max_row,260)+1):
-            code=_clean_reconstructed_value(ws.cell(r,1).value); name=_clean_reconstructed_value(ws.cell(r,2).value)
-            if re.fullmatch(r'工位\d+',code or '') and code not in with_children and name and not re.fullmatch(r'\d+#',name):
+        for r in range(86,min(ws.max_row,320)+1):
+            code=_normalize_station_code(ws.cell(r,1).value); name=_source_only_reconstructed_value(ws.cell(r,2).value)
+            if re.fullmatch(r'工位\d+',code or '') and code not in with_children and not _is_meaningless_reconstructed_value(name):
                 system=_engineering_system(name)
                 station_rows.append([code,name,_glossary_vi(name),'','','',system,_glossary_vi(system)])
 
         tip_counter={}
         for r in range(68,min(ws.max_row,180)+1):
             key=_clean_reconstructed_value(ws.cell(r,1).value)
-            if not key.endswith('_Title'): continue
-            group=key[:-6]
-            for c in range(2,min(ws.max_column,65)+1):
-                value=_clean_reconstructed_value(ws.cell(r,c).value)
-                if not value or value=='0': continue
+            key_match=re.match(r'^(Tip\d+)_Title',key,re.I)
+            if not key_match: continue
+            group=key_match.group(1)
+            for c in range(2,min(ws.max_column,256)+1):
+                value=_source_only_reconstructed_value(ws.cell(r,c).value)
+                if _is_meaningless_reconstructed_value(value): continue
                 tip_counter[(group,value)]=tip_counter.get((group,value),0)+1
         tip_rows=[]
         for (g,msg),count in tip_counter.items():
@@ -1786,13 +1979,21 @@ def _process_file(original_name: str, stored_path: str, output_dir: Path, client
     source = Path(stored_path)
     suffix = source.suffix.lower()
     safe_stem = Path(original_name).stem
-    if use_cleanup and suffix == ".xlsx":
+    cleanup_stats = None
+    if suffix == ".xlsx":
         cleaned = output_dir / f"{safe_stem}_智能整理.xlsx"
-        cleanup_stats = _clean_xlsx(source, cleaned, callback)
-        source = cleaned
-        suffix = source.suffix.lower()
-    else:
-        cleanup_stats = None
+        # PLC/HMI configuration exports are always reconstructed into the
+        # concise customer-delivery layout.  Ordinary spreadsheets are only
+        # reorganized when the user selected intelligent cleanup.
+        plc_stats = _reconstruct_plc_configuration(source, cleaned, callback)
+        if plc_stats is not None:
+            cleanup_stats = plc_stats
+            source = cleaned
+            suffix = source.suffix.lower()
+        elif use_cleanup:
+            cleanup_stats = _organize_xlsx_a4(source, cleaned, callback)
+            source = cleaned
+            suffix = source.suffix.lower()
     if client is None and not (use_ocr and (suffix in IMAGE_SUFFIXES or suffix == ".pdf")):
         destination = output_dir / Path(source.name).name
         if source.resolve() != destination.resolve():

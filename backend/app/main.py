@@ -42,8 +42,8 @@ from app.engines.translation_engine import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
-APP_VERSION = "25.0.0"
-IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+APP_VERSION = "25.1.4"
+IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
@@ -1269,7 +1269,7 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
         elif result["state"] == "failed":
             mapped_status = "failed"
         elif result["state"] == "waiting_configuration":
-            mapped_status = "confirmed"
+            mapped_status = "waiting_configuration"
         else:
             mapped_status = "processing"
         with get_db() as db:
@@ -1356,7 +1356,7 @@ def start_processing(order_id: int) -> dict:
                 (job_id, item["id"], item["label"], position),
             )
         db.execute(
-            "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, 'info', 'queued', 'Processing job queued', ?)",
+            "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, 'info', 'queued', '处理任务已创建，正在检查运行条件', ?)",
             (job_id, created_at),
         )
         db.execute("UPDATE orders SET status = 'processing', updated_at = ? WHERE id = ?", (created_at, order_id))
@@ -1367,7 +1367,8 @@ def start_processing(order_id: int) -> dict:
     # 32% after the validation/analyse stages. Run the worker inside the active
     # request on Vercel so it cannot be abandoned halfway through. Local and
     # long-running container deployments keep the responsive background thread.
-    if IS_VERCEL:
+    inline_processing = IS_VERCEL or CLOUD_MODE or os.getenv('PROCESSING_MODE', '').strip().lower() == 'inline'
+    if inline_processing:
         _run_processing_worker(job_id, order_id, order, source_paths)
         with get_db() as db:
             finished = db.execute(

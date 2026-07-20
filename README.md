@@ -1,4 +1,4 @@
-# Document Automation AI — Version 10.8.0
+# Document Automation AI — Version 25.1.4
 
 完整企业级 AI 文档自动化工程。
 
@@ -17,7 +17,7 @@
 
 ## 版本
 
-Version 10.8.0
+Version 25.1.4
 
 ## OCR setup on Windows
 
