@@ -1,0 +1,15 @@
+{
+  "id": "default",
+  "name": "AI Learning Foundation",
+  "version": "1.0",
+  "status": "foundation",
+  "sources": [
+    "user_corrections",
+    "approved_terminology",
+    "quality_findings"
+  ],
+  "rules": [
+    "never_learn_unapproved_sensitive_content",
+    "keep_audit_trail"
+  ]
+}

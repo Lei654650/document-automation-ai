@@ -1,0 +1,16 @@
+{
+  "id": "indonesia",
+  "name_zh": "印度尼西亚",
+  "locale": "id-ID",
+  "version": "1.0",
+  "status": "active",
+  "date_format": "DD/MM/YYYY",
+  "number_format": "locale",
+  "business_style": "印尼商务正式表达",
+  "official_expressions": [],
+  "localization_rules": [
+    "preserve_names",
+    "localize_dates",
+    "localize_business_tone"
+  ]
+}

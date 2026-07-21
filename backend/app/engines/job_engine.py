@@ -624,7 +624,11 @@ def _translate_reconstructed_xlsx(source: Path, destination: Path, client: Trans
                     text=_clean_reconstructed_value(ws.cell(row,src_col).value)
                     if not text or not _CJK_RE.search(text): continue
                     existing=_clean_reconstructed_value(ws.cell(row,dst_col).value)
-                    if existing and not _CJK_RE.search(existing): continue
+                    # English output must overwrite legacy Vietnamese seed values
+                    # created by the reconstruction stage. Vietnamese output may
+                    # keep an already valid Vietnamese target cell.
+                    if target_code == 'zh-vi' and existing and not _CJK_RE.search(existing):
+                        continue
                     pairs.append((ws,row,dst_col,text))
                     if text not in seen: seen.add(text); sources.append(text)
         if not pairs:
@@ -633,7 +637,7 @@ def _translate_reconstructed_xlsx(source: Path, destination: Path, client: Trans
         _update(callback,24,'translation',f'企业重构表已识别：{len(sources)} 条待补充术语，正在填充独立{target_label}列')
         mapping={}; pending=[]
         for src in sources:
-            fixed=_glossary_vi(src) if target_code=='zh-vi' else ''
+            fixed=_glossary_vi(src) if target_code=='zh-vi' else _glossary_en(src)
             if fixed and not _CJK_RE.search(fixed):
                 mapping[src]=fixed
             else:
@@ -656,6 +660,8 @@ def _translate_reconstructed_xlsx(source: Path, destination: Path, client: Trans
             unresolved=[]
             for src,dst in zip(items,values):
                 value=_clean_translation_candidate(src,str(dst or ''))
+                if target_code == 'zh-en' and value:
+                    value=_polish_automation_en(src, value)
                 if value and not _CJK_RE.search(value) and value.strip() != src.strip():
                     mapping[src]=value
                 else:
@@ -702,7 +708,7 @@ def _translate_reconstructed_xlsx(source: Path, destination: Path, client: Trans
         # block the complete workbook.
         still_unresolved=[]
         for src in unresolved:
-            repaired=_automation_vi_fallback(src)
+            repaired=_automation_vi_fallback(src) if target_code == 'zh-vi' else _automation_en_fallback(src)
             if repaired:
                 mapping[src]=repaired
             else:
@@ -719,6 +725,7 @@ def _translate_reconstructed_xlsx(source: Path, destination: Path, client: Trans
                 f'企业重构翻译未完成：仍有 {len(failures)} 条有效中文没有目标语言；'
                 f'未翻译示例（最多20条）：{sample}'
             )
+        _localize_reconstructed_headers(wb, target_code)
         for ws,row,col,text in pairs:
             cell=ws.cell(row,col); cell.value=mapping[text]
             cell.font=Font(name='Arial',size=10.5)
@@ -807,8 +814,11 @@ def _translate_xlsx(source: Path, destination: Path, client: TranslationClient, 
                     target_language=final_code,
                 )
                 translated = working_client.translate_many(translation_inputs)
-                for src, dst in zip(pending_sources, translated):
-                    mapping[src] = _normalize_bilingual_value(src, str(dst or ""))
+                for src, unit, dst in zip(pending_sources, translation_inputs, translated):
+                    target_value = str(dst or "")
+                    if final_code == 'en':
+                        target_value = _polish_automation_en(unit, target_value)
+                    mapping[src] = _normalize_bilingual_value(src, target_value)
         else:
             translated = client.translate_many(unique_texts)
             for src, dst in zip(unique_texts, translated):
@@ -1666,6 +1676,216 @@ def _glossary_vi(text: object) -> str:
     return result if changed and not _CJK_RE.search(result) else ''
 
 
+
+
+_AUTOMATION_ZH_EN = {
+    '操作条件不满足':'Operating conditions not met','已配置':'Configured','未配置':'Not configured',
+    '工位':'Station','子模块':'Submodule','所属系统':'System','功能分类':'Function Category',
+    '输送物流系统':'Conveyance and Logistics System','气动系统':'Pneumatic System',
+    '视觉检测系统':'Vision Inspection System','运动控制系统':'Motion Control System',
+    '安全系统':'Safety System','操作与报警':'Operation and Alarm','通用设备系统':'General Equipment System',
+    '安全与急停':'Safety and Emergency Stop','操作按钮':'Operator Controls','载具输送':'Pallet Conveyance',
+    '检测与视觉':'Inspection and Vision','气动与真空':'Pneumatics and Vacuum','报警与状态':'Alarms and Status',
+    '备用信号':'Spare Signal','其他':'Other','其他系统':'Other System','运动轴':'Motion Axis','气缸':'Cylinder',
+    '真空':'Vacuum','感应器':'Sensor','相机':'Camera','皮带线':'Belt Conveyor','AOI/视觉':'AOI / Vision',
+    '安全门':'Safety Door','风扇':'Fan','扫码器':'Code Reader','压力传感器':'Pressure Sensor',
+    '位移传感器':'Displacement Sensor','电批':'Electric Screwdriver','启动':'Start','暂停':'Pause',
+    '停止':'Stop','复位':'Reset','上升':'Raise','下降':'Lower','伸出':'Extend','缩回':'Retract',
+    '松开':'Release','夹紧':'Clamp','打开':'Open','关闭':'Close','原位':'Home Position','动位':'Actuated Position',
+    '到位':'In Position','上层线体':'Upper Conveyor Line','下层线体':'Lower Conveyor Line','拆卸轴':'Disassembly Axis',
+    '视觉交互':'Vision Interface','检测轴':'Inspection Axis','上下料模组':'Loading/Unloading Module',
+    '料盘搬运':'Tray Transfer','上料':'Loading','下料':'Unloading','升降机':'Lifter','轴':'Axis',
+    '检测模组':'Inspection Module','已删除':'Deleted','中文':'Chinese','英语':'English','越南语':'Vietnamese',
+    '名称':'Name','状态':'Status','类别':'Category','编号':'ID','地址':'Address','序号':'No.',
+    '提示组':'Message Group','重复次数':'Occurrences','原位置':'Source Cell',
+}
+
+_AUTOMATION_EN_TOKENS = {
+    '安全继电器':'Safety Relay','安全门':'Safety Door','急停':'Emergency Stop','下料':'Unloading',
+    '上料':'Loading','搬运':'Transfer','组装':'Assembly','翻转':'Flip','载具':'Pallet','治具':'Fixture',
+    '料盘':'Tray','小车':'Shuttle','升降机':'Lifter','夹爪':'Gripper','气缸':'Cylinder','插销':'Pin',
+    '顶升':'Lift','阻挡':'Stopper','伸出':'Extend','旋转':'Rotate','下压':'Press Down','定位':'Positioning',
+    '真空':'Vacuum','皮带':'Conveyor','光栅':'Safety Light Curtain','旋钮':'Selector Switch','面板':'Panel',
+    '产品':'Product','来料':'Incoming Material','进料':'Infeed','出料':'Outfeed','入料':'Loading',
+    '流入':'Entry','流出':'Exit','检测':'Detection','有料':'Material Present','无料':'No Material',
+    '高度':'Height','报警':'Alarm','感应器':'Sensor','感应':'Sensor','信号':'Signal','状态':'Status',
+    '关闭':'Close','打开':'Open','启动':'Start','停止':'Stop','暂停':'Pause','复位':'Reset',
+    '原位':'Home Position','动位':'Actuated Position','回位':'Retracted Position','出位':'Extended Position',
+    '降位':'Lowered Position','升位':'Raised Position','松位':'Released Position','夹位':'Clamped Position',
+    '到位':'In-position','左':'Left','右':'Right','前':'Front','后':'Rear','上':'Upper','下':'Lower',
+    '中':'Center','层':'Level','侧':'Side','人工':'Manual','自动':'Auto','轴':'Axis','存料':'Material Buffer',
+    '销钉':'Locating Pin','切换':'Switch','锁螺丝':'Screw Tightening','锁附':'Fastening','压力':'Pressure',
+    '位移':'Displacement','手动模式':'Manual Mode','手动':'Manual','模式':'Mode','请切换到':'Please switch to',
+    '未初始化':'Not initialized','初始化':'Initialization','操作':'Operation','故障中':'Fault active',
+    '解除故障后':'after clearing the fault','故障':'Fault','弹窗条件':'Popup condition','完成':'Complete',
+    '未选择':'Not selected','记忆清除':'Memory Clear','清料':'Material Clear','遮挡':'Blocked',
+    '未使能':'Not enabled','使能':'Enable','未回原点':'Not homed','回原点':'Home','超负限':'Negative limit exceeded',
+    '超正限':'Positive limit exceeded','报错':'Error','拍照':'Image capture','人工确认':'Manual confirmation',
+    '扫产品码':'Scan product code','扫治具码':'Scan fixture code','扫描':'Scan','视觉引导':'Vision guidance',
+    '请选择':'Please select','选择':'Select','不在':'Not in','请':'Please','安全':'Safety','上传':'Upload',
+    '条件不满足':'Conditions not met','不满足':'Not met','真空信号':'Vacuum Signal','产品码':'Product Code',
+    '治具码':'Fixture Code','系统':'System','模组':'Module','大弹簧':'Large Spring','小弹簧':'Small Spring',
+    '出盘':'Tray Outfeed','进盘':'Tray Infeed','托盘':'Tray','满料':'Full','接近':'Proximity','取料':'Pick','送料':'Feed','收料':'Unload',
+    '视觉':'Vision','反馈超时':'Feedback Timeout','码':'Code','拍照NG':'Image Capture NG',
+}
+
+def _glossary_en(text: object) -> str:
+    value=_source_only_reconstructed_value(text)
+    if not value:
+        return ''
+    if value in _AUTOMATION_ZH_EN:
+        return _AUTOMATION_ZH_EN[value]
+    # High-confidence PLC/HMI labels are composed deterministically so the same
+    # Chinese source always receives the same engineering English.
+    return _automation_en_fallback(value)
+
+
+def _automation_en_fallback(text: object) -> str:
+    value=_source_only_reconstructed_value(text)
+    value=value.replace('载右具','载具右').replace('载左具','载具左')
+    if not value or not _CJK_RE.search(value):
+        return value
+    result=value
+    changed=False
+    tokens={**_AUTOMATION_ZH_EN, **_AUTOMATION_EN_TOKENS}
+    for zh,en in sorted(tokens.items(), key=lambda x: len(x[0]), reverse=True):
+        if zh in result:
+            result=result.replace(zh, f' {en} ')
+            changed=True
+    result=re.sub(r'\s+', ' ', result).strip(' -')
+    if not changed or _CJK_RE.search(result):
+        return ''
+    return _normalize_english_label(result)
+
+
+def _normalize_english_label(value: str) -> str:
+    text=re.sub(r'\s+', ' ', str(value or '')).strip()
+    replacements={
+        'Lower Layer Sensor':'Lower-level Sensor','Full Material Sensor':'Material-full Sensor',
+        'Entry Sensor':'Entry Sensor','Arrival Sensor':'In-position Sensor',
+        'Cylinder Return':'Cylinder Retracted Position','Cylinder Extend':'Cylinder Extended Position',
+        'Positioning 1 Return':'Positioning Cylinder 1 Retracted Position',
+        'Positioning 1 Extend':'Positioning Cylinder 1 Extended Position',
+        'Photo NG':'Image Capture NG','photo NG':'image capture NG',
+    }
+    for old,new in replacements.items():
+        text=text.replace(old,new)
+    text=re.sub(r'\bblanking\b', 'unloading', text, flags=re.I)
+    text=re.sub(r'\bfeeding\b', 'loading', text, flags=re.I)
+    text=re.sub(r'\bflow sensor\b', 'passage sensor', text, flags=re.I)
+    text=re.sub(r'\bsensing\b', 'sensor', text, flags=re.I)
+    text=re.sub(r'\barrival sensor\b', 'in-position sensor', text, flags=re.I)
+    text=re.sub(r'\breturn position\b', 'retracted position', text, flags=re.I)
+    text=re.sub(r'\bextend position\b', 'extended position', text, flags=re.I)
+    # Engineering labels use title case while preserving common acronyms.
+    words=[]
+    for word in text.split(' '):
+        if re.fullmatch(r'(?:PLC|HMI|IO|I/O|NG|OK|AOI|X|Y|Z|R|[XY]\d+)', word, re.I):
+            words.append(word.upper())
+        elif re.fullmatch(r'\d+', word):
+            words.append(word)
+        else:
+            words.append(word[:1].upper()+word[1:].lower() if word else word)
+    return ' '.join(words)
+
+
+def _polish_automation_en(source: str, translated: str) -> str:
+    fixed=_automation_en_fallback(source)
+    # Prefer deterministic terminology for compact PLC/HMI names. For long
+    # operator messages keep the provider sentence and normalize terminology.
+    if fixed and len(source) <= 24 and not re.search(r'[。！？，,.!?]', source):
+        return fixed
+    text=_normalize_english_label(translated)
+    terminology={
+        r'\bcarrier\b':'Pallet', r'\bfixture carrier\b':'Pallet', r'\bblanking\b':'Unloading',
+        r'\bfeeding\b':'Loading', r'\breset position\b':'Home Position',
+        r'\borigin position\b':'Home Position', r'\bphoto(?:graph)?\b':'Image Capture',
+    }
+    for pattern,replacement in terminology.items():
+        text=re.sub(pattern,replacement,text,flags=re.I)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _localize_reconstructed_headers(wb, target_code: str) -> None:
+    """Localize all fixed reconstruction templates, including the overview.
+
+    The overview used to stay Chinese even when the data sheets were exported as
+    Chinese-English bilingual. Keep sheet identifiers stable for hyperlinks,
+    but localize every visible title, label and explanatory value.
+    """
+    if target_code not in {'zh-en', 'zh-vi'}:
+        return
+    is_en = target_code == 'zh-en'
+    header_map={
+        'PLC输入信号':(['No.','Address','Chinese Function','English Function','Function Category','English Category','System','English System','Source Cell'] if is_en else None),
+        '设备清单':(['Chinese Category','English Category','ID','Chinese Name','English Name','System','English System','Chinese Status','English Status'] if is_en else None),
+        '气缸IO配置':(['Cylinder ID','Chinese Name','English Name','Home Input','Actuated Input','Chinese Home Action','English Home Action','Chinese Actuated Action','English Actuated Action','Home Output','Actuated Output','System','English System'] if is_en else None),
+        '工位结构':(['Station ID','Chinese Station Name','English Station Name','Submodule ID','Chinese Submodule Name','English Submodule Name','System','English System'] if is_en else None),
+        '操作提示':(['Message Group','Chinese Message','English Message','Occurrences','System','English System'] if is_en else None),
+    }
+    if is_en:
+        for sheet_name,headers in header_map.items():
+            if sheet_name not in wb.sheetnames or not headers:
+                continue
+            ws=wb[sheet_name]
+            for col,label in enumerate(headers,1):
+                ws.cell(1,col).value=label
+                ws.cell(1,col).font=Font(name='Arial',size=10.5,bold=True,color='FFFFFF')
+
+    if '文档概览' not in wb.sheetnames:
+        return
+    ws=wb['文档概览']
+    if is_en:
+        ws['A1']='项目\nItem'; ws['B1']='内容\nContent'
+        label_map={
+            '文档类型':'文档类型\nDocument Type',
+            '整理方式':'整理方式\nOrganization Method',
+            '无效数据处理':'无效数据处理\nInvalid Data Handling',
+            '双语版式':'双语版式\nBilingual Layout',
+            '分类表':'分类表\nCategory Sheet',
+            '记录数量':'记录数量\nRecord Count',
+            'PLC输入信号':'PLC输入信号\nPLC Input Signals',
+            '设备清单':'设备清单\nEquipment List',
+            '气缸IO配置':'气缸IO配置\nCylinder I/O Configuration',
+            '工位结构':'工位结构\nStation Structure',
+            '操作提示':'操作提示\nOperator Messages',
+        }
+        value_map={
+            'PLC/HMI 自动化设备工程文档':'PLC/HMI 自动化设备工程文档\nPLC/HMI Automation Equipment Engineering Document',
+            '按信号、设备、气缸、工位和提示信息分类汇总':'按信号、设备、气缸、工位和提示信息分类汇总\nOrganized by signals, equipment, cylinders, stations and operator messages',
+            '已删除 #N/A、空白占位、备用项和无意义编号项':'已删除 #N/A、空白占位、备用项和无意义编号项\nRemoved #N/A values, blank placeholders, reserved entries and meaningless numbered items',
+            '中文与越南语严格使用相邻独立列显示':'中文与英语严格使用相邻独立列显示\nChinese and English are displayed in adjacent dedicated columns',
+            'Chinese and English are displayed in adjacent dedicated columns':'中文与英语严格使用相邻独立列显示\nChinese and English are displayed in adjacent dedicated columns',
+        }
+    else:
+        ws['A1']='项目\nHạng mục'; ws['B1']='内容\nNội dung'
+        label_map={
+            '文档类型':'文档类型\nLoại tài liệu','整理方式':'整理方式\nPhương thức sắp xếp',
+            '无效数据处理':'无效数据处理\nXử lý dữ liệu không hợp lệ','双语版式':'双语版式\nBố cục song ngữ',
+            '分类表':'分类表\nBảng phân loại','记录数量':'记录数量\nSố lượng bản ghi',
+        }
+        value_map={
+            'PLC/HMI 自动化设备工程文档':'PLC/HMI 自动化设备工程文档\nTài liệu kỹ thuật thiết bị tự động hóa PLC/HMI',
+            '按信号、设备、气缸、工位和提示信息分类汇总':'按信号、设备、气缸、工位和提示信息分类汇总\nTổng hợp theo tín hiệu, thiết bị, xi lanh, trạm và thông báo vận hành',
+            '已删除 #N/A、空白占位、备用项和无意义编号项':'已删除 #N/A、空白占位、备用项和无意义编号项\nĐã loại bỏ #N/A, ô giữ chỗ trống, mục dự phòng và mục đánh số vô nghĩa',
+            '中文与越南语严格使用相邻独立列显示':'中文与越南语严格使用相邻独立列显示\nTiếng Trung và tiếng Việt được hiển thị trong các cột riêng liền kề',
+        }
+    for row in range(1,ws.max_row+1):
+        left=str(ws.cell(row,1).value or '')
+        left_zh=left.split('\n',1)[0].strip()
+        if left_zh in label_map:
+            ws.cell(row,1).value=label_map[left_zh]
+        right=str(ws.cell(row,2).value or '')
+        right_base=right.split('\n',1)[0].strip()
+        if right in value_map:
+            ws.cell(row,2).value=value_map[right]
+        elif right_base in value_map:
+            ws.cell(row,2).value=value_map[right_base]
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment=Alignment(vertical='center',wrap_text=True)
+            if cell.row > 1 and cell.value not in (None,''):
+                ws.row_dimensions[cell.row].height=max(ws.row_dimensions[cell.row].height or 26, 38)
 
 
 def _existing_reconstructed_translation(value: object) -> str:

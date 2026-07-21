@@ -1,0 +1,41 @@
+{
+  "id": "education",
+  "name_zh": "教育",
+  "name_en": "Education",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "Curriculum",
+      "translations": {}
+    },
+    {
+      "source": "Assessment",
+      "translations": {}
+    },
+    {
+      "source": "Learning Outcome",
+      "translations": {}
+    },
+    {
+      "source": "Accreditation",
+      "translations": {}
+    },
+    {
+      "source": "Semester",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "课程目标",
+    "学习成果",
+    "教学评估"
+  ],
+  "abbreviations": [],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

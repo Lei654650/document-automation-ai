@@ -1,0 +1,43 @@
+{
+  "id": "finance",
+  "name_zh": "财务",
+  "name_en": "Finance",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "Revenue",
+      "translations": {}
+    },
+    {
+      "source": "Gross Margin",
+      "translations": {}
+    },
+    {
+      "source": "EBITDA",
+      "translations": {}
+    },
+    {
+      "source": "Accounts Receivable",
+      "translations": {}
+    },
+    {
+      "source": "Cash Flow",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "应收账款",
+    "现金流量",
+    "财务期间"
+  ],
+  "abbreviations": [
+    "EBITDA"
+  ],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

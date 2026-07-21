@@ -1,0 +1,16 @@
+{
+  "id": "vietnam",
+  "name_zh": "越南",
+  "locale": "vi-VN",
+  "version": "1.0",
+  "status": "active",
+  "date_format": "DD/MM/YYYY",
+  "number_format": "locale",
+  "business_style": "越南企业正式表达",
+  "official_expressions": [],
+  "localization_rules": [
+    "preserve_names",
+    "localize_dates",
+    "localize_business_tone"
+  ]
+}

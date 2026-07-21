@@ -1,0 +1,13 @@
+{
+  "id": "default",
+  "name": "Default Output Rules",
+  "version": "1.0",
+  "status": "active",
+  "rules": [
+    "preserve_structure",
+    "readable_pagination",
+    "consistent_fonts",
+    "table_integrity",
+    "no_fixed_st08_dependency"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "id": "medical",
+  "name_zh": "医疗",
+  "name_en": "Medical",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "Diagnosis",
+      "translations": {}
+    },
+    {
+      "source": "Dosage",
+      "translations": {}
+    },
+    {
+      "source": "Contraindication",
+      "translations": {}
+    },
+    {
+      "source": "Clinical Trial",
+      "translations": {}
+    },
+    {
+      "source": "Sterilization",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "临床诊断",
+    "用药剂量",
+    "无菌处理"
+  ],
+  "abbreviations": [],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

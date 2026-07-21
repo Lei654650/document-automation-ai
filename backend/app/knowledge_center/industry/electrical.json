@@ -1,0 +1,41 @@
+{
+  "id": "electrical",
+  "name_zh": "电气",
+  "name_en": "Electrical",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "Voltage",
+      "translations": {}
+    },
+    {
+      "source": "Current",
+      "translations": {}
+    },
+    {
+      "source": "Relay",
+      "translations": {}
+    },
+    {
+      "source": "Contactor",
+      "translations": {}
+    },
+    {
+      "source": "Circuit Breaker",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "额定电压",
+    "接地保护",
+    "控制回路"
+  ],
+  "abbreviations": [],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

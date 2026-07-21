@@ -1,0 +1,16 @@
+{
+  "id": "japan",
+  "name_zh": "日本",
+  "locale": "ja-JP",
+  "version": "1.0",
+  "status": "active",
+  "date_format": "YYYY年M月D日",
+  "number_format": "locale",
+  "business_style": "日本商务敬语",
+  "official_expressions": [],
+  "localization_rules": [
+    "preserve_names",
+    "localize_dates",
+    "localize_business_tone"
+  ]
+}

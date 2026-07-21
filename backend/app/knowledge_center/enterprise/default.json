@@ -1,0 +1,9 @@
+{
+  "id": "default",
+  "name": "Default Enterprise Profile",
+  "version": "1.0",
+  "status": "active",
+  "terms": [],
+  "preferred_style": "professional",
+  "forbidden_terms": []
+}

@@ -1,0 +1,48 @@
+{
+  "id": "it",
+  "name_zh": "IT",
+  "name_en": "IT / Software",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "API",
+      "translations": {}
+    },
+    {
+      "source": "SDK",
+      "translations": {}
+    },
+    {
+      "source": "Database",
+      "translations": {}
+    },
+    {
+      "source": "Repository",
+      "translations": {}
+    },
+    {
+      "source": "Container",
+      "translations": {}
+    },
+    {
+      "source": "Cloud",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "接口调用",
+    "版本控制",
+    "服务部署"
+  ],
+  "abbreviations": [
+    "API",
+    "SDK"
+  ],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

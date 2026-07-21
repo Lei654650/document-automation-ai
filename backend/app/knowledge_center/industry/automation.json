@@ -1,0 +1,50 @@
+{
+  "id": "automation",
+  "name_zh": "自动化",
+  "name_en": "Automation",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "PLC",
+      "translations": {}
+    },
+    {
+      "source": "HMI",
+      "translations": {}
+    },
+    {
+      "source": "SCADA",
+      "translations": {}
+    },
+    {
+      "source": "Servo",
+      "translations": {}
+    },
+    {
+      "source": "I/O",
+      "translations": {}
+    },
+    {
+      "source": "Emergency Stop",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "回原点",
+    "伺服报警",
+    "安全门互锁"
+  ],
+  "abbreviations": [
+    "PLC",
+    "HMI",
+    "SCADA",
+    "I/O"
+  ],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

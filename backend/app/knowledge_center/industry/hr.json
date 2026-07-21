@@ -1,0 +1,43 @@
+{
+  "id": "hr",
+  "name_zh": "人力资源",
+  "name_en": "Human Resources",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "KPI",
+      "translations": {}
+    },
+    {
+      "source": "Onboarding",
+      "translations": {}
+    },
+    {
+      "source": "Payroll",
+      "translations": {}
+    },
+    {
+      "source": "Performance Review",
+      "translations": {}
+    },
+    {
+      "source": "Headcount",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "入职流程",
+    "绩效评估",
+    "薪酬核算"
+  ],
+  "abbreviations": [
+    "KPI"
+  ],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

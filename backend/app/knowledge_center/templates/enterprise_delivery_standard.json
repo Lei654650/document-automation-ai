@@ -1,0 +1,14 @@
+{
+  "id": "enterprise_delivery_standard",
+  "name": "Enterprise Delivery Standard",
+  "version": "1.0",
+  "status": "active",
+  "selection_dimensions": [
+    "industry",
+    "country",
+    "enterprise",
+    "document_type",
+    "output_format"
+  ],
+  "fixed_template": false
+}

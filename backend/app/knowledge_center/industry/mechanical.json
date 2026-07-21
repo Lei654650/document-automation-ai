@@ -1,0 +1,41 @@
+{
+  "id": "mechanical",
+  "name_zh": "机械",
+  "name_en": "Mechanical",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "Torque",
+      "translations": {}
+    },
+    {
+      "source": "Tolerance",
+      "translations": {}
+    },
+    {
+      "source": "Bearing",
+      "translations": {}
+    },
+    {
+      "source": "Fixture",
+      "translations": {}
+    },
+    {
+      "source": "Lubrication",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "装配公差",
+    "额定扭矩",
+    "机械限位"
+  ],
+  "abbreviations": [],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

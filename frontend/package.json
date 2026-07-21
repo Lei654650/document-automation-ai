@@ -1,7 +1,7 @@
 {
   "name": "document-automation-ai-enterprise",
   "private": true,
-  "version": "25.1.4",
+  "version": "30.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,10 +10,10 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",
-    "vite": "^8.1.4",
+    "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "lucide-react": "^0.468.0"
+    "vite": "^8.1.4"
   },
-  "description": "Document Automation AI Enterprise V25.1.4"
+  "description": "Document Automation AI Enterprise V29 Commercial Processing, Commerce and Acceptance"
 }

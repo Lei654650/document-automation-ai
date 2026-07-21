@@ -1,0 +1,50 @@
+{
+  "id": "manufacturing",
+  "name_zh": "制造",
+  "name_en": "Manufacturing",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "BOM",
+      "translations": {}
+    },
+    {
+      "source": "SOP",
+      "translations": {}
+    },
+    {
+      "source": "OEE",
+      "translations": {}
+    },
+    {
+      "source": "WIP",
+      "translations": {}
+    },
+    {
+      "source": "Yield",
+      "translations": {}
+    },
+    {
+      "source": "Traceability",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "生产批次",
+    "质量追溯",
+    "工艺参数"
+  ],
+  "abbreviations": [
+    "BOM",
+    "SOP",
+    "OEE",
+    "WIP"
+  ],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}

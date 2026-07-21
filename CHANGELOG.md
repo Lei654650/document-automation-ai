@@ -1,3 +1,24 @@
+# V30.2.0
+
+- 完成 PayPal 网站收款链路与服务端校验。
+- 增加支付中心状态和 PayPal 连接测试。
+- 增加主/备用 AI Provider、自动故障切换与分阶段路由。
+- 增加 Provider 调用统计和团队权限基础接口。
+
+# V30.1.2
+
+- Fixed blank screen when opening the document processing order page.
+- Passed the authenticated `currentUser` into `OrderCenter`.
+- Added a page-level React error boundary so runtime rendering errors no longer produce a full blank page.
+- Added safe unauthenticated fallback behavior for account-bound order fields.
+
+# V29.0.0
+
+- Header navigation rebuilt and account menu unified.
+- Customer navigation no longer exposes enterprise acceptance.
+- Plan comparison status icons and Enterprise value presentation redesigned.
+- Chinese-English/Chinese-Vietnamese document overview templates now follow the selected bilingual language.
+
 # V16.0.0
 
 - Connected selected output formats to the backend conversion engine.
@@ -181,3 +202,9 @@
 - Moved large-file saving and document analysis outside database write transactions.
 - Added a three-minute frontend upload timeout with a recoverable error message.
 - Kept standard processing available when no optional capability is selected.
+
+## V30.3.0
+- Fixed PayPal return routing and automatic server-side Capture.
+- PayPal return now resolves the local order from the PayPal order token even when a custom return URL omits payment metadata.
+- Added explicit payment-success confirmation with plan, credits, and payment number.
+- Preserved idempotent crediting and license issuance on repeated callbacks.

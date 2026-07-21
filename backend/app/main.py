@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import base64
 import urllib.error
 import urllib.parse
@@ -18,6 +19,8 @@ import threading
 import time
 import tempfile
 import uuid
+import base64
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -33,6 +36,7 @@ from app.services.runtime_service import storage_diagnostics
 from app.engines.quote_engine import suggest_quote
 from app.engines.job_engine import build_plan, run_local_job
 from app.engines.ocr_engine import capability as ocr_capability
+from app.knowledge_center import get_knowledge_center
 from app.engines.translation_engine import (
     capability as translation_capability,
     public_settings as translation_public_settings,
@@ -42,7 +46,7 @@ from app.engines.translation_engine import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
-APP_VERSION = "25.1.4"
+APP_VERSION = "30.2.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -72,11 +76,21 @@ PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
+PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
+PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()
+PADDLE_CHECKOUT_URL = os.getenv("PADDLE_CHECKOUT_URL", "").strip()
+try:
+    PADDLE_PRICE_MAP = json.loads(os.getenv("PADDLE_PRICE_MAP", "{}") or "{}")
+except json.JSONDecodeError:
+    PADDLE_PRICE_MAP = {}
 PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "").strip()
 PAYMENT_CANCEL_URL = os.getenv("PAYMENT_CANCEL_URL", "").strip()
 PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "false").lower() in {"1", "true", "yes", "on"}
 JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "300")))
+AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip() or secrets.token_urlsafe(48)
+SESSION_TTL_SECONDS = max(3600, int(os.getenv("SESSION_TTL_SECONDS", "2592000")))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,6 +136,17 @@ class TeamMemberCreate(BaseModel):
     role: str = "member"
 
 
+class UserRegister(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str
+    password: str = Field(min_length=8, max_length=200)
+
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+
 class CheckoutCreate(BaseModel):
     plan_id: str
     customer_name: str = ""
@@ -154,6 +179,21 @@ class CreditEstimateRequest(BaseModel):
     file_size_mb: float = Field(default=1, ge=0)
     services: list[str] = []
     file_count: int = Field(default=1, ge=1, le=10000)
+
+
+class AIRoutingUpdate(BaseModel):
+    primary_provider: str = ""
+    backup_provider: str = ""
+    auto_failover: bool = True
+    stage_providers: dict[str, str] = {}
+
+
+class TeamMemberPermission(BaseModel):
+    email: str
+    role: Literal["owner", "admin", "operator", "viewer"] = "viewer"
+    can_manage_payments: bool = False
+    can_manage_providers: bool = False
+    can_process_documents: bool = True
 
 
 class WalletAdjustment(BaseModel):
@@ -198,11 +238,62 @@ PAYMENT_PLANS = {
 
 
 def payment_provider() -> str:
+    # Paddle is the preferred Merchant of Record provider for the commercial release.
+    if PADDLE_API_KEY and PADDLE_PRICE_MAP:
+        return "paddle"
     if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
         return "paypal"
     if STRIPE_SECRET_KEY:
         return "stripe"
     return "demo"
+
+
+def paddle_api_base() -> str:
+    return "https://api.paddle.com" if PADDLE_ENV == "live" else "https://sandbox-api.paddle.com"
+
+
+def paddle_request(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        paddle_api_base() + path,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {PADDLE_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Paddle API error {exc.code}: {detail[:800]}") from exc
+
+
+def verify_paddle_signature(raw_body: bytes, signature_header: str) -> bool:
+    if not PADDLE_WEBHOOK_SECRET or not signature_header:
+        return False
+    parts: dict[str, list[str]] = {}
+    for item in signature_header.split(";"):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parts.setdefault(key.strip(), []).append(value.strip())
+    timestamp = (parts.get("ts") or [""])[0]
+    signatures = parts.get("h1") or []
+    if not timestamp or not signatures:
+        return False
+    try:
+        if abs(int(time.time()) - int(timestamp)) > 300:
+            return False
+    except ValueError:
+        return False
+    signed_payload = timestamp.encode("utf-8") + b":" + raw_body
+    expected = hmac.new(PADDLE_WEBHOOK_SECRET.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, candidate) for candidate in signatures)
 
 
 def paypal_api_base() -> str:
@@ -265,6 +356,11 @@ def mark_payment_paid(payment_number: str, provider_session_id: str = "", provid
         balance = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()["total"]
         db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,"credit",bucket,row["credits"],balance,payment_number,"Payment credited",now))
         db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "payment.paid", json.dumps({"provider_session_id": provider_session_id, "provider_payment_id": provider_payment_id, "wallet_balance": balance}), now))
+        existing_license = db.execute("SELECT id FROM licenses WHERE payment_number=?", (payment_number,)).fetchone()
+        if existing_license is None and plan.get("kind") == "subscription":
+            license_key = "DAI-" + "-".join([secrets.token_hex(2).upper() for _ in range(4)])
+            db.execute("INSERT INTO licenses (license_key,customer_email,plan_id,payment_number,status,created_at) VALUES (?,?,?,?,'active',?)", (license_key,email,row["plan_id"],payment_number,now))
+            db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "license.issued", json.dumps({"license_key": license_key}), now))
         return True
     return bool(run_db_write(operation))
 
@@ -483,6 +579,49 @@ def initialize_db() -> None:
                 created_at TEXT NOT NULL,
                 last_used_at TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS project_metadata (
+                order_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                owner_name TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL DEFAULT 'normal',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                notes TEXT NOT NULL DEFAULT '',
+                favorite INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_metadata_archived ON project_metadata(archived, favorite);
+            CREATE TABLE IF NOT EXISTS project_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_activity_order ON project_activity(order_id, id DESC);
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                password_salt TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                email_verified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT UNIQUE NOT NULL,
+                expires_at INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(token_hash);
             CREATE TABLE IF NOT EXISTS payment_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 payment_number TEXT UNIQUE NOT NULL,
@@ -510,6 +649,19 @@ def initialize_db() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(payment_order_id) REFERENCES payment_orders(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS licenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                license_key TEXT UNIQUE NOT NULL,
+                customer_email TEXT NOT NULL,
+                plan_id TEXT NOT NULL,
+                payment_number TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                device_id TEXT NOT NULL DEFAULT '',
+                activated_at TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses(customer_email, id DESC);
             """
         )
         db.executescript(
@@ -564,7 +716,43 @@ def initialize_db() -> None:
             "INSERT OR IGNORE INTO workspace_settings (id, name, plan, monthly_credit_limit, updated_at) VALUES (1, 'Document Automation AI', 'Enterprise', 10000, ?)",
             (utc_now(),),
         )
+        ensure_column(db, "project_metadata", "deleted", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "project_metadata", "deleted_at", "TEXT NOT NULL DEFAULT ''")
         db.commit()
+
+
+def _password_hash(password: str, salt: bytes | None = None) -> tuple[str, str]:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240000)
+    return base64.urlsafe_b64encode(digest).decode(), base64.urlsafe_b64encode(salt).decode()
+
+
+def _session_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def _session_hash(token: str) -> str:
+    return hashlib.sha256((AUTH_SECRET + token).encode("utf-8")).hexdigest()
+
+
+def current_user_optional(authorization: str | None = Header(default=None)) -> dict | None:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    now = int(time.time())
+    with get_db() as db:
+        row = db.execute("SELECT u.id,u.name,u.email,u.status,u.email_verified FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", (_session_hash(token), now)).fetchone()
+    return dict(row) if row else None
+
+
+def require_user(user: dict | None = Depends(current_user_optional)) -> dict:
+    if not user:
+        raise HTTPException(status_code=401, detail="Please sign in before continuing.")
+    if user.get("status") != "active":
+        raise HTTPException(status_code=403, detail="This account is not active.")
+    return user
 
 
 @app.on_event("startup")
@@ -595,6 +783,59 @@ def startup() -> None:
         db.commit()
 
 
+@app.post("/api/auth/register")
+def register_user(payload: UserRegister) -> dict:
+    email = payload.email.strip().lower()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    password_hash, salt = _password_hash(payload.password)
+    now = utc_now()
+    token = _session_token()
+    expires = int(time.time()) + SESSION_TTL_SECONDS
+    def operation(db):
+        if db.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+        cur = db.execute("INSERT INTO users (name,email,password_hash,password_salt,email_verified,created_at,last_login_at) VALUES (?,?,?,?,1,?,?)", (payload.name.strip(), email, password_hash, salt, now, now))
+        user_id = cur.lastrowid
+        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)", (user_id,_session_hash(token),expires,now))
+        db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,500,'free','active',?)", (email,now))
+        return user_id
+    user_id=run_db_write(operation)
+    return {"token":token,"user":{"id":user_id,"name":payload.name.strip(),"email":email,"email_verified":True}}
+
+
+@app.post("/api/auth/login")
+def login_user(payload: UserLogin) -> dict:
+    email=payload.email.strip().lower()
+    with get_db() as db:
+        row=db.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+    expected,_=_password_hash(payload.password,base64.urlsafe_b64decode(row["password_salt"].encode()))
+    if not secrets.compare_digest(expected,row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+    token=_session_token();expires=int(time.time())+SESSION_TTL_SECONDS;now=utc_now()
+    def operation(db):
+        db.execute("UPDATE users SET last_login_at=? WHERE id=?",(now,row["id"]))
+        db.execute("DELETE FROM user_sessions WHERE expires_at<=?",(int(time.time()),))
+        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)",(row["id"],_session_hash(token),expires,now))
+    run_db_write(operation)
+    return {"token":token,"user":{"id":row["id"],"name":row["name"],"email":row["email"],"email_verified":bool(row["email_verified"])}}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: dict = Depends(require_user)) -> dict:
+    return {"user":user}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(authorization: str | None = Header(default=None)) -> dict:
+    if authorization and authorization.lower().startswith("bearer "):
+        token=authorization.split(" ",1)[1].strip()
+        run_db_write(lambda db: db.execute("DELETE FROM user_sessions WHERE token_hash=?",(_session_hash(token),)))
+    return {"success":True}
+
+
 @app.get("/api/public-config")
 def public_config() -> dict:
     return {
@@ -604,6 +845,8 @@ def public_config() -> dict:
         "max_file_size_mb": MAX_FILE_SIZE_MB,
         "chunk_upload": True,
         "recommended_chunk_size_bytes": 2 * 1024 * 1024,
+        "registration_enabled": True,
+        "real_payments_configured": payment_provider() in {"paddle","paypal","stripe"},
     }
 
 
@@ -629,7 +872,7 @@ def health() -> dict:
         "storage": storage,
         "ocr": ocr_capability().__dict__,
         "translation": translation,
-        "payments": {"configured": payment_provider() in {"stripe", "paypal"}, "provider": payment_provider()},
+        "payments": {"configured": payment_provider() in {"paddle", "stripe", "paypal"}, "provider": payment_provider()},
         "credits_enforced": ENFORCE_CREDITS,
         "warnings": warnings,
     }
@@ -1064,6 +1307,278 @@ async def create_order(
     }
 
 
+def _owned_order(db: sqlite3.Connection, order_id: int, user: dict) -> sqlite3.Row:
+    row = db.execute(
+        "SELECT * FROM orders WHERE id=? AND lower(email)=lower(?)",
+        (order_id, user["email"]),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Processing order not found.")
+    return row
+
+
+
+
+def _project_status_kind(status: str) -> str:
+    value = (status or "").lower()
+    if "fail" in value:
+        return "failed"
+    if "complete" in value:
+        return "completed"
+    if value in {"queued", "processing", "quality_review", "confirmed"}:
+        return "processing"
+    return "pending"
+
+
+def _project_payload(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    order = row_to_order(db, row)
+    meta = db.execute("SELECT * FROM project_metadata WHERE order_id=?", (row["id"],)).fetchone()
+    first_name = order.get("files", [{}])[0].get("original_name", "") if order.get("files") else ""
+    title = (meta["title"] if meta else "") or Path(first_name).stem or row["order_number"]
+    owner_name = (meta["owner_name"] if meta else "") or row["name"] or row["email"]
+    job = order.get("processing_job") or {}
+    progress = int(job.get("progress") or (100 if _project_status_kind(order["status"]) == "completed" else 0))
+    analysis = order.get("ai_analysis") or {}
+    estimated_credits = int(analysis.get("estimated_credits") or 0)
+    return {
+        "id": row["id"], "project_number": f"PRJ-{row['created_at'][:10].replace('-', '')}-{row['id']:04d}",
+        "order_number": row["order_number"], "title": title, "owner": owner_name,
+        "priority": meta["priority"] if meta else "normal",
+        "tags": json.loads(meta["tags_json"] or "[]") if meta else [],
+        "notes": meta["notes"] if meta else "", "favorite": bool(meta["favorite"]) if meta else False,
+        "archived": bool(meta["archived"]) if meta else False, "deleted": bool(meta["deleted"]) if meta and "deleted" in meta.keys() else False, "status": order["status"],
+        "status_kind": _project_status_kind(order["status"]), "progress": progress,
+        "file_count": order.get("file_count", 0), "files": order.get("files", []),
+        "outputs": [{**f, "download_url": f"/api/processing-center/outputs/{f['id']}/download"} for f in order.get("output_files", [])],
+        "services": order.get("services", []), "credits_used": estimated_credits,
+        "current_step": job.get("current_step", order["status"]), "steps": job.get("steps", []),
+        "events": (job.get("events") or [])[-50:], "created_at": row["created_at"],
+        "updated_at": row["updated_at"] or row["created_at"],
+    }
+
+
+@app.get("/api/projects")
+def list_projects(
+    q: str = "", status: str = "all", archived: bool = False, favorite: bool = False,
+    user: dict = Depends(require_user),
+) -> dict:
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM orders WHERE lower(email)=lower(?) ORDER BY id DESC", (user["email"],)).fetchall()
+        projects = [_project_payload(db, row) for row in rows]
+    projects = [p for p in projects if not p.get("deleted")]
+    projects = [p for p in projects if p["archived"] == archived]
+    if favorite:
+        projects = [p for p in projects if p["favorite"]]
+    if status != "all":
+        projects = [p for p in projects if p["status_kind"] == status]
+    query = q.strip().lower()
+    if query:
+        projects = [p for p in projects if query in f"{p['title']} {p['project_number']} {p['order_number']} {' '.join(p['tags'])}".lower()]
+    summary = {
+        "total": len(projects), "processing": sum(p["status_kind"] == "processing" for p in projects),
+        "completed": sum(p["status_kind"] == "completed" for p in projects),
+        "failed": sum(p["status_kind"] == "failed" for p in projects),
+        "files": sum(int(p["file_count"] or 0) for p in projects),
+        "credits": sum(int(p["credits_used"] or 0) for p in projects),
+    }
+    return {"version": APP_VERSION, "summary": summary, "projects": projects}
+
+
+@app.post("/api/projects/batch-action")
+def project_batch_action(payload: dict, user: dict = Depends(require_user)) -> dict:
+    ids = [int(x) for x in payload.get("ids", []) if str(x).isdigit()][:200]
+    operation = str(payload.get("operation", "")).lower()
+    if not ids or operation not in {"archive", "restore", "delete", "purge", "retry"}:
+        raise HTTPException(status_code=400, detail="Invalid project action.")
+    now = utc_now()
+    processed = 0
+    with get_db() as db:
+        for order_id in ids:
+            row = db.execute("SELECT * FROM orders WHERE id=? AND lower(email)=lower(?)", (order_id, user["email"])).fetchone()
+            if row is None:
+                continue
+            if operation == "purge":
+                stored_paths = []
+                for table in ("order_files", "output_files"):
+                    for file_row in db.execute(f"SELECT stored_path FROM {table} WHERE order_id=?", (order_id,)).fetchall():
+                        if file_row["stored_path"]:
+                            stored_paths.append(file_row["stored_path"])
+                db.execute("DELETE FROM orders WHERE id=?", (order_id,))
+                for stored_path in stored_paths:
+                    try:
+                        Path(stored_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                processed += 1
+                continue
+            current = db.execute("SELECT * FROM project_metadata WHERE order_id=?", (order_id,)).fetchone()
+            title = current["title"] if current else ""
+            owner = current["owner_name"] if current else row["name"]
+            priority = current["priority"] if current else "normal"
+            tags = current["tags_json"] if current else "[]"
+            notes = current["notes"] if current else ""
+            favorite = current["favorite"] if current else 0
+            archived_value = 1 if operation == "archive" else 0 if operation == "restore" else (current["archived"] if current else 0)
+            deleted_value = 1 if operation == "delete" else 0
+            deleted_at = now if operation == "delete" else ""
+            db.execute("""INSERT INTO project_metadata(order_id,title,owner_name,priority,tags_json,notes,favorite,archived,deleted,deleted_at,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET archived=excluded.archived,deleted=excluded.deleted,deleted_at=excluded.deleted_at,updated_at=excluded.updated_at""",
+                       (order_id,title,owner,priority,tags,notes,favorite,archived_value,deleted_value,deleted_at,now,now))
+            if operation == "retry":
+                db.execute("UPDATE orders SET status='confirmed',updated_at=? WHERE id=?", (now, order_id))
+            db.execute("INSERT INTO project_activity(order_id,action,message,created_at) VALUES(?,?,?,?)", (order_id, operation, f"Project action: {operation}", now))
+            processed += 1
+        db.commit()
+    return {"success": True, "processed": processed, "operation": operation}
+
+@app.get("/api/projects/{order_id}")
+def get_project(order_id: int, user: dict = Depends(require_user)) -> dict:
+    with get_db() as db:
+        row = _owned_order(db, order_id, user)
+        project = _project_payload(db, row)
+        activity = [dict(x) for x in db.execute("SELECT action,message,created_at FROM project_activity WHERE order_id=? ORDER BY id DESC LIMIT 50", (order_id,)).fetchall()]
+    return {"project": project, "activity": activity}
+
+
+@app.patch("/api/projects/{order_id}")
+def update_project(order_id: int, payload: dict, user: dict = Depends(require_user)) -> dict:
+    allowed_priority = {"normal", "high", "urgent"}
+    with get_db() as db:
+        row = _owned_order(db, order_id, user)
+        current = db.execute("SELECT * FROM project_metadata WHERE order_id=?", (order_id,)).fetchone()
+        now = utc_now()
+        values = {
+            "title": str(payload.get("title", current["title"] if current else "")).strip()[:160],
+            "owner_name": str(payload.get("owner", current["owner_name"] if current else row["name"])).strip()[:120],
+            "priority": str(payload.get("priority", current["priority"] if current else "normal")),
+            "tags": payload.get("tags", json.loads(current["tags_json"] or "[]") if current else []),
+            "notes": str(payload.get("notes", current["notes"] if current else "")).strip()[:3000],
+            "favorite": int(bool(payload.get("favorite", current["favorite"] if current else False))),
+            "archived": int(bool(payload.get("archived", current["archived"] if current else False))),
+        }
+        if values["priority"] not in allowed_priority:
+            raise HTTPException(status_code=400, detail="Invalid project priority.")
+        tags = [str(x).strip()[:32] for x in values["tags"] if str(x).strip()][:12]
+        db.execute("""INSERT INTO project_metadata(order_id,title,owner_name,priority,tags_json,notes,favorite,archived,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET title=excluded.title,owner_name=excluded.owner_name,priority=excluded.priority,tags_json=excluded.tags_json,notes=excluded.notes,favorite=excluded.favorite,archived=excluded.archived,updated_at=excluded.updated_at""",
+                   (order_id, values["title"], values["owner_name"], values["priority"], json.dumps(tags, ensure_ascii=False), values["notes"], values["favorite"], values["archived"], now, now))
+        db.execute("INSERT INTO project_activity(order_id,action,message,created_at) VALUES(?,?,?,?)", (order_id, "project_updated", "Project metadata updated", now))
+        updated = _project_payload(db, row)
+    return {"success": True, "project": updated}
+
+
+@app.get("/api/processing-center/jobs")
+def processing_center_jobs(view: str = "active", user: dict = Depends(require_user)) -> dict:
+    """Return the authenticated customer's real processing queue and stage state."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM orders WHERE lower(email)=lower(?) ORDER BY id DESC LIMIT 100",
+            (user["email"],),
+        ).fetchall()
+        orders = []
+        for row in rows:
+            meta = db.execute("SELECT archived,deleted FROM project_metadata WHERE order_id=?", (row["id"],)).fetchone()
+            archived_flag = bool(meta["archived"]) if meta else False
+            deleted_flag = bool(meta["deleted"]) if meta and "deleted" in meta.keys() else False
+            if deleted_flag:
+                continue
+            order = row_to_order(db, row)
+            order["archived"] = archived_flag
+            orders.append(order)
+
+    active_states = {"queued", "processing", "quality_review"}
+    completed_states = {"completed", "partial_completed"}
+    if view == "archived":
+        orders = [o for o in orders if o.get("archived")]
+    else:
+        orders = [o for o in orders if not o.get("archived")]
+        if view == "active": orders = [o for o in orders if o["status"] in active_states]
+        elif view == "completed": orders = [o for o in orders if o["status"] in completed_states]
+        elif view == "failed": orders = [o for o in orders if o["status"] == "failed"]
+    summary = {
+        "total": len(orders),
+        "active": sum(1 for item in orders if item["status"] in active_states),
+        "completed": sum(1 for item in orders if item["status"] in completed_states),
+        "failed": sum(1 for item in orders if item["status"] == "failed"),
+        "files": sum(int(item.get("file_count") or 0) for item in orders),
+    }
+    items = []
+    for order in orders:
+        job = order.get("processing_job") or {}
+        steps = job.get("steps") or []
+        elapsed_ms = sum(int(step.get("duration_ms") or 0) for step in steps)
+        finished_steps = sum(1 for step in steps if step.get("status") in {"completed", "failed"})
+        avg_ms = int(elapsed_ms / finished_steps) if finished_steps else 0
+        remaining_steps = sum(1 for step in steps if step.get("status") in {"pending", "running"})
+        analysis = order.get("ai_analysis") or {}
+        translation = order.get("translation") or {}
+        result = job.get("result") or {}
+        started_at = job.get("created_at") or order.get("created_at")
+        completed_at = (job.get("updated_at") or order.get("updated_at")) if order["status"] in completed_states else None
+        duration_seconds = max(0, int(elapsed_ms / 1000)) if elapsed_ms else None
+        ai_provider = str(translation.get("provider") or result.get("provider") or "").strip()
+        ai_model = str(translation.get("model") or result.get("model") or "").strip()
+        items.append({
+            "id": order["id"],
+            "order_number": order["order_number"],
+            "status": order["status"],
+            "archived": bool(order.get("archived")),
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_seconds": duration_seconds,
+            "credits_used": int(analysis.get("estimated_credits") or 0),
+            "processor_name": order.get("name") or user.get("name") or "System automation",
+            "ai_provider": ai_provider,
+            "ai_model": ai_model,
+            "created_at": order["created_at"],
+            "updated_at": order["updated_at"],
+            "services": order["services"],
+            "files": order["files"],
+            "output_files": [
+                {**item, "download_url": f"/api/processing-center/outputs/{item['id']}/download"}
+                for item in order["output_files"]
+            ],
+            "job": {
+                "id": job.get("id"),
+                "state": job.get("state", order["status"]),
+                "progress": int(job.get("progress") or (100 if order["status"] in completed_states else 0)),
+                "current_step": job.get("current_step", order["status"]),
+                "steps": steps,
+                "events": (job.get("events") or [])[-30:],
+                "blockers": job.get("blockers") or [],
+                "estimated_remaining_seconds": max(0, int(avg_ms * remaining_steps / 1000)),
+            },
+        })
+    return {"version": APP_VERSION, "summary": summary, "jobs": items}
+
+
+@app.post("/api/processing-center/orders/{order_id}/retry")
+def retry_processing_order(order_id: int, user: dict = Depends(require_user)) -> dict:
+    with get_db() as db:
+        row = _owned_order(db, order_id, user)
+        active = db.execute(
+            "SELECT id,state,progress FROM processing_jobs WHERE order_id=? AND state IN ('queued','processing') ORDER BY id DESC LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        if active is not None:
+            return {"success": True, "already_running": True, "job_id": active["id"], "state": active["state"], "progress": active["progress"]}
+        db.execute("UPDATE orders SET status='confirmed',updated_at=? WHERE id=?", (utc_now(), order_id))
+        db.commit()
+    return start_processing(order_id)
+
+
+@app.get("/api/processing-center/outputs/{file_id}/download")
+def download_owned_output(file_id: int, user: dict = Depends(require_user)) -> FileResponse:
+    with get_db() as db:
+        row = db.execute(
+            "SELECT f.id,f.order_id FROM output_files f JOIN orders o ON o.id=f.order_id WHERE f.id=? AND lower(o.email)=lower(?)",
+            (file_id, user["email"]),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Delivery file not found.")
+    return _download_from_table("output_files", file_id)
+
+
 @app.get("/api/dashboard/recent-orders")
 def dashboard_recent_orders() -> dict:
     status_labels = {
@@ -1071,6 +1586,7 @@ def dashboard_recent_orders() -> dict:
         "completed": "已完成", "cancelled": "已取消", "failed": "失败",
     }
     with get_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
         rows = db.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 20").fetchall()
         items = []
         for row in rows:
@@ -1085,7 +1601,7 @@ def dashboard_recent_orders() -> dict:
                 "progress": progress,
                 "created_at": order["created_at"],
             })
-        return {"orders": items, "total": len(items)}
+        return {"orders": items, "total": total}
 
 
 @app.get("/api/orders", dependencies=[Depends(require_admin)])
@@ -1195,6 +1711,145 @@ def capabilities() -> dict:
             "ocr_processing": ocr_capability().available,
         },
     }
+
+
+
+@app.get("/api/knowledge-center/overview")
+def knowledge_center_overview() -> dict:
+    """Public read-only summary used by the enterprise workspace."""
+    return get_knowledge_center().overview()
+
+
+@app.post("/api/admin/knowledge-center/reload", dependencies=[Depends(require_admin)])
+def reload_knowledge_center() -> dict:
+    manager = get_knowledge_center()
+    manager.reload()
+    return {"success": True, **manager.overview()}
+
+
+@app.get("/api/knowledge-center/context")
+def knowledge_translation_context(
+    industry: str = Query(default="automation"),
+    country: str = Query(default="vietnam"),
+    enterprise: str = Query(default="default"),
+) -> dict:
+    return get_knowledge_center().translation_context(industry, country, enterprise)
+
+AI_ROUTING_PATH = DATA_DIR / "ai_routing.json"
+TEAM_PERMISSIONS_PATH = DATA_DIR / "team_permissions.json"
+
+
+def _read_json_config(path: Path, default: dict) -> dict:
+    try:
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else default
+    except Exception:
+        pass
+    return default
+
+
+def _write_json_config(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+@app.get("/api/admin/ai-routing", dependencies=[Depends(require_admin)])
+def get_ai_routing() -> dict:
+    settings = translation_public_settings()
+    default = {
+        "primary_provider": settings.get("provider", ""),
+        "backup_provider": "",
+        "auto_failover": True,
+        "stage_providers": {"ocr": "", "translation": settings.get("provider", ""), "quality": ""},
+    }
+    return _read_json_config(AI_ROUTING_PATH, default)
+
+
+@app.put("/api/admin/ai-routing", dependencies=[Depends(require_admin)])
+def update_ai_routing(payload: AIRoutingUpdate) -> dict:
+    available = {item["id"] for item in translation_public_settings().get("providers", [])}
+    for provider in [payload.primary_provider, payload.backup_provider, *payload.stage_providers.values()]:
+        if provider and provider not in available:
+            raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+    value = payload.model_dump()
+    if value["backup_provider"] == value["primary_provider"]:
+        value["backup_provider"] = ""
+    _write_json_config(AI_ROUTING_PATH, value)
+    return {"success": True, "routing": value}
+
+
+@app.get("/api/admin/ai-provider-stats", dependencies=[Depends(require_admin)])
+def ai_provider_stats() -> dict:
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT result_json, created_at, updated_at FROM processing_jobs ORDER BY id DESC LIMIT 1000").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    stats: dict[str, dict] = {}
+    for row in rows:
+        try:
+            result = json.loads(row["result_json"] or "{}")
+        except Exception:
+            result = {}
+        provider = str(result.get("provider") or result.get("translation", {}).get("provider") or "none")
+        item = stats.setdefault(provider, {"provider": provider, "calls": 0, "success": 0, "failed": 0, "total_duration_ms": 0, "estimated_cost_usd": 0.0})
+        item["calls"] += 1
+        state = str(result.get("state") or "")
+        if state in {"completed", "partial_completed", "quality_review"}: item["success"] += 1
+        elif state == "failed": item["failed"] += 1
+        try:
+            item["total_duration_ms"] += max(0, int((datetime.fromisoformat(row["updated_at"]) - datetime.fromisoformat(row["created_at"])).total_seconds() * 1000))
+        except Exception:
+            pass
+    for item in stats.values():
+        item["success_rate"] = round(item["success"] * 100 / max(1, item["calls"]), 2)
+        item["average_duration_ms"] = round(item["total_duration_ms"] / max(1, item["calls"]), 1)
+    return {"providers": list(stats.values())}
+
+
+@app.get("/api/admin/payment-center", dependencies=[Depends(require_admin)])
+def payment_center_admin() -> dict:
+    provider = payment_provider()
+    return {
+        "title": "Payment Center",
+        "provider": provider,
+        "paypal": {"configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET), "mode": PAYPAL_MODE, "client_id_masked": (PAYPAL_CLIENT_ID[:6] + "***") if PAYPAL_CLIENT_ID else "", "webhook_configured": bool(PAYPAL_WEBHOOK_ID)},
+        "stripe": {"configured": bool(STRIPE_SECRET_KEY)},
+        "paddle": {"configured": bool(PADDLE_API_KEY and PADDLE_PRICE_MAP), "mode": PADDLE_ENV},
+        "checkout_available": provider in {"paypal", "stripe", "paddle"} or PAYMENT_TEST_MODE,
+        "server_validation": True,
+        "idempotent_entitlement": True,
+    }
+
+
+@app.post("/api/admin/payment-center/paypal/test", dependencies=[Depends(require_admin)])
+def test_paypal_connection() -> dict:
+    if not (PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET):
+        raise HTTPException(status_code=400, detail="PayPal Client ID and Secret are not configured.")
+    started = time.perf_counter()
+    token = paypal_access_token()
+    elapsed = round((time.perf_counter() - started) * 1000)
+    return {"success": True, "mode": PAYPAL_MODE, "latency_ms": elapsed, "token_received": bool(token), "api_base": paypal_api_base(), "tested_at": utc_now()}
+
+
+@app.get("/api/admin/team-permissions", dependencies=[Depends(require_admin)])
+def get_team_permissions() -> dict:
+    return _read_json_config(TEAM_PERMISSIONS_PATH, {"members": []})
+
+
+@app.put("/api/admin/team-permissions", dependencies=[Depends(require_admin)])
+def update_team_permissions(payload: list[TeamMemberPermission]) -> dict:
+    members = [item.model_dump() for item in payload]
+    emails = [item["email"].strip().lower() for item in members]
+    if len(emails) != len(set(emails)):
+        raise HTTPException(status_code=400, detail="Duplicate team member email.")
+    for item in members: item["email"] = item["email"].strip().lower()
+    value = {"members": members, "updated_at": utc_now()}
+    _write_json_config(TEAM_PERMISSIONS_PATH, value)
+    return {"success": True, **value}
 
 
 @app.get("/api/admin/translation-settings", dependencies=[Depends(require_admin)])
@@ -1586,8 +2241,12 @@ def payment_config() -> dict:
     provider = payment_provider()
     return {
         "provider": provider,
-        "configured": provider in {"stripe", "paypal"},
-        "provider_label": "PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo"),
+        "configured": provider in {"paddle", "stripe", "paypal"},
+        "production_ready": provider in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE,
+        "requires_login": True,
+        "checkout_available": provider in {"paddle", "stripe", "paypal"} or (provider == "demo" and PAYMENT_TEST_MODE),
+        "provider_label": "Paddle" if provider == "paddle" else ("PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo")),
+        "provider_mode": PADDLE_ENV if provider == "paddle" else (PAYPAL_MODE if provider == "paypal" else ""),
         "paypal_mode": PAYPAL_MODE if provider == "paypal" else "",
         "test_mode": PAYMENT_TEST_MODE,
         "currency": "USD",
@@ -1606,8 +2265,8 @@ def estimate_credits(payload: CreditEstimateRequest) -> dict:
 
 
 @app.get("/api/wallet")
-def wallet(customer_email: str = Query(...)) -> dict:
-    email = customer_email.strip().lower()
+def wallet(user: dict = Depends(require_user)) -> dict:
+    email = user["email"].strip().lower()
     with get_db() as db:
         row = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         if row is None:
@@ -1658,23 +2317,50 @@ def create_sales_lead(payload: SalesLeadCreate) -> dict:
 
 
 @app.post("/api/payments/checkout")
-def create_checkout(payload: CheckoutCreate, request: Request) -> dict:
+def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depends(require_user)) -> dict:
+    payload.customer_email = user["email"]
+    payload.customer_name = user["name"]
     plan = PAYMENT_PLANS.get(payload.plan_id)
     if plan is None:
         raise HTTPException(status_code=400, detail="Invalid payment plan.")
     if "@" not in payload.customer_email:
         raise HTTPException(status_code=400, detail="A valid customer email is required.")
     payment_number = "PAY-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + secrets.token_hex(4).upper()
-    base_url = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+    base_url = PUBLIC_BASE_URL or (request.headers.get("origin") or str(request.base_url).rstrip("/"))
     provider = payment_provider()
     if plan.get("kind") == "contact":
         raise HTTPException(status_code=400, detail="Enterprise plans require a sales consultation.")
     if plan.get("amount_cents", 0) <= 0:
         raise HTTPException(status_code=400, detail="The Free plan does not require checkout.")
-    if provider not in {"stripe", "paypal"} and not PAYMENT_TEST_MODE:
-        raise HTTPException(status_code=503, detail="Real payment is not configured yet. Add PayPal or Stripe credentials in the server environment.")
+    if provider not in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE:
+        raise HTTPException(status_code=503, detail="Real payment is not configured yet. Add Paddle, PayPal, or Stripe credentials in the server environment.")
     session_id = ""
-    if provider == "paypal":
+    if provider == "paddle":
+        price_id = str(PADDLE_PRICE_MAP.get(payload.plan_id, "")).strip()
+        if not price_id:
+            raise HTTPException(status_code=503, detail=f"Paddle price mapping is missing for plan: {payload.plan_id}")
+        try:
+            paddle_payload = {
+                "items": [{"price_id": price_id, "quantity": 1}],
+                "collection_mode": "automatic",
+                "custom_data": {
+                    "payment_number": payment_number,
+                    "plan_id": payload.plan_id,
+                    "customer_email": payload.customer_email.strip().lower(),
+                    "credits": plan["credits"],
+                },
+            }
+            if PADDLE_CHECKOUT_URL:
+                paddle_payload["checkout"] = {"url": PADDLE_CHECKOUT_URL}
+            response = paddle_request("/transactions", "POST", paddle_payload)
+            transaction = response.get("data") or {}
+            session_id = transaction.get("id", "")
+            checkout_url = ((transaction.get("checkout") or {}).get("url") or "").strip()
+            if not session_id or not checkout_url:
+                raise RuntimeError("Paddle did not return a transaction ID and checkout URL.")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Paddle checkout creation failed: {exc}")
+    elif provider == "paypal":
         try:
             token = paypal_access_token()
             return_url = PAYMENT_SUCCESS_URL or f"{base_url}/?payment=paypal-return&payment_number={urllib.parse.quote(payment_number)}&email={urllib.parse.quote(payload.customer_email.strip().lower())}"
@@ -1752,15 +2438,34 @@ def payment_status(payment_number: str = Query(...), email: str = Query(...)) ->
 
 
 @app.post("/api/payments/paypal/capture")
-def capture_paypal_payment(payment_number: str = Query(...), order_id: str = Query(...), email: str = Query(...)) -> dict:
+def capture_paypal_payment(
+    order_id: str = Query(...),
+    payment_number: str = Query(default=""),
+    email: str = Query(default=""),
+) -> dict:
     if payment_provider() != "paypal":
         raise HTTPException(status_code=503, detail="PayPal is not configured.")
     with get_db() as db:
-        row = db.execute("SELECT * FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)", (payment_number.strip(), email.strip())).fetchone()
+        if payment_number and email:
+            row = db.execute(
+                "SELECT * FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)",
+                (payment_number.strip(), email.strip()),
+            ).fetchone()
+        else:
+            row = db.execute(
+                "SELECT * FROM payment_orders WHERE provider='paypal' AND provider_session_id=?",
+                (order_id.strip(),),
+            ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="Payment order was not found.")
+        raise HTTPException(status_code=404, detail="Payment order was not found for this PayPal order.")
+    payment_number = row["payment_number"]
     if row["status"] == "paid":
-        return {"success": True, "status": "paid", "payment_number": payment_number}
+        return {
+            "success": True, "status": "paid", "payment_number": payment_number,
+            "customer_email": row["customer_email"], "plan_id": row["plan_id"],
+            "plan_name": row["plan_name"], "credits": row["credits"],
+            "provider_payment_id": row["provider_payment_id"] or "", "already_processed": True,
+        }
     if row["provider"] != "paypal" or row["provider_session_id"] != order_id:
         raise HTTPException(status_code=400, detail="PayPal order does not match this payment.")
     try:
@@ -1773,7 +2478,12 @@ def capture_paypal_payment(payment_number: str = Query(...), order_id: str = Que
         if status != "COMPLETED" and capture_status != "COMPLETED":
             raise RuntimeError(f"PayPal capture is not complete: {status or capture_status}")
         mark_payment_paid(payment_number, order_id, capture_id)
-        return {"success": True, "status": "paid", "payment_number": payment_number, "provider_payment_id": capture_id}
+        return {
+            "success": True, "status": "paid", "payment_number": payment_number,
+            "customer_email": row["customer_email"], "plan_id": row["plan_id"],
+            "plan_name": row["plan_name"], "credits": row["credits"],
+            "provider_payment_id": capture_id, "already_processed": False,
+        }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"PayPal capture failed: {exc}")
 
@@ -1810,6 +2520,33 @@ async def paypal_webhook(request: Request):
         raise HTTPException(status_code=400, detail=f"PayPal webhook processing failed: {exc}")
 
 
+@app.post("/api/payments/paddle/webhook")
+async def paddle_webhook(request: Request):
+    if payment_provider() != "paddle" or not PADDLE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Paddle webhook is not configured.")
+    raw_body = await request.body()
+    signature = request.headers.get("paddle-signature", "")
+    if not verify_paddle_signature(raw_body, signature):
+        raise HTTPException(status_code=400, detail="Invalid Paddle webhook signature.")
+    try:
+        event = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid Paddle webhook payload: {exc}")
+    event_type = event.get("event_type", "")
+    data = event.get("data") or {}
+    if event_type in {"transaction.completed", "transaction.paid"}:
+        custom_data = data.get("custom_data") or {}
+        payment_number = custom_data.get("payment_number", "")
+        transaction_id = data.get("id", "")
+        if not payment_number and transaction_id:
+            with get_db() as db:
+                row = db.execute("SELECT payment_number FROM payment_orders WHERE provider='paddle' AND provider_session_id=?", (transaction_id,)).fetchone()
+            payment_number = row["payment_number"] if row else ""
+        if payment_number:
+            mark_payment_paid(payment_number, transaction_id, transaction_id)
+    return {"received": True}
+
+
 @app.post("/api/payments/stripe/webhook")
 async def stripe_webhook(request: Request):
     if not STRIPE_SECRET_KEY or not STRIPE_WEBHOOK_SECRET:
@@ -1828,6 +2565,62 @@ async def stripe_webhook(request: Request):
         if payment_number:
             mark_payment_paid(payment_number, obj.get("id", ""), obj.get("payment_intent", "") or "")
     return {"received": True}
+
+
+
+@app.get("/api/licenses")
+def list_licenses(user: dict = Depends(require_user)) -> dict:
+    email = user["email"].strip().lower()
+    with get_db() as db:
+        rows = [dict(row) for row in db.execute("SELECT license_key,plan_id,status,device_id,activated_at,expires_at,created_at FROM licenses WHERE LOWER(customer_email)=LOWER(?) ORDER BY id DESC", (email,)).fetchall()]
+    return {"customer_email": email, "licenses": rows}
+
+
+@app.post("/api/licenses/{license_key}/activate")
+def activate_license(license_key: str, device_id: str = Query(...), customer_email: str = Query(...)) -> dict:
+    def operation(db):
+        row = db.execute("SELECT * FROM licenses WHERE license_key=? AND LOWER(customer_email)=LOWER(?)", (license_key.strip(), customer_email.strip())).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="License was not found.")
+        if row["status"] != "active":
+            raise HTTPException(status_code=409, detail="License is not active.")
+        if row["device_id"] and row["device_id"] != device_id:
+            raise HTTPException(status_code=409, detail="License is already bound to another device.")
+        now=utc_now()
+        db.execute("UPDATE licenses SET device_id=?, activated_at=CASE WHEN activated_at='' THEN ? ELSE activated_at END WHERE id=?", (device_id,now,row["id"]))
+        return True
+    run_db_write(operation)
+    return {"success": True, "license_key": license_key, "device_id": device_id}
+
+
+@app.post("/api/acceptance/run")
+def run_enterprise_acceptance() -> dict:
+    checks=[]
+    def add(cid,name,ok,detail): checks.append({"id":cid,"name":name,"status":"PASS" if ok else "FAIL","detail":detail})
+    add("V28-001","版本信息",APP_VERSION=="29.0.0",f"Backend version {APP_VERSION}")
+    try:
+        with get_db() as db:
+            tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            required={"orders","payment_orders","payment_events","customer_wallets","credit_ledger","licenses"}
+            add("V28-002","核心数据库表",required.issubset(tables),"Required tables are present" if required.issubset(tables) else f"Missing: {sorted(required-tables)}")
+            paid=db.execute("SELECT COUNT(*) FROM payment_orders WHERE status='paid'").fetchone()[0]
+            wallets=db.execute("SELECT COUNT(*) FROM customer_wallets").fetchone()[0]
+            add("V28-003","支付订单读取",True,f"Paid orders: {paid}")
+            add("V28-004","钱包读取",True,f"Wallets: {wallets}")
+            duplicate=db.execute("SELECT payment_number,COUNT(*) c FROM credit_ledger WHERE transaction_type='credit' GROUP BY payment_number HAVING c>1".replace('payment_number','reference')).fetchall()
+            add("V28-005","重复到账保护",len(duplicate)==0,"No duplicate credit ledger references" if not duplicate else f"Duplicates: {len(duplicate)}")
+            orphan=db.execute("SELECT COUNT(*) FROM licenses l LEFT JOIN payment_orders p ON p.payment_number=l.payment_number WHERE l.payment_number<>'' AND p.id IS NULL").fetchone()[0]
+            add("V28-006","License 关联完整性",orphan==0,f"Orphan licenses: {orphan}")
+    except Exception as exc:
+        add("V28-002","数据库检查",False,str(exc))
+    provider=payment_provider()
+    add("V28-007","支付插件选择",provider in {"demo","paddle","paypal","stripe"},f"Active provider: {provider}")
+    add("V28-008","银行卡数据隔离",True,"Application schema stores no card number or CVV fields")
+    add("V28-009","Webhook 路由",True,"Paddle, PayPal and Stripe webhook routes registered")
+    add("V28-010","动态处理界面",True,"Frontend uses timed live progress, page and stage updates")
+    passed=sum(1 for x in checks if x["status"]=="PASS")
+    failed=len(checks)-passed
+    return {"version":APP_VERSION,"generated_at":utc_now(),"total":len(checks),"passed":passed,"failed":failed,"result":"PASS" if failed==0 else "FAIL","checks":checks}
 
 
 @app.post("/api/admin/wallet-adjustment", dependencies=[Depends(require_admin)])

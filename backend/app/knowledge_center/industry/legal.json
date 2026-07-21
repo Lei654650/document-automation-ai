@@ -1,0 +1,41 @@
+{
+  "id": "legal",
+  "name_zh": "法律",
+  "name_en": "Legal",
+  "version": "1.0",
+  "status": "active",
+  "terms": [
+    {
+      "source": "Party A",
+      "translations": {}
+    },
+    {
+      "source": "Party B",
+      "translations": {}
+    },
+    {
+      "source": "Confidentiality",
+      "translations": {}
+    },
+    {
+      "source": "Force Majeure",
+      "translations": {}
+    },
+    {
+      "source": "Jurisdiction",
+      "translations": {}
+    }
+  ],
+  "phrases": [
+    "保密义务",
+    "适用法律",
+    "不可抗力"
+  ],
+  "abbreviations": [],
+  "units": [],
+  "rules": [
+    "preserve_numbers",
+    "preserve_units",
+    "consistent_terminology"
+  ]
+}
