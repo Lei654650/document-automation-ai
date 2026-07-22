@@ -10,6 +10,8 @@ import io
 import json
 import mimetypes
 import os
+import logging
+import ssl
 import secrets
 import shutil
 import subprocess
@@ -30,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+import certifi
 
 from app.services.document_analyzer import analyze_order_files
 from app.services.runtime_service import storage_diagnostics
@@ -46,7 +49,9 @@ from app.engines.translation_engine import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
-APP_VERSION = "30.2.0"
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("document_automation_ai")
+APP_VERSION = "30.3.1"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -265,7 +270,7 @@ def paddle_request(path: str, method: str = "GET", payload: dict | None = None) 
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
@@ -296,6 +301,22 @@ def verify_paddle_signature(raw_body: bytes, signature_header: str) -> bool:
     return any(hmac.compare_digest(expected, candidate) for candidate in signatures)
 
 
+def _validate_paypal_credentials() -> None:
+    """Fail early with an actionable error before contacting PayPal."""
+    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
+        raise RuntimeError("PAYPAL_CLIENT_ID or PAYPAL_CLIENT_SECRET is missing in the server environment.")
+    suspicious_tokens = ("sandbox client id", "client id", "sandbox secret", "client secret", "secret key")
+    combined = f"{PAYPAL_CLIENT_ID} {PAYPAL_CLIENT_SECRET}".lower()
+    if any(token in combined for token in suspicious_tokens):
+        raise RuntimeError("PayPal credentials appear to contain copied labels. Paste only the raw Client ID and Secret values from PayPal Developer Dashboard.")
+    if len(PAYPAL_CLIENT_ID) < 20 or len(PAYPAL_CLIENT_SECRET) < 20:
+        raise RuntimeError("PayPal Client ID or Secret is unexpectedly short. Re-copy the complete Sandbox credentials.")
+
+
+def _paypal_ssl_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def paypal_api_base() -> str:
     return "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
 
@@ -303,32 +324,55 @@ def paypal_api_base() -> str:
 def paypal_request(path: str, method: str = "GET", payload: dict | None = None, access_token: str = "") -> dict:
     url = paypal_api_base() + path
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Content-Type": "application/json", "Accept": "application/json", "Prefer": "return=representation"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json", "Prefer": "return=representation", "User-Agent": f"DocumentAutomationAI/{APP_VERSION}"}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        logger.exception("PayPal API request failed: %s %s -> HTTP %s: %s", method, path, exc.code, detail[:1000])
         raise RuntimeError(f"PayPal API error {exc.code}: {detail[:800]}") from exc
+    except urllib.error.URLError as exc:
+        logger.exception("PayPal API network error: %s %s", method, path)
+        raise RuntimeError(f"Unable to reach PayPal API: {exc.reason}") from exc
 
 
 def paypal_access_token() -> str:
+    _validate_paypal_credentials()
     credentials = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode()).decode()
     request = urllib.request.Request(
         paypal_api_base() + "/v1/oauth2/token",
         data=b"grant_type=client_credentials",
         method="POST",
-        headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": f"DocumentAutomationAI/{APP_VERSION}",
+        },
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
             body = json.loads(response.read().decode("utf-8"))
-            return body["access_token"]
+            token = str(body.get("access_token", "")).strip()
+            if not token:
+                raise RuntimeError("PayPal token response did not contain access_token.")
+            return token
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.exception("PayPal authentication rejected with HTTP %s: %s", exc.code, detail[:1000])
+        if exc.code == 401:
+            raise RuntimeError("PayPal rejected the Client ID or Secret (HTTP 401). Re-copy the matching Sandbox credentials from the same REST API app.") from exc
+        raise RuntimeError(f"PayPal authentication failed with HTTP {exc.code}: {detail[:500]}") from exc
+    except urllib.error.URLError as exc:
+        logger.exception("PayPal authentication network error: %s", exc.reason)
+        raise RuntimeError(f"Unable to reach PayPal API: {exc.reason}") from exc
     except Exception as exc:
+        logger.exception("Unexpected PayPal authentication error")
         raise RuntimeError(f"Unable to authenticate with PayPal: {exc}") from exc
 
 
@@ -1825,6 +1869,26 @@ def payment_center_admin() -> dict:
     }
 
 
+@app.get("/api/payments/paypal/diagnostics")
+def paypal_public_diagnostics(user: dict = Depends(require_user)) -> dict:
+    """Safe diagnostics: never returns secrets or an access token."""
+    result = {
+        "configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET),
+        "mode": PAYPAL_MODE,
+        "api_base": paypal_api_base(),
+        "client_id_length": len(PAYPAL_CLIENT_ID),
+        "secret_length": len(PAYPAL_CLIENT_SECRET),
+        "version": APP_VERSION,
+    }
+    try:
+        started = time.perf_counter()
+        token = paypal_access_token()
+        result.update({"success": bool(token), "latency_ms": round((time.perf_counter() - started) * 1000)})
+    except Exception as exc:
+        result.update({"success": False, "error": str(exc)})
+    return result
+
+
 @app.post("/api/admin/payment-center/paypal/test", dependencies=[Depends(require_admin)])
 def test_paypal_connection() -> dict:
     if not (PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET):
@@ -2385,6 +2449,7 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
             if not session_id or not checkout_url:
                 raise RuntimeError("PayPal did not return an approval URL.")
         except Exception as exc:
+            logger.exception("PayPal checkout creation failed for plan=%s user=%s", payload.plan_id, payload.customer_email)
             raise HTTPException(status_code=502, detail=f"PayPal checkout creation failed: {exc}")
     elif provider == "stripe":
         try:
