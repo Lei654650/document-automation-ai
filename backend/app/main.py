@@ -51,7 +51,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "30.3.1"
+APP_VERSION = "30.3.2"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -2450,7 +2450,17 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
                 raise RuntimeError("PayPal did not return an approval URL.")
         except Exception as exc:
             logger.exception("PayPal checkout creation failed for plan=%s user=%s", payload.plan_id, payload.customer_email)
-            raise HTTPException(status_code=502, detail=f"PayPal checkout creation failed: {exc}")
+            message = str(exc)
+            if payload.locale.lower().startswith("zh"):
+                if "HTTP 401" in message or "rejected the Client ID or Secret" in message:
+                    detail = "PayPal 凭证验证失败：请确认 Sandbox Client ID 和 Client Secret 来自同一个 REST API 应用，并重新复制到 Vercel 环境变量。"
+                else:
+                    detail = f"PayPal 创建支付订单失败：{message}"
+            elif payload.locale.lower().startswith("vi"):
+                detail = f"Không thể tạo đơn thanh toán PayPal: {message}"
+            else:
+                detail = f"PayPal checkout creation failed: {message}"
+            raise HTTPException(status_code=502, detail=detail)
     elif provider == "stripe":
         try:
             import stripe
