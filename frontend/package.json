@@ -1,7 +1,7 @@
 {
   "name": "document-automation-ai-enterprise",
   "private": true,
-  "version": "30.3.3",
+  "version": "33.9.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,5 +15,5 @@
     "react-dom": "^19.2.0",
     "vite": "^8.1.4"
   },
-  "description": "Document Automation AI Enterprise V29 Commercial Processing, Commerce and Acceptance"
+  "description": "Document Automation AI V33.0 Enterprise Workspace rebuild"
 }

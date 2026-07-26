@@ -1,3 +1,25 @@
+## V33.8.4
+
+- Added Enterprise Workspace Home entry and clickable brand navigation.
+- Strengthened wallet billing-cycle selection.
+- Added Professional plan selection and hover polish.
+- Unified account popover hover and profile navigation.
+
+
+## V33.7.0
+- Settings Center enterprise refinement.
+- Security device history and notification presets.
+- AI/OCR status and provider-center guidance.
+# V33.4.1
+
+Settings Center final commercial refinement and interaction closure.
+
+## V32.3.2 - Password Recovery Production Closure
+
+- Closed production exposure risk for development reset codes.
+- Added strict submit enablement, read-only reset email, password guidance, session invalidation notice, and success countdown UI.
+- Corrected all release names and version identifiers to V32.3.2.
+
 # V30.2.0
 
 - 完成 PayPal 网站收款链路与服务端校验。
@@ -208,3 +230,19 @@
 - PayPal return now resolves the local order from the PayPal order token even when a custom return URL omits payment metadata.
 - Added explicit payment-success confirmation with plan, credits, and payment number.
 - Preserved idempotent crediting and license issuance on repeated callbacks.
+
+## V34.4.0 - Quality Delivery Policy
+- Changed unresolved terminology from a hard processing failure to a review warning.
+- Preserved deliverable workbooks even when a small number of PLC/HMI terms require manual confirmation.
+- Kept hard failures for corrupted, unreadable, or non-exportable files.
+- Added quality-delivery regression protection.
+
+## V35.0.0
+- Rebuilt the primary Excel write-back path to avoid multi-minute Windows `os.replace` stalls.
+- Skipped full multiline-layout package rewrites for inline/columns/target-only output.
+- Added write-back regression protection and customer-sample performance validation.
+
+## V37.2.0
+- Added pre-provider deterministic PLC/HMI translation fast path.
+- Invalidated known legacy Vietnamese mistranslations during repair mode.
+- Added rule-hit and provider-payload performance progress reporting.

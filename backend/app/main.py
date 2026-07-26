@@ -12,18 +12,25 @@ import mimetypes
 import os
 import logging
 import ssl
+import smtplib
+import socket
+from email.message import EmailMessage
+from email.utils import formataddr
 import secrets
 import shutil
 import subprocess
 import zipfile
+import tarfile
+import gzip
 import sqlite3
 import threading
+import queue
 import time
 import tempfile
 import uuid
 import base64
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -48,10 +55,53 @@ from app.engines.translation_engine import (
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BASE_DIR / ".env")
+
+def _load_project_env() -> None:
+    """Load backend/.env and repair common copy/paste key separators.
+
+    Some Windows editors or rich-text copy paths can replace underscores in
+    environment variable names with spaces, em dashes, or full-width dashes.
+    Normalize only the known authentication keys before python-dotenv parses
+    the file, while leaving values unchanged.
+    """
+    env_path = BASE_DIR / ".env"
+    if env_path.exists():
+        try:
+            raw = env_path.read_text(encoding="utf-8-sig")
+            aliases = {
+                "GOOGLE CLIENT ID": "GOOGLE_CLIENT_ID",
+                "GOOGLE—CLIENT—ID": "GOOGLE_CLIENT_ID",
+                "GOOGLE——CLIENT——ID": "GOOGLE_CLIENT_ID",
+                "GOOGLE－CLIENT－ID": "GOOGLE_CLIENT_ID",
+                "GOOGLE CLIENT SECRET": "GOOGLE_CLIENT_SECRET",
+                "GOOGLE—CLIENT—SECRET": "GOOGLE_CLIENT_SECRET",
+                "GOOGLE——CLIENT——SECRET": "GOOGLE_CLIENT_SECRET",
+                "GOOGLE－CLIENT－SECRET": "GOOGLE_CLIENT_SECRET",
+                "GOOGLE REDIRECT URI": "GOOGLE_REDIRECT_URI",
+                "GOOGLE—REDIRECT—URI": "GOOGLE_REDIRECT_URI",
+                "GOOGLE——REDIRECT——URI": "GOOGLE_REDIRECT_URI",
+                "GOOGLE－REDIRECT－URI": "GOOGLE_REDIRECT_URI",
+            }
+            repaired = []
+            changed = False
+            for line in raw.splitlines():
+                if "=" in line and not line.lstrip().startswith("#"):
+                    key, value = line.split("=", 1)
+                    normalized = aliases.get(key.strip(), key.strip())
+                    if normalized != key.strip():
+                        line = f"{normalized}={value}"
+                        changed = True
+                repaired.append(line)
+            if changed:
+                env_path.write_text("\n".join(repaired) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    load_dotenv(env_path, override=True)
+
+_load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "30.3.3"
+APP_VERSION = "40.5.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -96,6 +146,27 @@ ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "false").lower() in {"1", "true",
 JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "300")))
 AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip() or secrets.token_urlsafe(48)
 SESSION_TTL_SECONDS = max(3600, int(os.getenv("SESSION_TTL_SECONDS", "2592000")))
+PASSWORD_RESET_TTL_SECONDS = max(300, int(os.getenv("PASSWORD_RESET_TTL_SECONDS", "900")))
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Document Automation AI").strip() or "Document Automation AI"
+PASSWORD_RESET_DEV_CODE_ENABLED = os.getenv("PASSWORD_RESET_DEV_CODE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+PASSWORD_RESET_COOLDOWN_SECONDS = max(30, int(os.getenv("PASSWORD_RESET_COOLDOWN_SECONDS", "60")))
+PASSWORD_RESET_WINDOW_SECONDS = max(300, int(os.getenv("PASSWORD_RESET_WINDOW_SECONDS", "900")))
+PASSWORD_RESET_MAX_SUCCESSFUL_SENDS = max(1, int(os.getenv("PASSWORD_RESET_MAX_SUCCESSFUL_SENDS", "5")))
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
+FREE_SIGNUP_CREDITS = max(0, int(os.getenv("FREE_SIGNUP_CREDITS", "500")))
+REGISTRATION_IP_WINDOW_SECONDS = max(300, int(os.getenv("REGISTRATION_IP_WINDOW_SECONDS", "86400")))
+REGISTRATION_IP_MAX_ACCOUNTS = max(1, int(os.getenv("REGISTRATION_IP_MAX_ACCOUNTS", "3")))
+EMAIL_VERIFICATION_TTL_SECONDS = max(300, int(os.getenv("EMAIL_VERIFICATION_TTL_SECONDS", "900")))
+EMAIL_VERIFICATION_COOLDOWN_SECONDS = max(30, int(os.getenv("EMAIL_VERIFICATION_COOLDOWN_SECONDS", "60")))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -103,7 +174,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_SUFFIXES = {
     ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv",
-    ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".zip"
+    ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"
 }
 VALID_STATUSES = {
     "waiting_quote", "quoted", "confirmed", "processing",
@@ -111,6 +183,31 @@ VALID_STATUSES = {
 }
 
 app = FastAPI(title="Document Automation AI API", version=APP_VERSION)
+
+
+class JobCancelled(RuntimeError):
+    pass
+
+_JOB_CONTROLS: dict[int, dict[str, threading.Event]] = {}
+_JOB_CONTROLS_LOCK = threading.Lock()
+
+def _job_control(job_id: int) -> dict[str, threading.Event]:
+    with _JOB_CONTROLS_LOCK:
+        return _JOB_CONTROLS.setdefault(job_id, {"pause": threading.Event(), "cancel": threading.Event()})
+
+def _clear_job_control(job_id: int) -> None:
+    with _JOB_CONTROLS_LOCK:
+        _JOB_CONTROLS.pop(job_id, None)
+
+def _wait_for_job_control(job_id: int) -> None:
+    control = _job_control(job_id)
+    if control["cancel"].is_set():
+        raise JobCancelled("任务已由用户停止")
+    while control["pause"].is_set():
+        if control["cancel"].wait(0.25):
+            raise JobCancelled("任务已由用户停止")
+    if control["cancel"].is_set():
+        raise JobCancelled("任务已由用户停止")
 _cors_env = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -142,14 +239,40 @@ class TeamMemberCreate(BaseModel):
 
 
 class UserRegister(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str = Field(default="", max_length=120)
     email: str
     password: str = Field(min_length=8, max_length=200)
+    device_fingerprint: str = Field(default="", max_length=200)
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str
+    device_fingerprint: str = Field(default="", max_length=200)
+
+
+class EmailVerificationConfirm(BaseModel):
+    email: str
+    code: str = Field(min_length=6, max_length=12)
+    device_fingerprint: str = Field(default="", max_length=200)
+
+
+class EmailVerificationResend(BaseModel):
+    email: str
 
 
 class UserLogin(BaseModel):
     email: str
     password: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirm(BaseModel):
+    email: str
+    code: str = Field(min_length=6, max_length=12)
+    new_password: str = Field(min_length=8, max_length=200)
 
 
 class CheckoutCreate(BaseModel):
@@ -666,6 +789,62 @@ def initialize_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(token_hash);
+            CREATE TABLE IF NOT EXISTS user_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                provider_subject TEXT NOT NULL,
+                email TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(provider, provider_subject),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS registration_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                email TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'email',
+                ip_address TEXT NOT NULL DEFAULT '',
+                device_fingerprint TEXT NOT NULL DEFAULT '',
+                risk_score INTEGER NOT NULL DEFAULT 0,
+                free_credits_granted INTEGER NOT NULL DEFAULT 0,
+                decision TEXT NOT NULL DEFAULT 'allowed',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_registration_ip ON registration_events(ip_address, created_at);
+            CREATE INDEX IF NOT EXISTS idx_registration_device ON registration_events(device_fingerprint, created_at);
+            CREATE TABLE IF NOT EXISTS free_credit_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                identity_key TEXT NOT NULL UNIQUE,
+                credits INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS email_verification_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                request_ip TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_email_verification_user ON email_verification_tokens(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                request_ip TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id, id DESC);
             CREATE TABLE IF NOT EXISTS payment_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 payment_number TEXT UNIQUE NOT NULL,
@@ -762,6 +941,10 @@ def initialize_db() -> None:
         )
         ensure_column(db, "project_metadata", "deleted", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "project_metadata", "deleted_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "password_reset_tokens", "email_sent", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "password_reset_tokens", "delivery_channel", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "password_reset_tokens", "delivery_detail", "TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_password_reset_delivery ON password_reset_tokens(user_id, email_sent, id DESC)")
         db.commit()
 
 
@@ -777,6 +960,139 @@ def _session_token() -> str:
 
 def _session_hash(token: str) -> str:
     return hashlib.sha256((AUTH_SECRET + token).encode("utf-8")).hexdigest()
+
+
+def _reset_code_hash(email: str, code: str) -> str:
+    payload = f"{email.strip().lower()}:{code.strip()}"
+    return hmac.new(AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+class EmailDeliveryError(RuntimeError):
+    """Safe, user-facing SMTP failure with an internal diagnostic code."""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def _smtp_configuration_summary() -> dict:
+    return {
+        "configured": bool(SMTP_HOST and SMTP_FROM_EMAIL),
+        "host": SMTP_HOST,
+        "port": SMTP_PORT,
+        "security": "ssl" if SMTP_USE_SSL else ("starttls" if SMTP_USE_TLS else "plain"),
+        "username_configured": bool(SMTP_USERNAME),
+        "sender": SMTP_FROM_EMAIL,
+    }
+
+
+def _send_verification_email(email: str, code: str) -> dict:
+    config = _smtp_configuration_summary()
+    if not config["configured"]:
+        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
+    if SMTP_USERNAME and not SMTP_PASSWORD:
+        raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。")
+    minutes = max(1, EMAIL_VERIFICATION_TTL_SECONDS // 60)
+    message = EmailMessage()
+    message["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    message["To"] = email
+    message["Subject"] = "Document Automation AI 邮箱验证码"
+    message.set_content(
+        "您好，\n\n"
+        f"您的邮箱验证码是：{code}\n\n"
+        f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
+        "如果不是您本人发起的注册，请忽略此邮件。\n\n"
+        "Document Automation AI"
+    )
+    context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        smtp_context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context) if SMTP_USE_SSL else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+        with smtp_context as smtp:
+            smtp.ehlo()
+            if not SMTP_USE_SSL and SMTP_USE_TLS:
+                smtp.starttls(context=context); smtp.ehlo()
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            refused = smtp.send_message(message)
+            if refused:
+                raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址。")
+    except EmailDeliveryError:
+        raise
+    except smtplib.SMTPAuthenticationError as exc:
+        raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。") from exc
+    except Exception as exc:
+        raise EmailDeliveryError("smtp_send_failed", f"验证码邮件发送失败：{exc}") from exc
+    return {"delivery": "email"}
+
+
+def _send_password_reset_email(email: str, code: str) -> dict:
+    """Send first; only the caller may persist the code after confirmed delivery."""
+    config = _smtp_configuration_summary()
+    logger.info(
+        "Password reset SMTP start recipient=%s host=%s port=%s security=%s sender=%s",
+        email, config["host"] or "<missing>", config["port"], config["security"], config["sender"] or "<missing>",
+    )
+    if not config["configured"]:
+        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
+    if SMTP_USERNAME and not SMTP_PASSWORD:
+        raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。QQ 邮箱必须使用 SMTP 授权码，不能使用登录密码。")
+
+    minutes = max(1, PASSWORD_RESET_TTL_SECONDS // 60)
+    message = EmailMessage()
+    message["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    message["To"] = email
+    message["Subject"] = "Document Automation AI 密码重置验证码"
+    message.set_content(
+        "您好，\n\n"
+        f"您的密码重置验证码是：{code}\n\n"
+        f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
+        "如果不是您本人发起的操作，请忽略此邮件。\n\n"
+        "Document Automation AI"
+    )
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        if SMTP_USE_SSL:
+            smtp_context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context)
+        else:
+            smtp_context = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+        with smtp_context as smtp:
+            smtp.ehlo()
+            logger.info("Password reset SMTP connected recipient=%s", email)
+            if not SMTP_USE_SSL and SMTP_USE_TLS:
+                smtp.starttls(context=context)
+                smtp.ehlo()
+                logger.info("Password reset SMTP STARTTLS ready recipient=%s", email)
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                logger.info("Password reset SMTP authenticated recipient=%s", email)
+            refused = smtp.send_message(message)
+            if refused:
+                raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。")
+    except EmailDeliveryError:
+        raise
+    except smtplib.SMTPAuthenticationError as exc:
+        logger.exception("Password reset SMTP authentication failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。QQ 邮箱请重新生成 SMTP 授权码。") from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        logger.exception("Password reset SMTP recipient refused recipient=%s", email)
+        raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。") from exc
+    except smtplib.SMTPSenderRefused as exc:
+        logger.exception("Password reset SMTP sender refused recipient=%s", email)
+        raise EmailDeliveryError("sender_refused", "发件邮箱被服务器拒绝，请检查 SMTP_FROM_EMAIL 是否与登录邮箱一致。") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        logger.exception("Password reset SMTP timeout recipient=%s", email)
+        raise EmailDeliveryError("smtp_timeout", "连接邮件服务器超时，请检查网络、SMTP 地址和端口。") from exc
+    except (ssl.SSLError, smtplib.SMTPConnectError) as exc:
+        logger.exception("Password reset SMTP secure connection failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_connection_failed", "无法安全连接邮件服务器，请检查端口以及 SSL/STARTTLS 设置。") from exc
+    except (OSError, smtplib.SMTPException) as exc:
+        logger.exception("Password reset SMTP delivery failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_delivery_failed", f"邮件发送失败：{type(exc).__name__}。请检查 SMTP 配置和网络。") from exc
+
+    logger.info("Password reset SMTP delivered recipient=%s", email)
+    return {"channel": "email", "detail": "smtp_delivered", "sent_at": utc_now()}
 
 
 def current_user_optional(authorization: str | None = Header(default=None)) -> dict | None:
@@ -813,7 +1129,7 @@ def startup() -> None:
             delay = min(delay * 2, 2.0)
     # In-process workers cannot survive a container restart. Mark interrupted jobs clearly.
     with get_db() as db:
-        interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing')").fetchall()
+        interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing','paused','cancelling')").fetchall()
         for row in interrupted:
             timestamp = utc_now()
             db.execute(
@@ -827,25 +1143,158 @@ def startup() -> None:
         db.commit()
 
 
+@app.get("/api/auth/config")
+def auth_config() -> dict:
+    return {
+        "google_enabled": bool(GOOGLE_CLIENT_ID),
+        "google_client_id": GOOGLE_CLIENT_ID if GOOGLE_CLIENT_ID else "",
+        "google_configuration": "ready" if GOOGLE_CLIENT_ID else "missing_client_id",
+    }
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return forwarded or (request.client.host if request.client else "")
+
+
+def _registration_decision(db: sqlite3.Connection, email: str, provider: str, subject: str, ip: str, device: str) -> tuple[int, int, str]:
+    risk = 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=REGISTRATION_IP_WINDOW_SECONDS)).isoformat()
+    ip_count = db.execute("SELECT COUNT(*) c FROM registration_events WHERE ip_address=? AND created_at>=?", (ip, cutoff)).fetchone()["c"] if ip else 0
+    device_seen = bool(device and db.execute("SELECT 1 FROM registration_events WHERE device_fingerprint=? AND free_credits_granted>0 LIMIT 1", (device,)).fetchone())
+    identity_key = f"{provider}:{subject or email}"
+    identity_seen = bool(db.execute("SELECT 1 FROM free_credit_claims WHERE identity_key=?", (identity_key,)).fetchone())
+    if ip_count >= REGISTRATION_IP_MAX_ACCOUNTS: risk += 60
+    if device_seen: risk += 80
+    if identity_seen: risk += 100
+    grant = FREE_SIGNUP_CREDITS if risk < 80 else 0
+    return risk, grant, "allowed" if grant else "registered_without_bonus"
+
+
+def _create_session(db: sqlite3.Connection, user_id: int, now: str) -> str:
+    token = _session_token()
+    db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)", (user_id,_session_hash(token),int(time.time())+SESSION_TTL_SECONDS,now))
+    return token
+
+
 @app.post("/api/auth/register")
-def register_user(payload: UserRegister) -> dict:
+def register_user(payload: UserRegister, request: Request) -> dict:
     email = payload.email.strip().lower()
     if "@" not in email or "." not in email.split("@")[-1]:
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
     password_hash, salt = _password_hash(payload.password)
-    now = utc_now()
-    token = _session_token()
-    expires = int(time.time()) + SESSION_TTL_SECONDS
+    display_name = payload.name.strip() or email.split("@", 1)[0] or "User"
+    now, ip = utc_now(), _client_ip(request)
+    code = f"{secrets.randbelow(1000000):06d}"
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    expires_at = int(time.time()) + EMAIL_VERIFICATION_TTL_SECONDS
+
     def operation(db):
-        if db.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
-            raise HTTPException(status_code=409, detail="An account with this email already exists.")
-        cur = db.execute("INSERT INTO users (name,email,password_hash,password_salt,email_verified,created_at,last_login_at) VALUES (?,?,?,?,1,?,?)", (payload.name.strip(), email, password_hash, salt, now, now))
-        user_id = cur.lastrowid
-        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)", (user_id,_session_hash(token),expires,now))
-        db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,500,'free','active',?)", (email,now))
-        return user_id
-    user_id=run_db_write(operation)
-    return {"token":token,"user":{"id":user_id,"name":payload.name.strip(),"email":email,"email_verified":True}}
+        existing = db.execute("SELECT id,email_verified FROM users WHERE email=?", (email,)).fetchone()
+        if existing:
+            if existing["email_verified"]:
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
+            user_id = existing["id"]
+            db.execute("UPDATE users SET name=?,password_hash=?,password_salt=?,status='pending_verification' WHERE id=?",
+                       (display_name, password_hash, salt, user_id))
+        else:
+            cur = db.execute("INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'pending_verification',0,?,?)",
+                             (display_name, email, password_hash, salt, now, ""))
+            user_id = cur.lastrowid
+            db.execute("INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
+                       (user_id,"email",email,email,now))
+        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now,user_id))
+        db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
+                   (user_id,code_hash,expires_at,now,ip))
+        _send_verification_email(email, code)
+    run_db_write(operation)
+    return {"verification_required": True, "email": email, "delivery": "email", "cooldown_seconds": EMAIL_VERIFICATION_COOLDOWN_SECONDS}
+
+
+@app.post("/api/auth/email-verification/resend")
+def resend_email_verification(payload: EmailVerificationResend, request: Request) -> dict:
+    email = payload.email.strip().lower()
+    with get_db() as db:
+        user = db.execute("SELECT id,email_verified FROM users WHERE email=?", (email,)).fetchone()
+        if not user:
+            return {"success": True, "message": "If the account exists, a verification code has been sent."}
+        if user["email_verified"]:
+            raise HTTPException(status_code=409, detail="Email is already verified.")
+        latest = db.execute("SELECT created_at FROM email_verification_tokens WHERE user_id=? ORDER BY id DESC LIMIT 1",(user["id"],)).fetchone()
+    if latest:
+        try:
+            elapsed=(datetime.now(timezone.utc)-datetime.fromisoformat(latest["created_at"])).total_seconds()
+            if elapsed < EMAIL_VERIFICATION_COOLDOWN_SECONDS:
+                raise HTTPException(status_code=429, detail=f"Please wait {int(EMAIL_VERIFICATION_COOLDOWN_SECONDS-elapsed)} seconds before resending.")
+        except ValueError:
+            pass
+    code=f"{secrets.randbelow(1000000):06d}"; now=utc_now(); code_hash=hashlib.sha256(code.encode()).hexdigest()
+    def operation(db):
+        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''",(now,user["id"]))
+        db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
+                   (user["id"],code_hash,int(time.time())+EMAIL_VERIFICATION_TTL_SECONDS,now,_client_ip(request)))
+        _send_verification_email(email,code)
+    run_db_write(operation)
+    return {"success":True,"delivery":"email","cooldown_seconds":EMAIL_VERIFICATION_COOLDOWN_SECONDS}
+
+
+@app.post("/api/auth/email-verification/confirm")
+def confirm_email_verification(payload: EmailVerificationConfirm, request: Request) -> dict:
+    email=payload.email.strip().lower(); now=utc_now(); result={}
+    with get_db() as db:
+        user=db.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
+        token_row=db.execute("SELECT * FROM email_verification_tokens WHERE user_id=? AND used_at='' ORDER BY id DESC LIMIT 1",(user["id"],)).fetchone() if user else None
+    if not user or not token_row:
+        raise HTTPException(status_code=400, detail="Verification code is invalid or expired.")
+    if token_row["expires_at"] < int(time.time()) or not secrets.compare_digest(token_row["code_hash"],hashlib.sha256(payload.code.encode()).hexdigest()):
+        raise HTTPException(status_code=400, detail="Verification code is invalid or expired.")
+    def operation(db):
+        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE id=?",(now,token_row["id"]))
+        db.execute("UPDATE users SET email_verified=1,status='active',last_login_at=? WHERE id=?",(now,user["id"]))
+        risk,grant,decision=_registration_decision(db,email,"email",email,_client_ip(request),payload.device_fingerprint.strip())
+        db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,?, 'free','active',?)",(email,grant,now))
+        if grant:
+            db.execute("INSERT OR IGNORE INTO free_credit_claims (user_id,identity_key,credits,reason,created_at) VALUES (?,?,?,?,?)",(user["id"],f"email:{email}",grant,"verified_new_user_bonus",now))
+        db.execute("INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (user["id"],email,"email",_client_ip(request),payload.device_fingerprint.strip(),risk,grant,decision,now))
+        token=_create_session(db,user["id"],now); result.update(token=token,grant=grant,decision=decision)
+    run_db_write(operation)
+    return {"token":result["token"],"user":{"id":user["id"],"name":user["name"],"email":email,"email_verified":True},"free_credits_granted":result["grant"],"registration_decision":result["decision"]}
+
+
+@app.post("/api/auth/google")
+def google_login(payload: GoogleLoginRequest, request: Request) -> dict:
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google login is not configured.")
+    try:
+        url = "https://oauth2.googleapis.com/tokeninfo?id_token=" + urllib.parse.quote(payload.credential)
+        with urllib.request.urlopen(url, timeout=10) as response:
+            info = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Google identity verification failed.") from exc
+    if info.get("aud") != GOOGLE_CLIENT_ID or info.get("email_verified") not in (True,"true"):
+        raise HTTPException(status_code=401, detail="Invalid Google identity.")
+    email=(info.get("email") or "").strip().lower(); subject=(info.get("sub") or "").strip(); name=(info.get("name") or email.split("@")[0]).strip()
+    if not email or not subject: raise HTTPException(status_code=401, detail="Google account information is incomplete.")
+    now,ip,device=utc_now(),_client_ip(request),payload.device_fingerprint.strip(); result={}
+    def operation(db):
+        identity=db.execute("SELECT user_id FROM user_identities WHERE provider='google' AND provider_subject=?",(subject,)).fetchone()
+        user=db.execute("SELECT * FROM users WHERE id=?",(identity["user_id"],)).fetchone() if identity else db.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
+        new_user=False
+        if not user:
+            ph,salt=_password_hash(secrets.token_urlsafe(32)); cur=db.execute("INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'active',1,?,?)",(name,email,ph,salt,now,now)); user_id=cur.lastrowid; new_user=True
+        else:
+            user_id=user["id"]; db.execute("UPDATE users SET last_login_at=?,email_verified=1 WHERE id=?",(now,user_id))
+        db.execute("INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",(user_id,"google",subject,email,now))
+        grant=0; decision="existing_account"; risk=0
+        if new_user:
+            risk,grant,decision=_registration_decision(db,email,"google",subject,ip,device)
+            db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,?, 'free','active',?)",(email,grant,now))
+            if grant: db.execute("INSERT INTO free_credit_claims (user_id,identity_key,credits,reason,created_at) VALUES (?,?,?,?,?)",(user_id,f"google:{subject}",grant,"new_user_bonus",now))
+            db.execute("INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",(user_id,email,"google",ip,device,risk,grant,decision,now))
+        token=_create_session(db,user_id,now); result.update(user_id=user_id,token=token,grant=grant,decision=decision)
+    run_db_write(operation)
+    return {"token":result["token"],"user":{"id":result["user_id"],"name":name,"email":email,"email_verified":True},"free_credits_granted":result["grant"],"registration_decision":result["decision"]}
 
 
 @app.post("/api/auth/login")
@@ -858,6 +1307,8 @@ def login_user(payload: UserLogin) -> dict:
     expected,_=_password_hash(payload.password,base64.urlsafe_b64decode(row["password_salt"].encode()))
     if not secrets.compare_digest(expected,row["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
+    if row["status"] != "active":
+        raise HTTPException(status_code=403, detail="This account is not active.")
     token=_session_token();expires=int(time.time())+SESSION_TTL_SECONDS;now=utc_now()
     def operation(db):
         db.execute("UPDATE users SET last_login_at=? WHERE id=?",(now,row["id"]))
@@ -865,6 +1316,108 @@ def login_user(payload: UserLogin) -> dict:
         db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)",(row["id"],_session_hash(token),expires,now))
     run_db_write(operation)
     return {"token":token,"user":{"id":row["id"],"name":row["name"],"email":row["email"],"email_verified":bool(row["email_verified"])}}
+
+
+@app.post("/api/auth/password-reset/request")
+def request_password_reset(payload: PasswordResetRequest, request: Request) -> dict:
+    email = payload.email.strip().lower()
+    generic = {"success": True, "message": "If the account exists, a reset code has been sent."}
+    with get_db() as db:
+        row = db.execute("SELECT id,email FROM users WHERE email=?", (email,)).fetchone()
+    if row is None:
+        return generic
+
+    now_ts = int(time.time())
+    cooldown_after = (datetime.now(timezone.utc) - timedelta(seconds=PASSWORD_RESET_COOLDOWN_SECONDS)).isoformat()
+    window_after = (datetime.now(timezone.utc) - timedelta(seconds=PASSWORD_RESET_WINDOW_SECONDS)).isoformat()
+    with get_db() as db:
+        last_success = db.execute(
+            "SELECT created_at FROM password_reset_tokens WHERE user_id=? AND email_sent=1 AND created_at>=? ORDER BY id DESC LIMIT 1",
+            (row["id"], cooldown_after),
+        ).fetchone()
+        successful_in_window = db.execute(
+            "SELECT COUNT(*) AS total FROM password_reset_tokens WHERE user_id=? AND email_sent=1 AND created_at>=?",
+            (row["id"], window_after),
+        ).fetchone()["total"]
+
+    if last_success:
+        try:
+            sent_at = datetime.fromisoformat(last_success["created_at"])
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+            elapsed = max(0, int((datetime.now(timezone.utc) - sent_at).total_seconds()))
+            retry_after = max(1, PASSWORD_RESET_COOLDOWN_SECONDS - elapsed)
+        except (TypeError, ValueError):
+            retry_after = PASSWORD_RESET_COOLDOWN_SECONDS
+        raise HTTPException(status_code=429, detail=f"验证码已成功发送，请等待 {retry_after} 秒后再重新发送。")
+    if successful_in_window >= PASSWORD_RESET_MAX_SUCCESSFUL_SENDS:
+        wait_minutes = max(1, PASSWORD_RESET_WINDOW_SECONDS // 60)
+        raise HTTPException(status_code=429, detail=f"验证码发送次数已达上限，请在 {wait_minutes} 分钟后再试。")
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    delivery = None
+    try:
+        delivery = _send_password_reset_email(email, code)
+    except EmailDeliveryError as exc:
+        logger.error("Password reset delivery rejected recipient=%s code=%s detail=%s", email, exc.code, exc.detail)
+        if PASSWORD_RESET_DEV_CODE_ENABLED and not CLOUD_MODE:
+            delivery = {"channel": "local", "detail": exc.code, "sent_at": utc_now()}
+        else:
+            raise HTTPException(status_code=503, detail=exc.detail) from exc
+
+    # Persist and rate-limit only after delivery (or explicit local-development fallback) succeeded.
+    expires = now_ts + PASSWORD_RESET_TTL_SECONDS
+    created = delivery["sent_at"]
+    request_ip = request.client.host if request.client else ""
+    is_real_email = 1 if delivery["channel"] == "email" else 0
+
+    def operation(db):
+        db.execute("UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at=''", (created, row["id"]))
+        db.execute(
+            "INSERT INTO password_reset_tokens (user_id,code_hash,expires_at,created_at,request_ip,email_sent,delivery_channel,delivery_detail) VALUES (?,?,?,?,?,?,?,?)",
+            (row["id"], _reset_code_hash(email, code), expires, created, request_ip, is_real_email, delivery["channel"], delivery["detail"]),
+        )
+    run_db_write(operation)
+
+    if delivery["channel"] == "email":
+        return {
+            "success": True,
+            "delivery": "email",
+            "message": "The reset code was sent to the registered email address.",
+            "cooldown_seconds": PASSWORD_RESET_COOLDOWN_SECONDS,
+        }
+
+    return {
+        "success": True,
+        "delivery": "local",
+        "development_code": code,
+        "message": "Development-only reset code is enabled.",
+        "cooldown_seconds": 0,
+    }
+
+
+@app.post("/api/auth/password-reset/confirm")
+def confirm_password_reset(payload: PasswordResetConfirm) -> dict:
+    email = payload.email.strip().lower()
+    now_ts = int(time.time())
+    with get_db() as db:
+        row = db.execute(
+            "SELECT p.id,p.user_id,p.code_hash,p.expires_at,p.used_at FROM password_reset_tokens p "
+            "JOIN users u ON u.id=p.user_id WHERE u.email=? ORDER BY p.id DESC LIMIT 1",
+            (email,),
+        ).fetchone()
+    if row is None or row["used_at"] or row["expires_at"] < now_ts:
+        raise HTTPException(status_code=400, detail="The reset code is invalid or has expired.")
+    if not secrets.compare_digest(row["code_hash"], _reset_code_hash(email, payload.code)):
+        raise HTTPException(status_code=400, detail="The reset code is invalid or has expired.")
+    password_hash, salt = _password_hash(payload.new_password)
+    used_at = utc_now()
+    def operation(db):
+        db.execute("UPDATE users SET password_hash=?,password_salt=? WHERE id=?", (password_hash, salt, row["user_id"]))
+        db.execute("UPDATE password_reset_tokens SET used_at=? WHERE id=?", (used_at, row["id"]))
+        db.execute("DELETE FROM user_sessions WHERE user_id=?", (row["user_id"],))
+    run_db_write(operation)
+    return {"success": True, "message": "Password reset successful. Please sign in with your new password."}
 
 
 @app.get("/api/auth/me")
@@ -912,6 +1465,8 @@ def health() -> dict:
         "status": "ok" if readiness != "blocked" else "error",
         "readiness": readiness,
         "version": APP_VERSION,
+        "project_root": str(Path(__file__).resolve().parents[2]),
+        "process_id": os.getpid(),
         "cloud_mode": CLOUD_MODE,
         "storage": storage,
         "ocr": ocr_capability().__dict__,
@@ -1028,51 +1583,235 @@ async def save_upload(upload: UploadFile, folder: Path) -> tuple[str, str, int]:
     return original_name, str(stored_path), total_size
 
 
-ZIP_MAX_FILES = max(10, int(os.getenv("ZIP_MAX_FILES", "250")))
-ZIP_MAX_DEPTH = max(1, min(int(os.getenv("ZIP_MAX_DEPTH", "3")), 5))
+ARCHIVE_MAX_FILES = max(10, int(os.getenv("ARCHIVE_MAX_FILES", os.getenv("ZIP_MAX_FILES", "250"))))
+ARCHIVE_MAX_DEPTH = max(1, min(int(os.getenv("ARCHIVE_MAX_DEPTH", os.getenv("ZIP_MAX_DEPTH", "3"))), 5))
+ARCHIVE_SUFFIXES = {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"}
+ARCHIVE_KINDS = {"zip", "rar", "7z", "tar", "gz", "tgz", "tar.gz"}
+IGNORED_ARCHIVE_PARTS = {"__MACOSX", ".DS_Store", "Thumbs.db", "desktop.ini", ".git", ".idea", "node_modules"}
 
+def _archive_kind(path: Path) -> str:
+    name = path.name.lower()
+    if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "tar.gz"
+    return path.suffix.lower().lstrip(".")
 
-def _safe_extract_zip(zip_path: Path, destination: Path, depth: int = 0) -> list[tuple[str, str, int]]:
-    """Safely expand enterprise ZIP uploads and return supported leaf files.
+def _is_ignored_archive_path(relative: Path) -> bool:
+    return any(part in IGNORED_ARCHIVE_PARTS or part.startswith("._") for part in relative.parts)
 
-    Directory traversal, encrypted entries, excessive file counts and unsupported
-    files are rejected or skipped. Nested ZIP files are supported up to a bounded
-    depth so one customer project can preserve its directory structure.
-    """
-    if depth >= ZIP_MAX_DEPTH:
-        return []
-    destination.mkdir(parents=True, exist_ok=True)
-    extracted: list[tuple[str, str, int]] = []
-    with zipfile.ZipFile(zip_path) as archive:
-        members = [m for m in archive.infolist() if not m.is_dir()]
-        if len(members) > ZIP_MAX_FILES:
-            raise HTTPException(status_code=400, detail=f"ZIP contains too many files (max {ZIP_MAX_FILES}).")
+def _safe_target(destination: Path, relative_name: str) -> tuple[Path, Path]:
+    relative = Path(relative_name.replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts or _is_ignored_archive_path(relative):
+        if _is_ignored_archive_path(relative):
+            raise FileNotFoundError("ignored")
+        raise HTTPException(status_code=400, detail="压缩包内包含不安全路径。")
+    target = (destination / relative).resolve()
+    root = destination.resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail="压缩包内包含不安全路径。")
+    return relative, target
+
+def _extract_zip(path: Path, destination: Path) -> list[Path]:
+    out=[]
+    with zipfile.ZipFile(path) as archive:
+        members=[m for m in archive.infolist() if not m.is_dir()]
+        if len(members)>ARCHIVE_MAX_FILES: raise HTTPException(status_code=400, detail=f"压缩包文件过多，最多支持 {ARCHIVE_MAX_FILES} 个文件。")
         for member in members:
-            if member.flag_bits & 0x1:
-                raise HTTPException(status_code=400, detail="Encrypted ZIP files are not supported.")
-            relative = Path(member.filename.replace('\\', '/'))
-            if relative.is_absolute() or '..' in relative.parts:
-                raise HTTPException(status_code=400, detail="Unsafe path found inside ZIP.")
-            target = (destination / relative).resolve()
-            if destination.resolve() not in target.parents:
-                raise HTTPException(status_code=400, detail="Unsafe ZIP entry path.")
+            if member.flag_bits & 0x1: raise HTTPException(status_code=400, detail="暂不支持加密 ZIP 压缩包。")
+            try: relative,target=_safe_target(destination, member.filename)
+            except FileNotFoundError: continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as src, target.open('wb') as dst:
-                shutil.copyfileobj(src, dst)
-            suffix = target.suffix.lower()
-            if suffix == '.zip':
-                nested_dir = target.parent / f"{target.stem}_expanded"
-                extracted.extend(_safe_extract_zip(target, nested_dir, depth + 1))
-                continue
-            if suffix not in ALLOWED_SUFFIXES or suffix == '.zip':
-                continue
-            size = target.stat().st_size
-            if size > MAX_FILE_SIZE:
-                raise HTTPException(status_code=413, detail=f"{relative.name} exceeds {MAX_FILE_SIZE_MB} MB.")
-            display_name = str(relative).replace('\\', '/')
-            extracted.append((display_name, str(target), size))
-    return extracted
+            with archive.open(member) as src, target.open('wb') as dst: shutil.copyfileobj(src,dst)
+            out.append(target)
+    return out
 
+def _extract_tar(path: Path, destination: Path) -> list[Path]:
+    out=[]
+    try: archive=tarfile.open(path, mode='r:*')
+    except tarfile.TarError as exc: raise HTTPException(status_code=400, detail="TAR/GZ 压缩包已损坏或格式无效。") from exc
+    with archive:
+        members=[m for m in archive.getmembers() if m.isfile()]
+        if len(members)>ARCHIVE_MAX_FILES: raise HTTPException(status_code=400, detail=f"压缩包文件过多，最多支持 {ARCHIVE_MAX_FILES} 个文件。")
+        for member in members:
+            try: relative,target=_safe_target(destination, member.name)
+            except FileNotFoundError: continue
+            src=archive.extractfile(member)
+            if src is None: continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with src, target.open('wb') as dst: shutil.copyfileobj(src,dst)
+            out.append(target)
+    return out
+
+def _extract_7z(path: Path, destination: Path) -> list[Path]:
+    try:
+        import py7zr
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="7Z 解压组件未安装，请重新运行启动程序安装依赖。") from exc
+    try:
+        with py7zr.SevenZipFile(path, mode='r') as archive:
+            names=archive.getnames()
+            if len(names)>ARCHIVE_MAX_FILES: raise HTTPException(status_code=400, detail=f"压缩包文件过多，最多支持 {ARCHIVE_MAX_FILES} 个文件。")
+            safe=[]
+            for name in names:
+                try: relative,_=_safe_target(destination,name)
+                except FileNotFoundError: continue
+                safe.append(str(relative).replace('\\','/'))
+            archive.extract(path=destination, targets=safe)
+            return [(destination/Path(name)).resolve() for name in safe if (destination/Path(name)).is_file()]
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(status_code=400, detail="7Z 压缩包已损坏、加密或格式无效。") from exc
+
+def _find_rar_extractor() -> tuple[str, str] | None:
+    """Return (kind, executable) for an available RAR-capable extractor."""
+    candidates: list[tuple[str, str]] = []
+    env_candidates = [
+        os.getenv("DAI_7ZIP_PATH", ""), os.getenv("SEVENZIP_PATH", ""),
+        os.getenv("DAI_WINRAR_PATH", ""), os.getenv("WINRAR_PATH", ""),
+        os.getenv("DAI_UNRAR_PATH", ""),
+    ]
+    for value in env_candidates:
+        if value:
+            candidates.append(("auto", value))
+    if os.name == "nt":
+        roots = [os.getenv("ProgramFiles", ""), os.getenv("ProgramFiles(x86)", ""), os.getenv("SystemRoot", "")]
+        candidates += [
+            ("7z", str(Path(roots[0]) / "7-Zip" / "7z.exe")) if roots[0] else ("7z", ""),
+            ("7z", str(Path(roots[1]) / "7-Zip" / "7z.exe")) if roots[1] else ("7z", ""),
+            ("winrar", str(Path(roots[0]) / "WinRAR" / "WinRAR.exe")) if roots[0] else ("winrar", ""),
+            ("winrar", str(Path(roots[1]) / "WinRAR" / "WinRAR.exe")) if roots[1] else ("winrar", ""),
+            ("tar", str(Path(roots[2]) / "System32" / "tar.exe")) if roots[2] else ("tar", ""),
+        ]
+    for name, kind in (("7z", "7z"), ("7zz", "7z"), ("unrar", "unrar"), ("rar", "unrar"), ("bsdtar", "tar"), ("tar", "tar")):
+        found = shutil.which(name)
+        if found:
+            candidates.append((kind, found))
+    for kind, executable in candidates:
+        if not executable:
+            continue
+        resolved = shutil.which(executable) or (executable if Path(executable).exists() else None)
+        if not resolved:
+            continue
+        lower = Path(resolved).name.lower()
+        if kind == "auto":
+            kind = "7z" if lower.startswith("7z") else "winrar" if "winrar" in lower else "unrar" if "unrar" in lower or lower == "rar.exe" else "tar"
+        return kind, str(resolved)
+    return None
+
+
+def _copy_validated_extraction(staging: Path, destination: Path) -> list[Path]:
+    files = [item for item in staging.rglob("*") if item.is_file()]
+    if len(files) > ARCHIVE_MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"压缩包文件过多，最多支持 {ARCHIVE_MAX_FILES} 个文件。")
+    output: list[Path] = []
+    for source in files:
+        relative = source.relative_to(staging)
+        if _is_ignored_archive_path(relative):
+            continue
+        _, target = _safe_target(destination, str(relative))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        output.append(target)
+    return output
+
+
+def _extract_rar_external(path: Path, destination: Path) -> list[Path]:
+    extractor = _find_rar_extractor()
+    if not extractor:
+        raise HTTPException(status_code=500, detail="RAR 解压组件不可用。请安装 7-Zip 或 WinRAR；Windows 11 用户也可启用系统压缩包支持后重试。")
+    kind, executable = extractor
+    staging = Path(tempfile.mkdtemp(prefix="dai_rar_"))
+    try:
+        if kind == "7z":
+            command = [executable, "x", "-y", f"-o{staging}", str(path)]
+        elif kind == "winrar":
+            command = [executable, "x", "-ibck", "-y", str(path), str(staging) + os.sep]
+        elif kind == "unrar":
+            command = [executable, "x", "-o+", "-y", str(path), str(staging) + os.sep]
+        else:
+            command = [executable, "-xf", str(path), "-C", str(staging)]
+        completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180, creationflags=(0x08000000 if os.name == "nt" else 0))
+        if completed.returncode != 0:
+            message = (completed.stderr or completed.stdout or "").strip()
+            raise HTTPException(status_code=400, detail=f"RAR 压缩包无法解压，可能已损坏、加密或格式不受当前解压器支持。{(' ' + message[:160]) if message else ''}")
+        return _copy_validated_extraction(staging, destination)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=408, detail="RAR 解压超时，请检查压缩包大小或是否损坏。") from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _extract_rar(path: Path, destination: Path) -> list[Path]:
+    """Extract RAR with rarfile first, then fall back to Windows/7-Zip/WinRAR tools."""
+    try:
+        import rarfile
+        extractor = _find_rar_extractor()
+        if extractor:
+            kind, executable = extractor
+            if kind == "7z":
+                rarfile.UNRAR_TOOL = executable
+                rarfile.SEVENZIP_TOOL = executable
+            elif kind == "unrar":
+                rarfile.UNRAR_TOOL = executable
+            elif kind == "bsdtar" or kind == "tar":
+                rarfile.BSDTAR_TOOL = executable
+        with rarfile.RarFile(path) as archive:
+            members = [member for member in archive.infolist() if not member.isdir()]
+            if len(members) > ARCHIVE_MAX_FILES:
+                raise HTTPException(status_code=400, detail=f"压缩包文件过多，最多支持 {ARCHIVE_MAX_FILES} 个文件。")
+            output: list[Path] = []
+            for member in members:
+                try:
+                    _, target = _safe_target(destination, member.filename)
+                except FileNotFoundError:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target.open("wb") as dest:
+                    shutil.copyfileobj(source, dest)
+                output.append(target)
+            return output
+    except HTTPException:
+        raise
+    except Exception:
+        return _extract_rar_external(path, destination)
+
+def _extract_gz_single(path: Path, destination: Path) -> list[Path]:
+    output_name=path.stem or "extracted_file"
+    relative,target=_safe_target(destination, output_name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with gzip.open(path,'rb') as src, target.open('wb') as dst: shutil.copyfileobj(src,dst)
+    except OSError as exc: raise HTTPException(status_code=400, detail="GZ 压缩包已损坏或格式无效。") from exc
+    return [target]
+
+def _extract_archive_once(path: Path, destination: Path) -> list[Path]:
+    kind=_archive_kind(path)
+    destination.mkdir(parents=True, exist_ok=True)
+    if kind=='zip': return _extract_zip(path,destination)
+    if kind in {'tar','tar.gz','tgz'}: return _extract_tar(path,destination)
+    if kind=='7z': return _extract_7z(path,destination)
+    if kind=='rar': return _extract_rar(path,destination)
+    if kind=='gz': return _extract_gz_single(path,destination)
+    raise HTTPException(status_code=400, detail=f"暂不支持该压缩格式：.{kind or 'unknown'}")
+
+def _safe_extract_archive(archive_path: Path, destination: Path, depth: int = 0) -> list[tuple[str, str, int]]:
+    if depth >= ARCHIVE_MAX_DEPTH: return []
+    extracted=[]
+    created=_extract_archive_once(archive_path,destination)
+    for target in created:
+        if not target.exists() or not target.is_file(): continue
+        kind=_archive_kind(target)
+        if kind in ARCHIVE_KINDS:
+            nested_dir=target.parent/f"{target.stem}_expanded"
+            extracted.extend(_safe_extract_archive(target,nested_dir,depth+1))
+            continue
+        suffix=target.suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES or suffix in ARCHIVE_SUFFIXES: continue
+        size=target.stat().st_size
+        if size>MAX_FILE_SIZE: raise HTTPException(status_code=413, detail=f"{target.name} 超过 {MAX_FILE_SIZE_MB} MB。")
+        try: display=str(target.relative_to(destination)).replace('\\','/')
+        except ValueError: display=target.name
+        extracted.append((display,str(target),size))
+    if len(extracted)>ARCHIVE_MAX_FILES: raise HTTPException(status_code=400, detail=f"解压后的可处理文件过多，最多支持 {ARCHIVE_MAX_FILES} 个文件。")
+    return extracted
 
 def _estimate_order_credits(analysis: dict, services: list[str], file_count: int, total_size_bytes: int) -> int:
     rates = {"conversion": 1, "ocr": 2, "translation": 3, "data_cleanup": 2, "enterprise_analysis": 4, "layout_preserve": 2, "layout_preservation": 2, "image_enhancement": 1}
@@ -1138,6 +1877,69 @@ def _read_upload_meta(upload_id: str) -> dict:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Upload session expired or was not found. Please upload the file again.")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+
+
+def _archive_capabilities() -> dict:
+    capabilities = {
+        "zip": True,
+        "tar": True,
+        "tar_gz": True,
+        "tgz": True,
+        "gz": True,
+        "7z": False,
+        "rar": False,
+    }
+    errors: dict[str, str] = {}
+    try:
+        import py7zr  # noqa: F401
+        capabilities["7z"] = True
+    except Exception as exc:
+        errors["7z"] = str(exc)
+    try:
+        import rarfile  # noqa: F401
+        capabilities["rar"] = _find_rar_extractor() is not None
+        if not capabilities["rar"]:
+            errors["rar"] = "RAR library is installed but no extractor (7-Zip/WinRAR/bsdtar) was found."
+    except Exception as exc:
+        errors["rar"] = str(exc)
+    return {
+        "available": capabilities,
+        "supported_extensions": [".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".tar.gz"],
+        "errors": errors,
+    }
+
+
+@app.get("/api/uploads/archive-capabilities")
+def archive_capabilities() -> dict:
+    return {"success": True, **_archive_capabilities()}
+
+@app.post("/api/uploads/inspect-archive")
+@app.post("/api/uploads/inspect-zip")
+async def inspect_archive_upload(file: UploadFile = File(...)) -> dict:
+    """Inspect and safely extract ZIP/RAR/7Z/TAR/GZ archives before order creation."""
+    original_name = Path(file.filename or "archive").name
+    kind = _archive_kind(Path(original_name))
+    if kind not in ARCHIVE_KINDS:
+        raise HTTPException(status_code=400, detail="当前仅支持 ZIP、RAR、7Z、TAR、GZ、TAR.GZ 和 TGZ 压缩包。")
+    temp_root = Path(tempfile.mkdtemp(prefix="dai_archive_inspect_", dir=str(PERSISTENT_ROOT)))
+    try:
+        archive_path = temp_root / original_name
+        total_size = 0
+        with archive_path.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    raise HTTPException(status_code=413, detail=f"{original_name} 超过 {MAX_FILE_SIZE_MB} MB。")
+                output.write(chunk)
+        expanded = _safe_extract_archive(archive_path, temp_root / "expanded")
+        if not expanded:
+            raise HTTPException(status_code=400, detail="压缩包内没有发现可处理的文档。")
+        entries=[{"name":name,"size_bytes":size,"type":(Path(name).suffix.lower().lstrip('.') or 'file').upper()} for name,_,size in expanded]
+        return {"success":True,"archive_name":original_name,"archive_type":kind.upper(),"archive_size_bytes":total_size,"file_count":len(entries),"total_uncompressed_bytes":sum(x['size_bytes'] for x in entries),"entries":entries}
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
 
 @app.post("/api/uploads/init")
@@ -1215,8 +2017,8 @@ def _create_order_from_paths(payload: ChunkedOrderCreate) -> dict:
             stored_path = order_folder / f"{uuid.uuid4().hex}{suffix}"
             shutil.move(str(source), stored_path)
             upload_rows = [(meta["filename"], str(stored_path), int(meta["size_bytes"]), meta.get("content_type", ""))]
-            if suffix == ".zip":
-                expanded = _safe_extract_zip(stored_path, order_folder / f"{Path(meta['filename']).stem}_expanded")
+            if suffix in ARCHIVE_SUFFIXES:
+                expanded = _safe_extract_archive(stored_path, order_folder / f"{Path(meta['filename']).stem}_expanded")
                 if not expanded:
                     raise HTTPException(status_code=400, detail=f"{meta['filename']} contains no supported documents.")
                 upload_rows = [(n, p, z, mimetypes.guess_type(n)[0] or "") for n,p,z in expanded]
@@ -1294,9 +2096,9 @@ async def create_order(
             original_name, stored_path, total_size = await save_upload(upload, order_folder)
             suffix = Path(original_name).suffix.lower()
             upload_rows = [(original_name, stored_path, total_size, upload.content_type or "")]
-            if suffix == ".zip":
+            if suffix in ARCHIVE_SUFFIXES:
                 expanded_dir = order_folder / f"{Path(original_name).stem}_expanded"
-                expanded = _safe_extract_zip(Path(stored_path), expanded_dir)
+                expanded = _safe_extract_archive(Path(stored_path), expanded_dir)
                 if not expanded:
                     raise HTTPException(status_code=400, detail=f"{original_name} contains no supported documents.")
                 upload_rows = [(n, p, z, mimetypes.guess_type(n)[0] or "") for n, p, z in expanded]
@@ -1530,7 +2332,7 @@ def processing_center_jobs(view: str = "active", user: dict = Depends(require_us
             order["archived"] = archived_flag
             orders.append(order)
 
-    active_states = {"queued", "processing", "quality_review"}
+    active_states = {"queued", "processing", "paused", "cancelling", "quality_review"}
     completed_states = {"completed", "partial_completed"}
     if view == "archived":
         orders = [o for o in orders if o.get("archived")]
@@ -1601,7 +2403,7 @@ def retry_processing_order(order_id: int, user: dict = Depends(require_user)) ->
     with get_db() as db:
         row = _owned_order(db, order_id, user)
         active = db.execute(
-            "SELECT id,state,progress FROM processing_jobs WHERE order_id=? AND state IN ('queued','processing') ORDER BY id DESC LIMIT 1",
+            "SELECT id,state,progress FROM processing_jobs WHERE order_id=? AND state IN ('queued','processing','paused','cancelling') ORDER BY id DESC LIMIT 1",
             (order_id,),
         ).fetchone()
         if active is not None:
@@ -1938,7 +2740,114 @@ def test_ai_translation() -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class _ProgressEventDispatcher:
+    """Persist progress without blocking document processing on SQLite/UI polling.
+
+    V35 production traces showed sub-second scan/translation/write work followed by
+    200+ second gaps before the next local stage. The gap occurred inside the
+    synchronous progress callback, which wrote multiple rows to SQLite while the
+    browser was polling the same database. This dispatcher keeps cancellation
+    checks synchronous but moves status persistence to one bounded writer thread.
+    Repeated events are coalesced so large projects do not create thousands of
+    redundant database writes.
+    """
+
+    def __init__(self, job_id: int) -> None:
+        self.job_id = job_id
+        self._queue: queue.Queue[tuple[int, str, str, str] | None] = queue.Queue(maxsize=256)
+        self._latest: dict[str, tuple[int, str, str, str]] = {}
+        self._lock = threading.Lock()
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run, name=f"progress-writer-{job_id}", daemon=True
+        )
+        self._thread.start()
+
+    def emit(self, progress: int, step: str, message: str, level: str = "info") -> None:
+        # Telemetry must never become a processing barrier. Production traces
+        # showed sub-second local work followed by ~200 second gaps precisely
+        # between write completion and the next progress event. The synchronous
+        # pause/cancel wait here was the only operation in that gap.
+        #
+        # Pause/stop remains safe and predictable: it is observed at file
+        # boundaries ("开始处理文件" / "正在准备处理") after the current AI/file
+        # operation finishes, rather than on every high-frequency UI event.
+        if message.endswith("开始处理文件") or "正在准备处理" in message:
+            _wait_for_job_control(self.job_id)
+        else:
+            control = _job_control(self.job_id)
+            if control["cancel"].is_set():
+                raise JobCancelled("任务已由用户停止")
+        event = (progress, step, message, level)
+        with self._lock:
+            self._latest[step] = event
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            # The latest event for each step remains available to the writer.
+            # Never block the document engine merely to persist UI telemetry.
+            pass
+
+    def _run(self) -> None:
+        last_written: dict[str, tuple[int, str]] = {}
+        while True:
+            event = self._queue.get()
+            if event is None:
+                self._queue.task_done()
+                break
+            progress, step, message, level = event
+            with self._lock:
+                latest = self._latest.get(step, event)
+            progress, step, message, level = latest
+            previous = last_written.get(step)
+            # Keep stage changes and meaningful progress, but collapse identical
+            # poll-era messages that previously saturated SQLite.
+            if previous != (progress, message) or level == "error":
+                started = time.perf_counter()
+                try:
+                    _job_event(self.job_id, progress, step, message, level)
+                except JobCancelled:
+                    pass
+                except Exception:
+                    logging.getLogger("document_automation.progress").exception(
+                        "Progress persistence failed: job=%s step=%s", self.job_id, step
+                    )
+                else:
+                    elapsed = time.perf_counter() - started
+                    if elapsed > 1.0:
+                        logging.getLogger("document_automation.progress").warning(
+                            "Slow progress persistence: job=%s step=%s elapsed=%.3fs",
+                            self.job_id, step, elapsed,
+                        )
+                    last_written[step] = (progress, message)
+            self._queue.task_done()
+
+    def close(self, timeout: float = 10.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # Ensure the most recent state for every stage is queued before shutdown.
+        with self._lock:
+            pending = list(self._latest.values())
+        for event in pending:
+            try:
+                self._queue.put(event, timeout=0.2)
+            except queue.Full:
+                break
+        try:
+            self._queue.put(None, timeout=1.0)
+        except queue.Full:
+            # Drain one stale item to guarantee the shutdown sentinel can enter.
+            try:
+                self._queue.get_nowait(); self._queue.task_done()
+            except queue.Empty:
+                pass
+            self._queue.put_nowait(None)
+        self._thread.join(timeout=timeout)
+
+
 def _job_event(job_id: int, progress: int, step: str, message: str, level: str = "info") -> None:
+    _wait_for_job_control(job_id)
     timestamp = utc_now()
     with get_db() as db:
         target = db.execute("SELECT position FROM processing_steps WHERE job_id=? AND step_key=?", (job_id, step)).fetchone()
@@ -1970,14 +2879,18 @@ def _job_event(job_id: int, progress: int, step: str, message: str, level: str =
 
 
 def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths: list[tuple[str, str]]) -> None:
+    _job_control(job_id)
     output_dir = OUTPUT_DIR / order["order_number"] / f"job_{job_id}"
+    progress_dispatcher = _ProgressEventDispatcher(job_id)
     try:
         result = run_local_job(
             order,
             source_paths,
             output_dir,
-            progress_callback=lambda progress, step, message: _job_event(job_id, progress, step, message),
+            progress_callback=progress_dispatcher.emit,
         )
+        # Flush the latest stage state before publishing terminal output rows.
+        progress_dispatcher.close()
         finished_at = utc_now()
         if result["state"] == "completed":
             mapped_status = "completed"
@@ -2030,9 +2943,25 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
             if ENFORCE_CREDITS:
                 _settle_or_refund_credits(db, order_id, result["state"])
             db.commit()
+    except JobCancelled as exc:
+        finished_at = utc_now()
+        with get_db() as db:
+            row = db.execute("SELECT progress,current_step FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+            progress = int(row["progress"] if row else 0)
+            step = row["current_step"] if row else "cancelled"
+            db.execute("UPDATE processing_jobs SET state='cancelled', current_step='cancelled', blockers_json=?, result_json=?, updated_at=? WHERE id=?", (json.dumps([str(exc)], ensure_ascii=False), json.dumps({"state":"cancelled","progress":progress,"current_step":step,"message":str(exc)}, ensure_ascii=False), finished_at, job_id))
+            db.execute("UPDATE processing_steps SET status='pending', message=? WHERE job_id=? AND status='running'", (str(exc), job_id))
+            db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info', 'cancelled', ?, ?)", (job_id, str(exc), finished_at))
+            db.execute("UPDATE orders SET status='cancelled', updated_at=? WHERE id=?", (finished_at, order_id))
+            if ENFORCE_CREDITS:
+                _settle_or_refund_credits(db, order_id, "cancelled")
+            db.commit()
     except Exception as exc:
         finished_at = utc_now()
-        _job_event(job_id, 100, "failed", str(exc), "error")
+        try:
+            _job_event(job_id, 100, "failed", str(exc), "error")
+        except JobCancelled:
+            pass
         with get_db() as db:
             db.execute(
                 "UPDATE processing_jobs SET state = 'failed', progress = 100, current_step = 'failed', blockers_json = ?, result_json = ?, updated_at = ? WHERE id = ?",
@@ -2042,6 +2971,9 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
             if ENFORCE_CREDITS:
                 _settle_or_refund_credits(db, order_id, "failed")
             db.commit()
+    finally:
+        progress_dispatcher.close()
+        _clear_job_control(job_id)
 
 
 @app.post("/api/orders/{order_id}/process", dependencies=[Depends(require_admin)])
@@ -2052,7 +2984,7 @@ def start_processing(order_id: int) -> dict:
         if row is None:
             raise HTTPException(status_code=404, detail="Order not found.")
         active = db.execute(
-            "SELECT id, state FROM processing_jobs WHERE order_id = ? AND state IN ('queued','processing') ORDER BY id DESC LIMIT 1",
+            "SELECT id, state FROM processing_jobs WHERE order_id = ? AND state IN ('queued','processing','paused','cancelling') ORDER BY id DESC LIMIT 1",
             (order_id,),
         ).fetchone()
         if active is not None:
@@ -2112,6 +3044,52 @@ def start_processing(order_id: int) -> dict:
     thread.start()
     return {"success": True, "job_id": job_id, "state": "queued", "progress": 0}
 
+
+@app.post("/api/processing-center/jobs/{job_id}/pause", dependencies=[Depends(require_admin)])
+def pause_processing_job(job_id: int) -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT id,state,progress FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Processing job not found.")
+        if row["state"] not in {"queued","processing","paused"}:
+            return {"success": True, "state": row["state"], "already_terminal": True}
+        control = _job_control(job_id)
+        control["pause"].set()
+        now = utc_now()
+        db.execute("UPDATE processing_jobs SET state='paused',updated_at=? WHERE id=?", (now, job_id))
+        db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info','paused','任务已暂停，可随时继续',?)", (job_id, now))
+        db.commit()
+    return {"success": True, "state": "paused"}
+
+@app.post("/api/processing-center/jobs/{job_id}/resume", dependencies=[Depends(require_admin)])
+def resume_processing_job(job_id: int) -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT id,state FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Processing job not found.")
+        control = _job_control(job_id)
+        control["pause"].clear()
+        now = utc_now()
+        db.execute("UPDATE processing_jobs SET state='processing',updated_at=? WHERE id=?", (now, job_id))
+        db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info','processing','任务已继续处理',?)", (job_id, now))
+        db.commit()
+    return {"success": True, "state": "processing"}
+
+@app.post("/api/processing-center/jobs/{job_id}/stop", dependencies=[Depends(require_admin)])
+def stop_processing_job(job_id: int) -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT id,state,order_id,progress FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Processing job not found.")
+        if row["state"] in {"completed","partial_completed","failed","cancelled"}:
+            return {"success": True, "state": row["state"], "already_terminal": True}
+        control = _job_control(job_id)
+        control["cancel"].set(); control["pause"].clear()
+        now = utc_now()
+        db.execute("UPDATE processing_jobs SET state='cancelling',current_step='cancelling',updated_at=? WHERE id=?", (now, job_id))
+        db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info','cancelling','正在安全停止任务，当前 AI 请求完成后立即退出',?)", (job_id, now))
+        db.commit()
+    return {"success": True, "state": "cancelling"}
 
 @app.post("/api/orders/{order_id}/recover")
 def recover_stalled_order(order_id: int) -> dict:

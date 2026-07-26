@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions
 chcp 65001 >nul
 set "ROOT=%~dp0"
@@ -7,7 +7,7 @@ set "LOGDIR=%ROOT%logs"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 cd /d "%FRONTEND%"
-title Document Automation AI V23.0 Enterprise Frontend
+title Document Automation AI V40.4.0 Frontend
 if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (
   echo Frontend runtime is missing. Starting automatic repair...
   call "%ROOT%Setup_Once.bat" --automatic

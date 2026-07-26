@@ -1,1 +1,1 @@
-30.3.3
+Document Automation AI V40.5.0

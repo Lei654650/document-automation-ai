@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 set "ROOT=%~dp0"
@@ -9,13 +9,14 @@ set "LOGDIR=%ROOT%logs"
 set "STARTLOG=%LOGDIR%\startup.log"
 set "VENV_PY=%BACKEND%\.venv\Scripts\python.exe"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
+set "APP_VERSION=40.5.0"
 cd /d "%ROOT%"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 if not exist "%RUNTIME%" mkdir "%RUNTIME%"
-title Document Automation AI V23.0 Enterprise
+title Document Automation AI V40.5.0
 
 echo ============================================================
-echo Document Automation AI V23.0 Enterprise - One Click Start
+echo Document Automation AI V40.5.0 - One Click Start
 echo ============================================================
 echo Project root: %ROOT%
 echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
@@ -23,6 +24,10 @@ echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
 rem Never trust setup.ready by itself. Verify the real runtime files.
 set "NEED_SETUP=0"
 if not exist "%VENV_PY%" set "NEED_SETUP=1"
+if exist "%VENV_PY%" (
+  "%VENV_PY%" -c "import py7zr, rarfile" >nul 2>&1
+  if errorlevel 1 set "NEED_SETUP=1"
+)
 if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" set "NEED_SETUP=1"
 if not exist "%FRONTEND%\node_modules\react\package.json" set "NEED_SETUP=1"
 
@@ -34,7 +39,6 @@ if "%NEED_SETUP%"=="1" (
   if exist "%RUNTIME%\setup.ready" del /q "%RUNTIME%\setup.ready" >nul 2>&1
   call "%ROOT%Setup_Once.bat" --automatic
   if errorlevel 1 (
-    echo.
     echo [ERROR] Automatic setup did not complete.
     echo Please send logs\setup.log for inspection.
     pause
@@ -42,37 +46,35 @@ if "%NEED_SETUP%"=="1" (
   )
 )
 
-rem Verify again after setup so stale marker files can never cause false success.
 if not exist "%VENV_PY%" (
   echo [ERROR] Backend Python environment is still missing after setup.
-  echo Check logs\setup.log.
   pause
   exit /b 1
 )
 if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (
   echo [ERROR] Frontend dependencies are still missing after setup.
-  echo Check logs\setup.log.
   pause
   exit /b 1
 )
 
-netstat -ano | findstr /R /C:":8000 .*LISTENING" >nul 2>&1
-if errorlevel 1 (
-  echo Starting backend...
-  start "Document Automation AI Backend" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
-) else (
-  echo Backend port 8000 is already in use. Reusing the running backend.
-)
+rem P0: Never reuse a backend/frontend left running from an older extracted folder.
+rem The previous launcher reused any listener on 8000/5173, which made V40 open a
+rem V35 process and produced old XLSX errors while the UI appeared to be V40.
+call :STOP_PORT 8000 Backend
+call :STOP_PORT 5173 Frontend
 
-echo Waiting for backend health check...
+echo Starting backend...
+start "Document Automation AI Backend V40.5.0" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
+
+echo Waiting for backend health check and version identity...
 set /a COUNT=0
 :WAIT_BACKEND
 set /a COUNT+=1
-curl.exe -fsS --max-time 2 http://127.0.0.1:8000/api/health >nul 2>&1
-if not errorlevel 1 goto BACKEND_READY
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "try { $h=Invoke-RestMethod -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8000/api/health; if(($h.version -eq '%APP_VERSION%') -and ([IO.Path]::GetFullPath($h.project_root).TrimEnd([char]92) -eq [IO.Path]::GetFullPath('%ROOT%').TrimEnd([char]92))){ 'READY' } } catch {}"`) do set "BACKEND_STATE=%%V"
+if /I "!BACKEND_STATE!"=="READY" goto BACKEND_READY
 if !COUNT! GEQ 180 (
-  echo [ERROR] Backend did not become healthy within 180 seconds.
-  echo Check logs\backend.log and the Backend window.
+  echo [ERROR] Backend did not become healthy as V%APP_VERSION% within 180 seconds.
+  echo Check logs\backend.log and logs\startup.log.
   pause
   exit /b 1
 )
@@ -80,14 +82,9 @@ timeout /t 1 /nobreak >nul
 goto WAIT_BACKEND
 
 :BACKEND_READY
-echo Backend is healthy.
-netstat -ano | findstr /R /C:":5173 .*LISTENING" >nul 2>&1
-if errorlevel 1 (
-  echo Starting frontend...
-  start "Document Automation AI Frontend" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
-) else (
-  echo Frontend port 5173 is already in use. Reusing the running frontend.
-)
+echo Backend V%APP_VERSION% is healthy.
+echo Starting frontend...
+start "Document Automation AI Frontend V40.5.0" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
 
 echo Waiting for frontend...
 set /a COUNT=0
@@ -97,7 +94,7 @@ curl.exe -fsS --max-time 2 http://127.0.0.1:5173/ >nul 2>&1
 if not errorlevel 1 goto FRONTEND_READY
 if !COUNT! GEQ 180 (
   echo [ERROR] Frontend did not become ready within 180 seconds.
-  echo Check logs\frontend.log and the Frontend window.
+  echo Check logs\frontend.log.
   pause
   exit /b 1
 )
@@ -106,12 +103,24 @@ goto WAIT_FRONTEND
 
 :FRONTEND_READY
 echo Frontend is ready.
-echo Opening website...
 start "" http://127.0.0.1:5173
 echo.
 echo ============================================================
-echo Document Automation AI is running.
+echo Document Automation AI V%APP_VERSION% is running.
 echo Backend: http://127.0.0.1:8000/api/health
 echo Frontend: http://127.0.0.1:5173
 echo ============================================================
+exit /b 0
+
+:STOP_PORT
+set "PORT=%~1"
+set "LABEL=%~2"
+set "FOUND=0"
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"') do (
+  set "FOUND=1"
+  echo Stopping stale %LABEL% process on port %PORT% ^(PID %%P^)...
+  echo Stopping stale %LABEL% PID %%P on port %PORT%>>"%STARTLOG%"
+  taskkill /PID %%P /T /F >nul 2>&1
+)
+if "!FOUND!"=="1" timeout /t 2 /nobreak >nul
 exit /b 0
