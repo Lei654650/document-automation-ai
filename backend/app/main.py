@@ -107,12 +107,16 @@ def _load_project_env() -> None:
                 env_path.write_text("\n".join(repaired) + "\n", encoding="utf-8")
         except OSError:
             pass
-    load_dotenv(env_path, override=True)
+    # Never let the bundled backend/.env overwrite real deployment variables.
+    # Railway injects SMTP/provider secrets into os.environ before startup; the
+    # previous override=True replaced them with the blank example values shipped
+    # in backend/.env, making production report that SMTP and AI were unconfigured.
+    load_dotenv(env_path, override=False)
 
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "43.0.1"
+APP_VERSION = "43.0.2"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -1020,26 +1024,55 @@ class EmailDeliveryError(RuntimeError):
         self.detail = detail
 
 
-def _smtp_configuration_summary() -> dict:
+def _smtp_runtime_config() -> dict:
+    """Read SMTP settings from the live process environment.
+
+    Railway variable changes are applied at container startup. Reading them here
+    also prevents stale module constants from producing a false "not configured"
+    result during tests and future runtime reload mechanisms.
+    """
+    username = os.getenv("SMTP_USERNAME", SMTP_USERNAME).strip()
+    sender = os.getenv("SMTP_FROM_EMAIL", SMTP_FROM_EMAIL or username).strip()
+    host = os.getenv("SMTP_HOST", SMTP_HOST).strip()
+    try:
+        port = int(os.getenv("SMTP_PORT", str(SMTP_PORT)) or str(SMTP_PORT))
+    except ValueError:
+        port = 587
     return {
-        "configured": bool(SMTP_HOST and SMTP_FROM_EMAIL),
-        "host": SMTP_HOST,
-        "port": SMTP_PORT,
-        "security": "ssl" if SMTP_USE_SSL else ("starttls" if SMTP_USE_TLS else "plain"),
-        "username_configured": bool(SMTP_USERNAME),
-        "sender": SMTP_FROM_EMAIL,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": os.getenv("SMTP_PASSWORD", SMTP_PASSWORD).strip(),
+        "sender": sender,
+        "from_name": os.getenv("SMTP_FROM_NAME", SMTP_FROM_NAME).strip() or "Document Automation AI",
+        "use_tls": os.getenv("SMTP_USE_TLS", str(SMTP_USE_TLS)).lower() in {"1", "true", "yes", "on"},
+        "use_ssl": os.getenv("SMTP_USE_SSL", str(SMTP_USE_SSL)).lower() in {"1", "true", "yes", "on"},
+        "configured": bool(host and sender),
+    }
+
+
+def _smtp_configuration_summary() -> dict:
+    config = _smtp_runtime_config()
+    return {
+        "configured": config["configured"],
+        "host": config["host"],
+        "port": config["port"],
+        "security": "ssl" if config["use_ssl"] else ("starttls" if config["use_tls"] else "plain"),
+        "username_configured": bool(config["username"]),
+        "sender": config["sender"],
     }
 
 
 def _send_verification_email(email: str, code: str) -> dict:
+    smtp_config = _smtp_runtime_config()
     config = _smtp_configuration_summary()
     if not config["configured"]:
         raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
-    if SMTP_USERNAME and not SMTP_PASSWORD:
+    if smtp_config["username"] and not smtp_config["password"]:
         raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。")
     minutes = max(1, EMAIL_VERIFICATION_TTL_SECONDS // 60)
     message = EmailMessage()
-    message["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
     message["To"] = email
     message["Subject"] = "Document Automation AI 邮箱验证码"
     message.set_content(
@@ -1051,13 +1084,13 @@ def _send_verification_email(email: str, code: str) -> dict:
     )
     context = ssl.create_default_context(cafile=certifi.where())
     try:
-        smtp_context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context) if SMTP_USE_SSL else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+        smtp_context = smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context) if smtp_config["use_ssl"] else smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
         with smtp_context as smtp:
             smtp.ehlo()
-            if not SMTP_USE_SSL and SMTP_USE_TLS:
+            if not smtp_config["use_ssl"] and smtp_config["use_tls"]:
                 smtp.starttls(context=context); smtp.ehlo()
-            if SMTP_USERNAME:
-                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            if smtp_config["username"]:
+                smtp.login(smtp_config["username"], smtp_config["password"])
             refused = smtp.send_message(message)
             if refused:
                 raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址。")
@@ -1072,6 +1105,7 @@ def _send_verification_email(email: str, code: str) -> dict:
 
 def _send_password_reset_email(email: str, code: str) -> dict:
     """Send first; only the caller may persist the code after confirmed delivery."""
+    smtp_config = _smtp_runtime_config()
     config = _smtp_configuration_summary()
     logger.info(
         "Password reset SMTP start recipient=%s host=%s port=%s security=%s sender=%s",
@@ -1079,12 +1113,12 @@ def _send_password_reset_email(email: str, code: str) -> dict:
     )
     if not config["configured"]:
         raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
-    if SMTP_USERNAME and not SMTP_PASSWORD:
+    if smtp_config["username"] and not smtp_config["password"]:
         raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。QQ 邮箱必须使用 SMTP 授权码，不能使用登录密码。")
 
     minutes = max(1, PASSWORD_RESET_TTL_SECONDS // 60)
     message = EmailMessage()
-    message["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
     message["To"] = email
     message["Subject"] = "Document Automation AI 密码重置验证码"
     message.set_content(
@@ -1097,19 +1131,19 @@ def _send_password_reset_email(email: str, code: str) -> dict:
 
     context = ssl.create_default_context(cafile=certifi.where())
     try:
-        if SMTP_USE_SSL:
-            smtp_context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context)
+        if smtp_config["use_ssl"]:
+            smtp_context = smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context)
         else:
-            smtp_context = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+            smtp_context = smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
         with smtp_context as smtp:
             smtp.ehlo()
             logger.info("Password reset SMTP connected recipient=%s", email)
-            if not SMTP_USE_SSL and SMTP_USE_TLS:
+            if not smtp_config["use_ssl"] and smtp_config["use_tls"]:
                 smtp.starttls(context=context)
                 smtp.ehlo()
                 logger.info("Password reset SMTP STARTTLS ready recipient=%s", email)
-            if SMTP_USERNAME:
-                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            if smtp_config["username"]:
+                smtp.login(smtp_config["username"], smtp_config["password"])
                 logger.info("Password reset SMTP authenticated recipient=%s", email)
             refused = smtp.send_message(message)
             if refused:

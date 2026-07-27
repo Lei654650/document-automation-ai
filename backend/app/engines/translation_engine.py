@@ -209,20 +209,32 @@ def _empty_profiles() -> dict[str, dict[str, str]]:
 
 
 def _env_settings() -> dict[str, Any]:
-    provider = os.getenv("TRANSLATION_PROVIDER", "none").strip().lower()
-    profiles = _empty_profiles()
-    env_prefix = {
+    """Build platform-wide provider settings from deployment secrets.
+
+    A production customer must never supply an API key. The platform operator
+    configures one provider in Railway or through the administrator center. If
+    TRANSLATION_PROVIDER is omitted, select the first provider that has a key so
+    a valid platform secret cannot be silently ignored.
+    """
+    prefix_by_provider = {
         "openai": "OPENAI", "deepseek": "DEEPSEEK", "gemini": "GEMINI",
         "claude": "CLAUDE", "azure": "AZURE_OPENAI", "openrouter": "OPENROUTER",
-    }.get(provider)
-    if env_prefix and provider in PROVIDER_DEFAULTS:
-        profiles[provider] = {
-            "api_key": os.getenv(f"{env_prefix}_API_KEY", ""),
-            "model": os.getenv(f"{env_prefix}_MODEL", PROVIDER_DEFAULTS[provider]["model"]),
-            "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider]["base_url"]),
+    }
+    profiles = _empty_profiles()
+    for provider_id, env_prefix in prefix_by_provider.items():
+        api_key = os.getenv(f"{env_prefix}_API_KEY", "").strip()
+        profiles[provider_id] = {
+            "api_key": api_key,
+            "model": os.getenv(f"{env_prefix}_MODEL", PROVIDER_DEFAULTS[provider_id]["model"]).strip(),
+            "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider_id]["base_url"]).strip(),
         }
+
+    requested = os.getenv("TRANSLATION_PROVIDER", "none").strip().lower()
+    if requested not in PROVIDER_DEFAULTS or not profiles.get(requested, {}).get("api_key"):
+        requested = next((pid for pid in PROVIDER_DEFAULTS if profiles[pid].get("api_key")), "none")
+
     return {
-        "provider": provider,
+        "provider": requested,
         "profiles": profiles,
         "timeout_seconds": int(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "35")),
         "max_retries": int(os.getenv("TRANSLATION_MAX_RETRIES", "0")),
@@ -235,7 +247,28 @@ def load_settings(include_secret: bool = True) -> dict[str, Any]:
         try:
             stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
-                settings.update({k: v for k, v in stored.items() if k in DEFAULTS})
+                env_provider = str(settings.get("provider", "none"))
+                env_profiles = settings.get("profiles") or {}
+                settings.update({k: v for k, v in stored.items() if k in DEFAULTS and k != "profiles"})
+                stored_profiles = stored.get("profiles") if isinstance(stored.get("profiles"), dict) else {}
+                merged_profiles = _empty_profiles()
+                for pid in merged_profiles:
+                    merged_profiles[pid].update(env_profiles.get(pid) or {})
+                    profile = stored_profiles.get(pid)
+                    if isinstance(profile, dict):
+                        for field in ("model", "base_url"):
+                            if str(profile.get(field) or "").strip():
+                                merged_profiles[pid][field] = str(profile[field]).strip()
+                        # A saved platform key overrides the environment; an empty
+                        # saved field must not erase a Railway secret.
+                        if str(profile.get("api_key") or "").strip():
+                            merged_profiles[pid]["api_key"] = str(profile["api_key"]).strip()
+                settings["profiles"] = merged_profiles
+                selected = str(settings.get("provider", "none")).strip().lower()
+                if selected not in PROVIDER_DEFAULTS or not merged_profiles.get(selected, {}).get("api_key"):
+                    settings["provider"] = env_provider if env_profiles.get(env_provider, {}).get("api_key") else next(
+                        (pid for pid in PROVIDER_DEFAULTS if merged_profiles[pid].get("api_key")), "none"
+                    )
                 # migrate the older single-provider settings format
                 legacy_provider = str(stored.get("provider", "none")).lower()
                 if "profiles" not in stored and legacy_provider in PROVIDER_DEFAULTS:
