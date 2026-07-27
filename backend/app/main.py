@@ -237,7 +237,18 @@ def _wait_for_job_control(job_id: int) -> None:
             raise JobCancelled("任务已由用户停止")
     if control["cancel"].is_set():
         raise JobCancelled("任务已由用户停止")
-_cors_env = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if item.strip()]
+_default_cors_origins = ",".join([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://document-automation-ai.vercel.app",
+    "https://document-automation-ai-j3zc.vercel.app",
+    "https://document-automation-ai-45y5.vercel.app",
+])
+_cors_env = [
+    item.strip().rstrip("/")
+    for item in os.getenv("CORS_ORIGINS", _default_cors_origins).split(",")
+    if item.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_env or ["*"],
