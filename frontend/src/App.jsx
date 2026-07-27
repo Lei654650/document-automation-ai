@@ -6,8 +6,14 @@ import {
 } from 'lucide-react'
 import './App.css'
 
-const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
-const VERSION = '43.0.1'
+const configuredApiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '')
+const browserHost = typeof window !== 'undefined' ? window.location.hostname : ''
+const isLocalBrowser = browserHost === 'localhost' || browserHost === '127.0.0.1'
+const configuredPointsToLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configuredApiBase)
+const API_BASE = configuredApiBase && !(configuredPointsToLocalhost && !isLocalBrowser)
+  ? configuredApiBase
+  : (isLocalBrowser ? 'http://localhost:8000' : 'https://lan-docai.up.railway.app')
+const VERSION = '43.0.3'
 
 const authMessage=(detail,zh,status)=>{
   const value=String(detail||'').trim()
