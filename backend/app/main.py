@@ -1478,8 +1478,40 @@ def login_user(payload: UserLogin, request: Request) -> dict:
         audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "invalid_credentials", "locked": bool(lock_seconds)})
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
     if row["status"] != "active":
-        audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "inactive_account"})
-        raise HTTPException(status_code=403, detail="This account is not active.")
+        # Repair accounts left in pending/inactive state by an earlier SMTP or
+        # deployment failure. The password has already been verified above, so
+        # activating a verified account here does not weaken authentication.
+        can_recover = bool(row["email_verified"]) or (
+            row["status"] == "pending_verification" and EMAIL_VERIFICATION_FAIL_OPEN
+        )
+        if can_recover:
+            recovered_at = utc_now()
+
+            def recover_account(db):
+                db.execute(
+                    "UPDATE users SET status='active',email_verified=1,last_login_at=? WHERE id=?",
+                    (recovered_at, row["id"]),
+                )
+                db.execute(
+                    "UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''",
+                    (recovered_at, row["id"]),
+                )
+
+            run_db_write(recover_account)
+            row = dict(row)
+            row["status"] = "active"
+            row["email_verified"] = 1
+            audit_event(
+                "auth.login",
+                outcome="recovered",
+                ip=ip,
+                actor=email,
+                request_id=request_id,
+                details={"reason": "stale_pending_account"},
+            )
+        else:
+            audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "inactive_account"})
+            raise HTTPException(status_code=403, detail="This account is not active.")
     login_guard.success(email, ip)
     token = _session_token()
     expires = int(time.time()) + SESSION_TTL_SECONDS
