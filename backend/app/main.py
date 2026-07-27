@@ -108,15 +108,28 @@ def _load_project_env() -> None:
         except OSError:
             pass
     # Never let the bundled backend/.env overwrite real deployment variables.
-    # Railway injects SMTP/provider secrets into os.environ before startup; the
-    # previous override=True replaced them with the blank example values shipped
-    # in backend/.env, making production report that SMTP and AI were unconfigured.
+    # Railway injects SMTP/provider secrets into os.environ before startup.
     load_dotenv(env_path, override=False)
+
+    # Local-only secret overrides live in backend/.env.local. This file is never
+    # required in Railway/Vercel and is intentionally excluded from Git. Loading
+    # it after .env lets the one-time SMTP setup tool replace the blank example
+    # values without changing any other project configuration.
+    managed_cloud = bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("VERCEL")
+        or os.getenv("VERCEL_ENV")
+        or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+    )
+    local_env_path = BASE_DIR / ".env.local"
+    if not managed_cloud and local_env_path.exists():
+        load_dotenv(local_env_path, override=True)
 
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "43.0.2"
+APP_VERSION = "43.0.4"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -1063,6 +1076,51 @@ def _smtp_configuration_summary() -> dict:
     }
 
 
+def _configured_platform_admin_emails() -> set[str]:
+    """Return the explicit platform-admin recovery allowlist.
+
+    Railway may start with a fresh persistent database even though the same
+    administrator previously existed in an older Vercel/serverless database.
+    Only addresses explicitly configured as platform administrators may be
+    bootstrapped through the verified password-reset email flow.
+    """
+    raw = os.getenv(
+        "PLATFORM_ADMIN_EMAILS",
+        os.getenv("ADMIN_EMAIL", "654650727@qq.com"),
+    )
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _bootstrap_missing_platform_admin(email: str) -> dict | None:
+    normalized = email.strip().lower()
+    if normalized not in _configured_platform_admin_emails():
+        return None
+
+    created_at = utc_now()
+    password_hash, password_salt = _password_hash(secrets.token_urlsafe(48))
+
+    def operation(db):
+        existing = db.execute(
+            "SELECT id,email FROM users WHERE lower(trim(email))=?",
+            (normalized,),
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        cursor = db.execute(
+            "INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) "
+            "VALUES (?,?,?,?, 'active',1,?,?)",
+            ("Platform Administrator", normalized, password_hash, password_salt, created_at, ""),
+        )
+        return {"id": cursor.lastrowid, "email": normalized}
+
+    row = run_db_write(operation)
+    logger.warning(
+        "Password reset bootstrapped missing platform administrator recipient=%s user_id=%s",
+        normalized, row["id"],
+    )
+    return row
+
+
 def _send_verification_email(email: str, code: str) -> dict:
     smtp_config = _smtp_runtime_config()
     config = _smtp_configuration_summary()
@@ -1575,10 +1633,20 @@ def login_user(payload: UserLogin, request: Request) -> dict:
 def request_password_reset(payload: PasswordResetRequest, request: Request) -> dict:
     email = payload.email.strip().lower()
     generic = {"success": True, "message": "If the account exists, a reset code has been sent."}
+    logger.info("Password reset request received recipient=%s", email)
     with get_db() as db:
-        row = db.execute("SELECT id,email FROM users WHERE email=?", (email,)).fetchone()
+        row = db.execute(
+            "SELECT id,email FROM users WHERE lower(trim(email))=?",
+            (email,),
+        ).fetchone()
     if row is None:
+        row = _bootstrap_missing_platform_admin(email)
+    if row is None:
+        logger.warning("Password reset ignored because account does not exist recipient=%s", email)
         return generic
+    if not isinstance(row, dict):
+        row = dict(row)
+    logger.info("Password reset account resolved recipient=%s user_id=%s", email, row["id"])
 
     now_ts = int(time.time())
     cooldown_after = (datetime.now(timezone.utc) - timedelta(seconds=PASSWORD_RESET_COOLDOWN_SECONDS)).isoformat()
