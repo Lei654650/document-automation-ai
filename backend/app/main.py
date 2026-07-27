@@ -178,12 +178,13 @@ REGISTRATION_IP_WINDOW_SECONDS = max(300, int(os.getenv("REGISTRATION_IP_WINDOW_
 REGISTRATION_IP_MAX_ACCOUNTS = max(1, int(os.getenv("REGISTRATION_IP_MAX_ACCOUNTS", "3")))
 EMAIL_VERIFICATION_TTL_SECONDS = max(300, int(os.getenv("EMAIL_VERIFICATION_TTL_SECONDS", "900")))
 EMAIL_VERIFICATION_COOLDOWN_SECONDS = max(30, int(os.getenv("EMAIL_VERIFICATION_COOLDOWN_SECONDS", "60")))
-# Email verification is enabled automatically when SMTP is configured.
-# Railway deployments without SMTP must still allow customers to register and sign in,
-# so the service gracefully activates the account instead of crashing with HTTP 500.
+# Public registration must remain usable on every network. Email verification is
+# therefore opt-in instead of being enabled merely because SMTP credentials exist.
+# Set EMAIL_VERIFICATION_REQUIRED=true explicitly only after the verification UI
+# and outbound mail delivery have both been validated in production.
 EMAIL_VERIFICATION_REQUIRED = os.getenv(
     "EMAIL_VERIFICATION_REQUIRED",
-    "true" if (SMTP_HOST and SMTP_FROM_EMAIL) else "false",
+    "false",
 ).lower() in {"1", "true", "yes", "on"}
 EMAIL_VERIFICATION_FAIL_OPEN = os.getenv("EMAIL_VERIFICATION_FAIL_OPEN", "true").lower() in {"1", "true", "yes", "on"}
 
