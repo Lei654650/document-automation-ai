@@ -41,6 +41,17 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import certifi
 
+from app.security import (
+    SecurityMiddleware,
+    audit_event,
+    login_guard,
+    validate_security_configuration,
+    validate_uploaded_file,
+    webhook_replay_guard,
+)
+from app.security.config import CONFIG as SECURITY_CONFIG
+from app.backup import create_backup_router, start_backup_scheduler
+
 from app.services.document_analyzer import analyze_order_files
 from app.services.runtime_service import storage_diagnostics
 from app.engines.quote_engine import suggest_quote
@@ -101,7 +112,7 @@ def _load_project_env() -> None:
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "40.5.0"
+APP_VERSION = "43.0.1"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -167,15 +178,32 @@ REGISTRATION_IP_WINDOW_SECONDS = max(300, int(os.getenv("REGISTRATION_IP_WINDOW_
 REGISTRATION_IP_MAX_ACCOUNTS = max(1, int(os.getenv("REGISTRATION_IP_MAX_ACCOUNTS", "3")))
 EMAIL_VERIFICATION_TTL_SECONDS = max(300, int(os.getenv("EMAIL_VERIFICATION_TTL_SECONDS", "900")))
 EMAIL_VERIFICATION_COOLDOWN_SECONDS = max(30, int(os.getenv("EMAIL_VERIFICATION_COOLDOWN_SECONDS", "60")))
+# Email verification is enabled automatically when SMTP is configured.
+# Railway deployments without SMTP must still allow customers to register and sign in,
+# so the service gracefully activates the account instead of crashing with HTTP 500.
+EMAIL_VERIFICATION_REQUIRED = os.getenv(
+    "EMAIL_VERIFICATION_REQUIRED",
+    "true" if (SMTP_HOST and SMTP_FROM_EMAIL) else "false",
+).lower() in {"1", "true", "yes", "on"}
+EMAIL_VERIFICATION_FAIL_OPEN = os.getenv("EMAIL_VERIFICATION_FAIL_OPEN", "true").lower() in {"1", "true", "yes", "on"}
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Keep the API-side whitelist self-contained so main.py can start even when
+# the upload guard implementation changes. Deep content/archive validation is
+# still performed by validate_uploaded_file after the file is written.
 ALLOWED_SUFFIXES = {
-    ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv",
-    ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
-    ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"
+    ".pdf",
+    ".xlsx", ".xls",
+    ".docx", ".doc",
+    ".csv",
+    ".pptx", ".ppt",
+    ".png", ".jpg", ".jpeg",
+    ".bmp", ".tif", ".tiff",
+    ".zip", ".rar", ".7z",
+    ".tar", ".gz", ".tgz",
 }
 VALID_STATUSES = {
     "waiting_quote", "quoted", "confirmed", "processing",
@@ -215,6 +243,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.add_middleware(
+    SecurityMiddleware,
+    allowed_origins=_cors_env,
 )
 
 
@@ -1117,6 +1149,12 @@ def require_user(user: dict | None = Depends(current_user_optional)) -> dict:
 
 @app.on_event("startup")
 def startup() -> None:
+    validate_security_configuration(
+        cloud_mode=CLOUD_MODE,
+        admin_password=ADMIN_PASSWORD,
+        auth_secret=AUTH_SECRET,
+        strict=SECURITY_CONFIG.strict_startup,
+    )
     delay = 0.25
     for attempt in range(6):
         try:
@@ -1127,6 +1165,7 @@ def startup() -> None:
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 2.0)
+    start_backup_scheduler(BACKUP_ROUTER.backup_service)
     # In-process workers cannot survive a container restart. Mark interrupted jobs clearly.
     with get_db() as db:
         interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing','paused','cancelling')").fetchall()
@@ -1185,6 +1224,62 @@ def register_user(payload: UserRegister, request: Request) -> dict:
     password_hash, salt = _password_hash(payload.password)
     display_name = payload.name.strip() or email.split("@", 1)[0] or "User"
     now, ip = utc_now(), _client_ip(request)
+    device = payload.device_fingerprint.strip()
+
+    # Production deployments may intentionally run before SMTP is configured.
+    # In that case, create an active account and session instead of raising an
+    # unhandled EmailDeliveryError that becomes HTTP 500 for every customer.
+    if not EMAIL_VERIFICATION_REQUIRED:
+        result: dict = {}
+
+        def activate_without_email(db):
+            existing = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            if existing and existing["email_verified"]:
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
+            if existing:
+                user_id = existing["id"]
+                db.execute(
+                    "UPDATE users SET name=?,password_hash=?,password_salt=?,status='active',email_verified=1,last_login_at=? WHERE id=?",
+                    (display_name, password_hash, salt, now, user_id),
+                )
+            else:
+                cur = db.execute(
+                    "INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'active',1,?,?)",
+                    (display_name, email, password_hash, salt, now, now),
+                )
+                user_id = cur.lastrowid
+                db.execute(
+                    "INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
+                    (user_id, "email", email, email, now),
+                )
+            risk, grant, decision = _registration_decision(db, email, "email", email, ip, device)
+            db.execute(
+                "INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,?, 'free','active',?)",
+                (email, grant, now),
+            )
+            if grant:
+                db.execute(
+                    "INSERT OR IGNORE INTO free_credit_claims (user_id,identity_key,credits,reason,created_at) VALUES (?,?,?,?,?)",
+                    (user_id, f"email:{email}", grant, "new_user_bonus", now),
+                )
+            db.execute(
+                "INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (user_id, email, "email", ip, device, risk, grant, decision, now),
+            )
+            token = _create_session(db, user_id, now)
+            result.update(user_id=user_id, token=token, grant=grant, decision=decision)
+
+        run_db_write(activate_without_email)
+        logger.warning("Registration completed without email verification because SMTP is not configured: %s", email)
+        return {
+            "token": result["token"],
+            "user": {"id": result["user_id"], "name": display_name, "email": email, "email_verified": True},
+            "free_credits_granted": result["grant"],
+            "registration_decision": result["decision"],
+            "verification_required": False,
+            "verification_bypassed_reason": "smtp_not_configured",
+        }
+
     code = f"{secrets.randbelow(1000000):06d}"
     code_hash = hashlib.sha256(code.encode()).hexdigest()
     expires_at = int(time.time()) + EMAIL_VERIFICATION_TTL_SECONDS
@@ -1195,20 +1290,85 @@ def register_user(payload: UserRegister, request: Request) -> dict:
             if existing["email_verified"]:
                 raise HTTPException(status_code=409, detail="An account with this email already exists.")
             user_id = existing["id"]
-            db.execute("UPDATE users SET name=?,password_hash=?,password_salt=?,status='pending_verification' WHERE id=?",
-                       (display_name, password_hash, salt, user_id))
+            db.execute(
+                "UPDATE users SET name=?,password_hash=?,password_salt=?,status='pending_verification' WHERE id=?",
+                (display_name, password_hash, salt, user_id),
+            )
         else:
-            cur = db.execute("INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'pending_verification',0,?,?)",
-                             (display_name, email, password_hash, salt, now, ""))
+            cur = db.execute(
+                "INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'pending_verification',0,?,?)",
+                (display_name, email, password_hash, salt, now, ""),
+            )
             user_id = cur.lastrowid
-            db.execute("INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
-                       (user_id,"email",email,email,now))
-        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now,user_id))
-        db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
-                   (user_id,code_hash,expires_at,now,ip))
-        _send_verification_email(email, code)
+            db.execute(
+                "INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
+                (user_id, "email", email, email, now),
+            )
+        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now, user_id))
+        db.execute(
+            "INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
+            (user_id, code_hash, expires_at, now, ip),
+        )
+
     run_db_write(operation)
-    return {"verification_required": True, "email": email, "delivery": "email", "cooldown_seconds": EMAIL_VERIFICATION_COOLDOWN_SECONDS}
+    try:
+        _send_verification_email(email, code)
+    except EmailDeliveryError as exc:
+        logger.exception("Registration verification email failed code=%s recipient=%s", exc.code, email)
+        if not EMAIL_VERIFICATION_FAIL_OPEN:
+            raise HTTPException(status_code=503, detail=exc.detail) from exc
+
+        # Keep public registration available when the SMTP provider is unavailable.
+        # The account was already written as pending above; activate it atomically,
+        # grant the normal risk-controlled free credits, and return a valid session.
+        fallback: dict = {}
+
+        def activate_after_delivery_failure(db):
+            user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            if not user:
+                raise RuntimeError("Registration account disappeared before fallback activation.")
+            db.execute(
+                "UPDATE users SET status='active',email_verified=1,last_login_at=? WHERE id=?",
+                (now, user["id"]),
+            )
+            db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now, user["id"]))
+            risk, grant, decision = _registration_decision(db, email, "email", email, ip, device)
+            db.execute(
+                "INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,?, 'free','active',?)",
+                (email, grant, now),
+            )
+            if grant:
+                db.execute(
+                    "INSERT OR IGNORE INTO free_credit_claims (user_id,identity_key,credits,reason,created_at) VALUES (?,?,?,?,?)",
+                    (user["id"], f"email:{email}", grant, "new_user_bonus", now),
+                )
+            db.execute(
+                "INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (user["id"], email, "email", ip, device, risk, grant, decision, now),
+            )
+            fallback.update(
+                user_id=user["id"],
+                token=_create_session(db, user["id"], now),
+                grant=grant,
+                decision=decision,
+            )
+
+        run_db_write(activate_after_delivery_failure)
+        logger.warning("Registration activated through SMTP fail-open fallback recipient=%s code=%s", email, exc.code)
+        return {
+            "token": fallback["token"],
+            "user": {"id": fallback["user_id"], "name": display_name, "email": email, "email_verified": True},
+            "free_credits_granted": fallback["grant"],
+            "registration_decision": fallback["decision"],
+            "verification_required": False,
+            "verification_bypassed_reason": exc.code,
+        }
+    return {
+        "verification_required": True,
+        "email": email,
+        "delivery": "email",
+        "cooldown_seconds": EMAIL_VERIFICATION_COOLDOWN_SECONDS,
+    }
 
 
 @app.post("/api/auth/email-verification/resend")
@@ -1298,24 +1458,39 @@ def google_login(payload: GoogleLoginRequest, request: Request) -> dict:
 
 
 @app.post("/api/auth/login")
-def login_user(payload: UserLogin) -> dict:
-    email=payload.email.strip().lower()
+def login_user(payload: UserLogin, request: Request) -> dict:
+    email = payload.email.strip().lower()
+    ip = _client_ip(request)
+    request_id = getattr(request.state, "request_id", "")
+    retry_after = login_guard.check(email, ip)
+    if retry_after:
+        audit_event("auth.login", outcome="blocked", ip=ip, actor=email, request_id=request_id, details={"reason": "temporary_lock", "retry_after": retry_after})
+        raise HTTPException(status_code=429, detail=f"Too many failed login attempts. Try again in {retry_after} seconds.", headers={"Retry-After": str(retry_after)})
     with get_db() as db:
-        row=db.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
+        row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     if row is None:
+        lock_seconds = login_guard.failure(email, ip)
+        audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "invalid_credentials", "locked": bool(lock_seconds)})
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
-    expected,_=_password_hash(payload.password,base64.urlsafe_b64decode(row["password_salt"].encode()))
-    if not secrets.compare_digest(expected,row["password_hash"]):
+    expected, _ = _password_hash(payload.password, base64.urlsafe_b64decode(row["password_salt"].encode()))
+    if not secrets.compare_digest(expected, row["password_hash"]):
+        lock_seconds = login_guard.failure(email, ip)
+        audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "invalid_credentials", "locked": bool(lock_seconds)})
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
     if row["status"] != "active":
+        audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "inactive_account"})
         raise HTTPException(status_code=403, detail="This account is not active.")
-    token=_session_token();expires=int(time.time())+SESSION_TTL_SECONDS;now=utc_now()
+    login_guard.success(email, ip)
+    token = _session_token()
+    expires = int(time.time()) + SESSION_TTL_SECONDS
+    now = utc_now()
     def operation(db):
-        db.execute("UPDATE users SET last_login_at=? WHERE id=?",(now,row["id"]))
-        db.execute("DELETE FROM user_sessions WHERE expires_at<=?",(int(time.time()),))
-        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)",(row["id"],_session_hash(token),expires,now))
+        db.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, row["id"]))
+        db.execute("DELETE FROM user_sessions WHERE expires_at<=?", (int(time.time()),))
+        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)", (row["id"], _session_hash(token), expires, now))
     run_db_write(operation)
-    return {"token":token,"user":{"id":row["id"],"name":row["name"],"email":row["email"],"email_verified":bool(row["email_verified"])}}
+    audit_event("auth.login", outcome="success", ip=ip, actor=email, request_id=request_id)
+    return {"token": token, "user": {"id": row["id"], "name": row["name"], "email": row["email"], "email_verified": bool(row["email_verified"])}}
 
 
 @app.post("/api/auth/password-reset/request")
@@ -1444,6 +1619,113 @@ def public_config() -> dict:
         "recommended_chunk_size_bytes": 2 * 1024 * 1024,
         "registration_enabled": True,
         "real_payments_configured": payment_provider() in {"paddle","paypal","stripe"},
+    }
+
+
+
+DEFAULT_PLATFORM_ADMIN_EMAIL = "654650727@qq.com"
+PLATFORM_ADMIN_EMAILS = {
+    item.strip().lower()
+    for item in os.getenv(
+        "PLATFORM_ADMIN_EMAILS",
+        os.getenv("ADMIN_EMAIL", DEFAULT_PLATFORM_ADMIN_EMAIL),
+    ).split(",")
+    if item.strip()
+}
+
+
+def _is_platform_admin(user: dict | None) -> bool:
+    if not user:
+        return False
+    # Platform data is private in both localhost and cloud deployments.
+    # Never grant access merely because the request comes from localhost.
+    return str(user.get("email", "")).strip().lower() in PLATFORM_ADMIN_EMAILS
+
+
+def require_platform_admin(user: dict = Depends(require_user)) -> dict:
+    if not _is_platform_admin(user):
+        raise HTTPException(status_code=403, detail="Platform administrator access is required.")
+    return user
+
+
+BACKUP_ROUTER = create_backup_router(
+    base_dir=BASE_DIR,
+    persistent_root=PERSISTENT_ROOT,
+    db_path=DB_PATH,
+    require_platform_admin=require_platform_admin,
+)
+app.include_router(BACKUP_ROUTER)
+
+
+def _safe_scalar(db: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
+    try:
+        row = db.execute(sql, params).fetchone()
+        return int(row[0] or 0) if row else 0
+    except (sqlite3.Error, TypeError, ValueError):
+        return 0
+
+
+@app.get("/api/admin/monitoring/access")
+def monitoring_access(user: dict = Depends(require_user)) -> dict:
+    return {"allowed": _is_platform_admin(user), "email": user.get("email", "")}
+
+
+@app.get("/api/admin/monitoring", dependencies=[Depends(require_platform_admin)])
+def admin_monitoring() -> dict:
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    seven_days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+    with get_db() as db:
+        users_total = _safe_scalar(db, "SELECT COUNT(*) FROM users")
+        users_today = _safe_scalar(db, "SELECT COUNT(*) FROM users WHERE substr(created_at,1,10)=?", (today,))
+        sessions_online = _safe_scalar(db, "SELECT COUNT(*) FROM user_sessions WHERE expires_at>?", (int(time.time()),))
+        orders_total = _safe_scalar(db, "SELECT COUNT(*) FROM orders")
+        orders_today = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE substr(created_at,1,10)=?", (today,))
+        completed = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE lower(status) IN ('completed','complete','done','partial_completed')")
+        failed = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE lower(status) LIKE '%fail%'")
+        active = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE lower(status) IN ('processing','queued','waiting','running','pending')")
+        revenue_today = 0.0
+        try:
+            row = db.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payment_orders WHERE status='paid' AND substr(COALESCE(paid_at,updated_at,created_at),1,10)=?", (today,)).fetchone()
+            revenue_today = round(float(row[0] or 0) / 100, 2)
+        except sqlite3.Error:
+            pass
+        trend=[]
+        for day in seven_days:
+            trend.append({"date":day, "orders":_safe_scalar(db,"SELECT COUNT(*) FROM orders WHERE substr(created_at,1,10)=?",(day,)), "users":_safe_scalar(db,"SELECT COUNT(*) FROM users WHERE substr(created_at,1,10)=?",(day,))})
+        alerts=[]
+        if failed:
+            alerts.append({"level":"warning","title":"Failed document jobs","detail":f"{failed} failed jobs require review."})
+        try:
+            recent=db.execute("SELECT action,message,created_at FROM audit_logs ORDER BY id DESC LIMIT 5").fetchall()
+            alerts.extend({"level":"info","title":str(r[0]),"detail":str(r[1]),"created_at":str(r[2])} for r in recent)
+        except sqlite3.Error:
+            pass
+    storage = storage_diagnostics(PERSISTENT_ROOT, DB_PATH, UPLOAD_DIR, OUTPUT_DIR)
+    translation = translation_capability().__dict__
+    return {
+        "generated_at": utc_now(),
+        "metrics": {
+            "online_users": sessions_online,
+            "users_total": users_total,
+            "users_today": users_today,
+            "orders_total": orders_total,
+            "orders_today": orders_today,
+            "active_jobs": active,
+            "completed_jobs": completed,
+            "failed_jobs": failed,
+            "success_rate": round(completed / max(1, completed + failed) * 100, 1),
+            "revenue_today": revenue_today,
+        },
+        "services": {
+            "backend": {"status":"online","version":APP_VERSION},
+            "database": {"status":"online" if DB_PATH.exists() else "warning","path":str(DB_PATH)},
+            "storage": {"status":"online" if storage.get("writable") else "error","writable":bool(storage.get("writable")),"temporary":bool(storage.get("temporary_storage"))},
+            "ai": {"status":"online" if translation.get("configured") else "not_configured","provider":translation.get("provider") or "—","model":translation.get("model") or "—"},
+            "payments": {"status":"online" if payment_provider() in {"paddle","stripe","paypal"} else "not_configured","provider":payment_provider()},
+        },
+        "trend": trend,
+        "alerts": alerts[:8],
     }
 
 
@@ -1580,6 +1862,7 @@ async def save_upload(upload: UploadFile, folder: Path) -> tuple[str, str, int]:
                 raise HTTPException(status_code=413, detail=f"{original_name} exceeds {MAX_FILE_SIZE_MB} MB.")
             output.write(chunk)
 
+    validate_uploaded_file(stored_path, original_name)
     return original_name, str(stored_path), total_size
 
 
@@ -1804,7 +2087,10 @@ def _safe_extract_archive(archive_path: Path, destination: Path, depth: int = 0)
             extracted.extend(_safe_extract_archive(target,nested_dir,depth+1))
             continue
         suffix=target.suffix.lower()
-        if suffix not in ALLOWED_SUFFIXES or suffix in ARCHIVE_SUFFIXES: continue
+        if suffix not in ALLOWED_SUFFIXES:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"压缩包中包含当前版本不支持处理的文件：{target.name}。请移除后重新上传。")
+        if suffix in ARCHIVE_SUFFIXES: continue
         size=target.stat().st_size
         if size>MAX_FILE_SIZE: raise HTTPException(status_code=413, detail=f"{target.name} 超过 {MAX_FILE_SIZE_MB} MB。")
         try: display=str(target.relative_to(destination)).replace('\\','/')
@@ -1988,6 +2274,7 @@ def complete_chunk_upload(upload_id: str) -> dict:
     payload = UPLOAD_SESSION_DIR / upload_id / "payload.bin"
     if not payload.exists() or payload.stat().st_size != int(meta["size_bytes"]):
         raise HTTPException(status_code=409, detail="Uploaded file could not be verified.")
+    validate_uploaded_file(payload, meta["filename"])
     meta["complete"] = True
     meta["completed_at"] = utc_now()
     _session_meta_path(upload_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
@@ -3559,6 +3846,9 @@ async def paypal_webhook(request: Request):
         }, token)
         if verification.get("verification_status") != "SUCCESS":
             raise HTTPException(status_code=400, detail="Invalid PayPal webhook signature.")
+        event_id = str(event.get("id", ""))
+        if not webhook_replay_guard.accept("paypal", event_id):
+            return {"received": True, "duplicate": True}
         if event.get("event_type") == "PAYMENT.CAPTURE.COMPLETED":
             resource = event.get("resource") or {}
             order_id = ((resource.get("supplementary_data") or {}).get("related_ids") or {}).get("order_id", "")
@@ -3585,6 +3875,9 @@ async def paddle_webhook(request: Request):
         event = json.loads(raw_body.decode("utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid Paddle webhook payload: {exc}")
+    event_id = str(event.get("event_id") or event.get("notification_id") or "")
+    if not webhook_replay_guard.accept("paddle", event_id):
+        return {"received": True, "duplicate": True}
     event_type = event.get("event_type", "")
     data = event.get("data") or {}
     if event_type in {"transaction.completed", "transaction.paid"}:
@@ -3611,6 +3904,9 @@ async def stripe_webhook(request: Request):
         event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}")
+    event_id = str(event.get("id", ""))
+    if not webhook_replay_guard.accept("stripe", event_id):
+        return {"received": True, "duplicate": True}
     event_type = event.get("type", "")
     obj = event.get("data", {}).get("object", {})
     if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"} and obj.get("payment_status") == "paid":
