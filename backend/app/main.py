@@ -183,6 +183,9 @@ SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
 SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Document Automation AI").strip() or "Document Automation AI"
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", os.getenv("EMAIL_FROM", "")).strip()
+RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails").strip()
 PASSWORD_RESET_DEV_CODE_ENABLED = os.getenv("PASSWORD_RESET_DEV_CODE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 PASSWORD_RESET_COOLDOWN_SECONDS = max(30, int(os.getenv("PASSWORD_RESET_COOLDOWN_SECONDS", "60")))
 PASSWORD_RESET_WINDOW_SECONDS = max(300, int(os.getenv("PASSWORD_RESET_WINDOW_SECONDS", "900")))
@@ -1164,24 +1167,15 @@ def _send_verification_email(email: str, code: str) -> dict:
 
 
 def _send_password_reset_email(email: str, code: str) -> dict:
-    """Send first; only the caller may persist the code after confirmed delivery."""
-    smtp_config = _smtp_runtime_config()
-    config = _smtp_configuration_summary()
-    logger.info(
-        "Password reset SMTP start recipient=%s host=%s port=%s security=%s sender=%s",
-        email, config["host"] or "<missing>", config["port"], config["security"], config["sender"] or "<missing>",
-    )
-    if not config["configured"]:
-        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
-    if smtp_config["username"] and not smtp_config["password"]:
-        raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。QQ 邮箱必须使用 SMTP 授权码，不能使用登录密码。")
+    """Send a password-reset code through HTTPS first, then SMTP as a local fallback.
 
+    Railway plans may block outbound SMTP sockets. Resend uses a normal HTTPS
+    request, which remains available in that environment. Configure
+    RESEND_API_KEY and RESEND_FROM_EMAIL in Railway to enable it.
+    """
     minutes = max(1, PASSWORD_RESET_TTL_SECONDS // 60)
-    message = EmailMessage()
-    message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
-    message["To"] = email
-    message["Subject"] = "Document Automation AI 密码重置验证码"
-    message.set_content(
+    subject = "Document Automation AI 密码重置验证码"
+    body = (
         "您好，\n\n"
         f"您的密码重置验证码是：{code}\n\n"
         f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
@@ -1189,47 +1183,145 @@ def _send_password_reset_email(email: str, code: str) -> dict:
         "Document Automation AI"
     )
 
+    resend_api_key = os.getenv("RESEND_API_KEY", RESEND_API_KEY).strip()
+    resend_from_email = os.getenv(
+        "RESEND_FROM_EMAIL",
+        os.getenv("EMAIL_FROM", RESEND_FROM_EMAIL),
+    ).strip()
+    resend_api_url = os.getenv("RESEND_API_URL", RESEND_API_URL).strip() or "https://api.resend.com/emails"
+
+    if resend_api_key:
+        if not resend_from_email:
+            raise EmailDeliveryError(
+                "resend_from_missing",
+                "邮件 API 已配置，但缺少 RESEND_FROM_EMAIL。请填写已验证域名下的发件邮箱。",
+            )
+        payload = json.dumps(
+            {
+                "from": formataddr((SMTP_FROM_NAME, resend_from_email)),
+                "to": [email],
+                "subject": subject,
+                "text": body,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            resend_api_url,
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {resend_api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": f"DocumentAutomationAI/{APP_VERSION}",
+            },
+        )
+        logger.info("Password reset HTTPS email start recipient=%s provider=resend", email)
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=20,
+                context=ssl.create_default_context(cafile=certifi.where()),
+            ) as response:
+                response_body = response.read().decode("utf-8", errors="replace")
+                if response.status < 200 or response.status >= 300:
+                    raise EmailDeliveryError(
+                        "resend_rejected",
+                        f"邮件 API 返回异常状态：HTTP {response.status}。",
+                    )
+                message_id = ""
+                if response_body:
+                    try:
+                        message_id = str(json.loads(response_body).get("id", "")).strip()
+                    except json.JSONDecodeError:
+                        pass
+        except EmailDeliveryError:
+            raise
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            logger.exception(
+                "Password reset HTTPS email rejected recipient=%s status=%s detail=%s",
+                email,
+                exc.code,
+                detail[:800],
+            )
+            if exc.code in {401, 403}:
+                user_detail = "邮件 API 身份验证失败，请检查 RESEND_API_KEY 和发件域名验证状态。"
+            elif exc.code == 422:
+                user_detail = "邮件 API 拒绝了发件人或收件人，请检查 RESEND_FROM_EMAIL。"
+            else:
+                user_detail = f"邮件 API 发送失败：HTTP {exc.code}。"
+            raise EmailDeliveryError("resend_http_error", user_detail) from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+            logger.exception("Password reset HTTPS email network failure recipient=%s", email)
+            raise EmailDeliveryError(
+                "resend_network_failed",
+                "无法连接邮件 API，请稍后重试或检查 Railway 网络状态。",
+            ) from exc
+
+        logger.info(
+            "Password reset HTTPS email delivered recipient=%s provider=resend message_id=%s",
+            email,
+            message_id or "<unknown>",
+        )
+        return {
+            "channel": "email",
+            "detail": "resend_delivered",
+            "sent_at": utc_now(),
+        }
+
+    smtp_config = _smtp_runtime_config()
+    config = _smtp_configuration_summary()
+    logger.info(
+        "Password reset SMTP fallback start recipient=%s host=%s port=%s security=%s sender=%s",
+        email, config["host"] or "<missing>", config["port"], config["security"], config["sender"] or "<missing>",
+    )
+    if not config["configured"]:
+        raise EmailDeliveryError(
+            "email_provider_not_configured",
+            "邮件服务尚未配置。Railway 请配置 RESEND_API_KEY 和 RESEND_FROM_EMAIL。",
+        )
+    if smtp_config["username"] and not smtp_config["password"]:
+        raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。")
+
+    message = EmailMessage()
+    message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
+    message["To"] = email
+    message["Subject"] = subject
+    message.set_content(body)
+
     context = ssl.create_default_context(cafile=certifi.where())
     try:
         if smtp_config["use_ssl"]:
-            smtp_context = smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context)
+            smtp_context = smtplib.SMTP_SSL(
+                smtp_config["host"], smtp_config["port"], timeout=20, context=context
+            )
         else:
-            smtp_context = smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
+            smtp_context = smtplib.SMTP(
+                smtp_config["host"], smtp_config["port"], timeout=20
+            )
         with smtp_context as smtp:
             smtp.ehlo()
-            logger.info("Password reset SMTP connected recipient=%s", email)
             if not smtp_config["use_ssl"] and smtp_config["use_tls"]:
                 smtp.starttls(context=context)
                 smtp.ehlo()
-                logger.info("Password reset SMTP STARTTLS ready recipient=%s", email)
             if smtp_config["username"]:
                 smtp.login(smtp_config["username"], smtp_config["password"])
-                logger.info("Password reset SMTP authenticated recipient=%s", email)
             refused = smtp.send_message(message)
             if refused:
-                raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。")
+                raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址。")
     except EmailDeliveryError:
         raise
     except smtplib.SMTPAuthenticationError as exc:
-        logger.exception("Password reset SMTP authentication failed recipient=%s", email)
-        raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。QQ 邮箱请重新生成 SMTP 授权码。") from exc
-    except smtplib.SMTPRecipientsRefused as exc:
-        logger.exception("Password reset SMTP recipient refused recipient=%s", email)
-        raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。") from exc
-    except smtplib.SMTPSenderRefused as exc:
-        logger.exception("Password reset SMTP sender refused recipient=%s", email)
-        raise EmailDeliveryError("sender_refused", "发件邮箱被服务器拒绝，请检查 SMTP_FROM_EMAIL 是否与登录邮箱一致。") from exc
-    except (TimeoutError, socket.timeout) as exc:
-        logger.exception("Password reset SMTP timeout recipient=%s", email)
-        raise EmailDeliveryError("smtp_timeout", "连接邮件服务器超时，请检查网络、SMTP 地址和端口。") from exc
-    except (ssl.SSLError, smtplib.SMTPConnectError) as exc:
-        logger.exception("Password reset SMTP secure connection failed recipient=%s", email)
-        raise EmailDeliveryError("smtp_connection_failed", "无法安全连接邮件服务器，请检查端口以及 SSL/STARTTLS 设置。") from exc
-    except (OSError, smtplib.SMTPException) as exc:
-        logger.exception("Password reset SMTP delivery failed recipient=%s", email)
-        raise EmailDeliveryError("smtp_delivery_failed", f"邮件发送失败：{type(exc).__name__}。请检查 SMTP 配置和网络。") from exc
+        raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。") from exc
+    except (TimeoutError, socket.timeout, OSError, smtplib.SMTPException) as exc:
+        logger.exception("Password reset SMTP fallback failed recipient=%s", email)
+        raise EmailDeliveryError(
+            "smtp_delivery_failed",
+            "当前部署环境无法连接 SMTP。请在 Railway 配置 RESEND_API_KEY 和 RESEND_FROM_EMAIL。",
+        ) from exc
 
-    logger.info("Password reset SMTP delivered recipient=%s", email)
+    logger.info("Password reset SMTP fallback delivered recipient=%s", email)
     return {"channel": "email", "detail": "smtp_delivered", "sent_at": utc_now()}
 
 
