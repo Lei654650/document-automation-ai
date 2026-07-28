@@ -4141,7 +4141,15 @@ def capture_paypal_payment(
             "provider_payment_id": capture_id, "already_processed": False,
         }
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"PayPal capture failed: {exc}")
+        logger.exception("PayPal capture failed payment_number=%s order_id=%s", payment_number, order_id)
+        message = str(exc)
+        if "INSTRUMENT_DECLINED" in message or "declined by the processor" in message:
+            detail = "PAYMENT_METHOD_DECLINED"
+        elif "CANNOT_PAY_SELF" in message:
+            detail = "PAYPAL_SELF_PAYMENT_NOT_ALLOWED"
+        else:
+            detail = "PAYPAL_CAPTURE_FAILED"
+        raise HTTPException(status_code=502, detail=detail) from exc
 
 
 @app.post("/api/payments/paypal/webhook")

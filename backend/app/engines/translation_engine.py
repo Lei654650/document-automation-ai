@@ -229,7 +229,14 @@ def _env_settings() -> dict[str, Any]:
             "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider_id]["base_url"]).strip(),
         }
 
-    requested = os.getenv("TRANSLATION_PROVIDER", "none").strip().lower()
+    # Platform-wide aliases let Railway/Vercel expose one shared AI service to
+    # every customer account.  Customers never need to provide their own key.
+    requested = os.getenv("TRANSLATION_PROVIDER", os.getenv("PLATFORM_AI_PROVIDER", os.getenv("AI_PROVIDER", "none"))).strip().lower()
+    shared_key = os.getenv("PLATFORM_AI_API_KEY", os.getenv("AI_API_KEY", "")).strip()
+    if shared_key and requested in PROVIDER_DEFAULTS and not profiles[requested].get("api_key"):
+        profiles[requested]["api_key"] = shared_key
+        profiles[requested]["model"] = os.getenv("PLATFORM_AI_MODEL", os.getenv("AI_MODEL", profiles[requested]["model"])).strip()
+        profiles[requested]["base_url"] = os.getenv("PLATFORM_AI_BASE_URL", os.getenv("AI_BASE_URL", profiles[requested]["base_url"])).strip()
     if requested not in PROVIDER_DEFAULTS or not profiles.get(requested, {}).get("api_key"):
         requested = next((pid for pid in PROVIDER_DEFAULTS if profiles[pid].get("api_key")), "none")
 
