@@ -129,7 +129,7 @@ def _load_project_env() -> None:
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "44.0.7"
+APP_VERSION = "43.0.4"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -159,12 +159,6 @@ PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
-if PAYPAL_MODE not in {"sandbox", "live"}:
-    logger_mode_value = PAYPAL_MODE
-    PAYPAL_MODE = "sandbox"
-else:
-    logger_mode_value = ""
-PAYPAL_LIVE_REQUIRED = os.getenv("PAYPAL_LIVE_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
 PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
 PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()
@@ -189,9 +183,6 @@ SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
 SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Document Automation AI").strip() or "Document Automation AI"
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", os.getenv("EMAIL_FROM", "noreply@docai365.com")).strip()
-RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails").strip()
 PASSWORD_RESET_DEV_CODE_ENABLED = os.getenv("PASSWORD_RESET_DEV_CODE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 PASSWORD_RESET_COOLDOWN_SECONDS = max(30, int(os.getenv("PASSWORD_RESET_COOLDOWN_SECONDS", "60")))
 PASSWORD_RESET_WINDOW_SECONDS = max(300, int(os.getenv("PASSWORD_RESET_WINDOW_SECONDS", "900")))
@@ -516,20 +507,12 @@ def paypal_api_base() -> str:
     return "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
 
 
-def paypal_request(
-    path: str,
-    method: str = "GET",
-    payload: dict | None = None,
-    access_token: str = "",
-    extra_headers: dict[str, str] | None = None,
-) -> dict:
+def paypal_request(path: str, method: str = "GET", payload: dict | None = None, access_token: str = "") -> dict:
     url = paypal_api_base() + path
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json", "Accept": "application/json", "Prefer": "return=representation", "User-Agent": f"DocumentAutomationAI/{APP_VERSION}"}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
-    if extra_headers:
-        headers.update({str(key): str(value) for key, value in extra_headers.items() if value is not None})
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
@@ -579,65 +562,25 @@ def paypal_access_token() -> str:
         raise RuntimeError(f"Unable to authenticate with PayPal: {exc}") from exc
 
 
-def _plan_period_end(plan: dict, paid_at: datetime | None = None) -> str:
-    paid_at = paid_at or datetime.now(timezone.utc)
-    if plan.get("kind") != "subscription":
-        return ""
-    days = 365 if plan.get("billing") == "yearly" else 30
-    return (paid_at + timedelta(days=days)).isoformat()
-
-
-def _send_payment_receipt_email(payment: dict) -> None:
-    email = str(payment.get("customer_email", "")).strip().lower()
-    if not email:
-        return
-    amount = int(payment.get("amount_cents", 0) or 0) / 100
-    currency = str(payment.get("currency", "USD") or "USD").upper()
-    plan_name = str(payment.get("plan_name", "Plan") or "Plan")
-    payment_number = str(payment.get("payment_number", "") or "")
-    paid_at = str(payment.get("paid_at", "") or utc_now())
-    body = (
-        "您好，\n\n"
-        "您的 Document Automation AI 付款已经成功。\n\n"
-        f"订单号：{payment_number}\n"
-        f"套餐：{plan_name}\n"
-        f"金额：{currency} {amount:.2f}\n"
-        f"支付时间：{paid_at}\n\n"
-        "套餐和 DA AI 点数已经自动到账。\n\n"
-        "Document Automation AI"
-    )
-    try:
-        _send_transactional_email(email, "Document Automation AI 付款成功", body, "payment_receipt")
-    except Exception:
-        logger.exception("Payment receipt email failed payment_number=%s recipient=%s", payment_number, email)
-
-
 def mark_payment_paid(payment_number: str, provider_session_id: str = "", provider_payment_id: str = "") -> bool:
-    result: dict = {}
-
     def operation(db):
         row = db.execute("SELECT * FROM payment_orders WHERE payment_number=?", (payment_number,)).fetchone()
         if row is None:
             return False
         if row["status"] == "paid":
-            result.update(dict(row), already_paid=True)
             return True
         now = utc_now()
-        paid_dt = datetime.now(timezone.utc)
         plan = PAYMENT_PLANS.get(row["plan_id"], {})
         email = row["customer_email"].strip().lower()
         db.execute("UPDATE payment_orders SET status='paid', provider_session_id=COALESCE(NULLIF(?,''),provider_session_id), provider_payment_id=COALESCE(NULLIF(?,''),provider_payment_id), paid_at=?, updated_at=? WHERE id=?", (provider_session_id, provider_payment_id, now, now, row["id"]))
         wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         if wallet is None:
             db.execute("INSERT INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
+            wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         bucket = "purchased" if plan.get("kind") == "credit_pack" else "subscription"
         column = "purchased_credits" if bucket == "purchased" else "subscription_credits"
         if plan.get("kind") == "subscription":
-            period_end = _plan_period_end(plan, paid_dt)
-            db.execute(
-                f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', current_period_end=?, updated_at=? WHERE customer_email=?",
-                (row["credits"], row["plan_id"], period_end, now, email),
-            )
+            db.execute(f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', updated_at=? WHERE customer_email=?", (row["credits"], row["plan_id"], now, email))
         else:
             db.execute(f"UPDATE customer_wallets SET {column}={column}+?, updated_at=? WHERE customer_email=?", (row["credits"], now, email))
         balance = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()["total"]
@@ -648,14 +591,8 @@ def mark_payment_paid(payment_number: str, provider_session_id: str = "", provid
             license_key = "DAI-" + "-".join([secrets.token_hex(2).upper() for _ in range(4)])
             db.execute("INSERT INTO licenses (license_key,customer_email,plan_id,payment_number,status,created_at) VALUES (?,?,?,?,'active',?)", (license_key,email,row["plan_id"],payment_number,now))
             db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "license.issued", json.dumps({"license_key": license_key}), now))
-        updated = db.execute("SELECT * FROM payment_orders WHERE id=?", (row["id"],)).fetchone()
-        result.update(dict(updated), already_paid=False)
         return True
-
-    paid = bool(run_db_write(operation))
-    if paid and result and not result.get("already_paid"):
-        _send_payment_receipt_email(result)
-    return paid
+    return bool(run_db_write(operation))
 
 
 class AITranslationSettingsUpdate(BaseModel):
@@ -1186,140 +1123,32 @@ def _bootstrap_missing_platform_admin(email: str) -> dict | None:
     return row
 
 
-def _resend_runtime_config() -> dict:
-    """Read Resend HTTPS API settings from the live environment."""
-    api_key = os.getenv("RESEND_API_KEY", RESEND_API_KEY).strip()
-    sender = os.getenv(
-        "RESEND_FROM_EMAIL",
-        os.getenv("EMAIL_FROM", RESEND_FROM_EMAIL or "noreply@docai365.com"),
-    ).strip()
-    api_url = os.getenv("RESEND_API_URL", RESEND_API_URL).strip() or "https://api.resend.com/emails"
-    from_name = os.getenv("SMTP_FROM_NAME", SMTP_FROM_NAME).strip() or "Document Automation AI"
-    return {
-        "api_key": api_key,
-        "sender": sender,
-        "api_url": api_url,
-        "from_name": from_name,
-        "configured": bool(api_key and sender),
-    }
-
-
-def _send_email_via_resend(email: str, subject: str, body: str, purpose: str) -> dict:
-    """Send one transactional email over HTTPS using Resend."""
-    config = _resend_runtime_config()
-    if not config["api_key"]:
-        raise EmailDeliveryError(
-            "resend_not_configured",
-            "邮件 API 尚未配置，请在 Railway 添加 RESEND_API_KEY。",
-        )
-    if not config["sender"]:
-        raise EmailDeliveryError(
-            "resend_from_missing",
-            "邮件 API 已配置，但缺少 RESEND_FROM_EMAIL。",
-        )
-
-    payload = json.dumps(
-        {
-            "from": formataddr((config["from_name"], config["sender"])),
-            "to": [email],
-            "subject": subject,
-            "text": body,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        config["api_url"],
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": f"DocumentAutomationAI/{APP_VERSION}",
-        },
-    )
-    logger.info("Transactional email start recipient=%s provider=resend purpose=%s", email, purpose)
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=20,
-            context=ssl.create_default_context(cafile=certifi.where()),
-        ) as response:
-            response_body = response.read().decode("utf-8", errors="replace")
-            if response.status < 200 or response.status >= 300:
-                raise EmailDeliveryError(
-                    "resend_rejected",
-                    f"邮件 API 返回异常状态：HTTP {response.status}。",
-                )
-            message_id = ""
-            if response_body:
-                try:
-                    message_id = str(json.loads(response_body).get("id", "")).strip()
-                except json.JSONDecodeError:
-                    pass
-    except EmailDeliveryError:
-        raise
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        logger.exception(
-            "Transactional email rejected recipient=%s purpose=%s status=%s detail=%s",
-            email, purpose, exc.code, detail[:800],
-        )
-        if exc.code in {401, 403}:
-            user_detail = "邮件 API 身份验证失败，请检查 RESEND_API_KEY。"
-        elif exc.code == 422:
-            user_detail = "邮件 API 拒绝了发件人或收件人，请检查发件域名与邮箱地址。"
-        else:
-            user_detail = f"邮件 API 发送失败：HTTP {exc.code}。"
-        raise EmailDeliveryError("resend_http_error", user_detail) from exc
-    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
-        logger.exception("Transactional email network failure recipient=%s purpose=%s", email, purpose)
-        raise EmailDeliveryError(
-            "resend_network_failed",
-            "无法连接邮件 API，请稍后重试或检查 Railway 网络状态。",
-        ) from exc
-
-    logger.info(
-        "Transactional email delivered recipient=%s provider=resend purpose=%s message_id=%s",
-        email, purpose, message_id or "<unknown>",
-    )
-    return {
-        "channel": "email",
-        "detail": "resend_delivered",
-        "provider": "resend",
-        "sent_at": utc_now(),
-    }
-
-
-def _send_email_via_smtp(email: str, subject: str, body: str, purpose: str) -> dict:
-    """Local fallback for environments where SMTP is available."""
+def _send_verification_email(email: str, code: str) -> dict:
     smtp_config = _smtp_runtime_config()
     config = _smtp_configuration_summary()
     if not config["configured"]:
-        raise EmailDeliveryError(
-            "email_provider_not_configured",
-            "邮件服务尚未配置。Railway 请添加 RESEND_API_KEY。",
-        )
+        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
     if smtp_config["username"] and not smtp_config["password"]:
         raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。")
-
+    minutes = max(1, EMAIL_VERIFICATION_TTL_SECONDS // 60)
     message = EmailMessage()
     message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
     message["To"] = email
-    message["Subject"] = subject
-    message.set_content(body)
+    message["Subject"] = "Document Automation AI 邮箱验证码"
+    message.set_content(
+        "您好，\n\n"
+        f"您的邮箱验证码是：{code}\n\n"
+        f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
+        "如果不是您本人发起的注册，请忽略此邮件。\n\n"
+        "Document Automation AI"
+    )
     context = ssl.create_default_context(cafile=certifi.where())
     try:
-        smtp_context = (
-            smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context)
-            if smtp_config["use_ssl"]
-            else smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
-        )
+        smtp_context = smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context) if smtp_config["use_ssl"] else smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
         with smtp_context as smtp:
             smtp.ehlo()
             if not smtp_config["use_ssl"] and smtp_config["use_tls"]:
-                smtp.starttls(context=context)
-                smtp.ehlo()
+                smtp.starttls(context=context); smtp.ehlo()
             if smtp_config["username"]:
                 smtp.login(smtp_config["username"], smtp_config["password"])
             refused = smtp.send_message(message)
@@ -1329,47 +1158,79 @@ def _send_email_via_smtp(email: str, subject: str, body: str, purpose: str) -> d
         raise
     except smtplib.SMTPAuthenticationError as exc:
         raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。") from exc
-    except (TimeoutError, socket.timeout, OSError, smtplib.SMTPException) as exc:
-        logger.exception("SMTP fallback failed recipient=%s purpose=%s", email, purpose)
-        raise EmailDeliveryError(
-            "smtp_delivery_failed",
-            "当前部署环境无法连接 SMTP，请配置 RESEND_API_KEY。",
-        ) from exc
-    return {"channel": "email", "detail": "smtp_delivered", "provider": "smtp", "sent_at": utc_now()}
-
-
-def _send_transactional_email(email: str, subject: str, body: str, purpose: str) -> dict:
-    """Use Resend whenever configured; keep SMTP only as a local fallback."""
-    if _resend_runtime_config()["api_key"]:
-        return _send_email_via_resend(email, subject, body, purpose)
-    return _send_email_via_smtp(email, subject, body, purpose)
-
-
-def _send_verification_email(email: str, code: str) -> dict:
-    minutes = max(1, EMAIL_VERIFICATION_TTL_SECONDS // 60)
-    subject = "Document Automation AI 邮箱验证码"
-    body = (
-        "您好，\n\n"
-        f"您的邮箱验证码是：{code}\n\n"
-        f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
-        "如果不是您本人发起的注册，请忽略此邮件。\n\n"
-        "Document Automation AI"
-    )
-    delivery = _send_transactional_email(email, subject, body, "email_verification")
-    return {"delivery": "email", **delivery}
+    except Exception as exc:
+        raise EmailDeliveryError("smtp_send_failed", f"验证码邮件发送失败：{exc}") from exc
+    return {"delivery": "email"}
 
 
 def _send_password_reset_email(email: str, code: str) -> dict:
+    """Send first; only the caller may persist the code after confirmed delivery."""
+    smtp_config = _smtp_runtime_config()
+    config = _smtp_configuration_summary()
+    logger.info(
+        "Password reset SMTP start recipient=%s host=%s port=%s security=%s sender=%s",
+        email, config["host"] or "<missing>", config["port"], config["security"], config["sender"] or "<missing>",
+    )
+    if not config["configured"]:
+        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
+    if smtp_config["username"] and not smtp_config["password"]:
+        raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。QQ 邮箱必须使用 SMTP 授权码，不能使用登录密码。")
+
     minutes = max(1, PASSWORD_RESET_TTL_SECONDS // 60)
-    subject = "Document Automation AI 密码重置验证码"
-    body = (
+    message = EmailMessage()
+    message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
+    message["To"] = email
+    message["Subject"] = "Document Automation AI 密码重置验证码"
+    message.set_content(
         "您好，\n\n"
         f"您的密码重置验证码是：{code}\n\n"
         f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
         "如果不是您本人发起的操作，请忽略此邮件。\n\n"
         "Document Automation AI"
     )
-    return _send_transactional_email(email, subject, body, "password_reset")
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        if smtp_config["use_ssl"]:
+            smtp_context = smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context)
+        else:
+            smtp_context = smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
+        with smtp_context as smtp:
+            smtp.ehlo()
+            logger.info("Password reset SMTP connected recipient=%s", email)
+            if not smtp_config["use_ssl"] and smtp_config["use_tls"]:
+                smtp.starttls(context=context)
+                smtp.ehlo()
+                logger.info("Password reset SMTP STARTTLS ready recipient=%s", email)
+            if smtp_config["username"]:
+                smtp.login(smtp_config["username"], smtp_config["password"])
+                logger.info("Password reset SMTP authenticated recipient=%s", email)
+            refused = smtp.send_message(message)
+            if refused:
+                raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。")
+    except EmailDeliveryError:
+        raise
+    except smtplib.SMTPAuthenticationError as exc:
+        logger.exception("Password reset SMTP authentication failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。QQ 邮箱请重新生成 SMTP 授权码。") from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        logger.exception("Password reset SMTP recipient refused recipient=%s", email)
+        raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。") from exc
+    except smtplib.SMTPSenderRefused as exc:
+        logger.exception("Password reset SMTP sender refused recipient=%s", email)
+        raise EmailDeliveryError("sender_refused", "发件邮箱被服务器拒绝，请检查 SMTP_FROM_EMAIL 是否与登录邮箱一致。") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        logger.exception("Password reset SMTP timeout recipient=%s", email)
+        raise EmailDeliveryError("smtp_timeout", "连接邮件服务器超时，请检查网络、SMTP 地址和端口。") from exc
+    except (ssl.SSLError, smtplib.SMTPConnectError) as exc:
+        logger.exception("Password reset SMTP secure connection failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_connection_failed", "无法安全连接邮件服务器，请检查端口以及 SSL/STARTTLS 设置。") from exc
+    except (OSError, smtplib.SMTPException) as exc:
+        logger.exception("Password reset SMTP delivery failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_delivery_failed", f"邮件发送失败：{type(exc).__name__}。请检查 SMTP 配置和网络。") from exc
+
+    logger.info("Password reset SMTP delivered recipient=%s", email)
+    return {"channel": "email", "detail": "smtp_delivered", "sent_at": utc_now()}
 
 
 def current_user_optional(authorization: str | None = Header(default=None)) -> dict | None:
@@ -3858,20 +3719,13 @@ def payment_config() -> dict:
     return {
         "provider": provider,
         "configured": provider in {"paddle", "stripe", "paypal"},
-        "production_ready": (
-            provider in {"paddle", "stripe", "paypal"}
-            and not PAYMENT_TEST_MODE
-            and (provider != "paypal" or PAYPAL_MODE == "live")
-        ),
+        "production_ready": provider in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE,
         "requires_login": True,
         "checkout_available": provider in {"paddle", "stripe", "paypal"} or (provider == "demo" and PAYMENT_TEST_MODE),
         "provider_label": "Paddle" if provider == "paddle" else ("PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo")),
         "provider_mode": PADDLE_ENV if provider == "paddle" else (PAYPAL_MODE if provider == "paypal" else ""),
         "paypal_mode": PAYPAL_MODE if provider == "paypal" else "",
-        "live_checkout": provider == "paypal" and PAYPAL_MODE == "live" and not PAYMENT_TEST_MODE,
         "test_mode": PAYMENT_TEST_MODE,
-        "webhook_configured": bool(PAYPAL_WEBHOOK_ID) if provider == "paypal" else True,
-        "live_required": PAYPAL_LIVE_REQUIRED if provider == "paypal" else False,
         "currency": "USD",
         "version": APP_VERSION,
         "plans": [{"id": key, **value} for key, value in PAYMENT_PLANS.items()],
@@ -3957,10 +3811,6 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
         raise HTTPException(status_code=400, detail="The Free plan does not require checkout.")
     if provider not in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE:
         raise HTTPException(status_code=503, detail="Real payment is not configured yet. Add Paddle, PayPal, or Stripe credentials in the server environment.")
-    if provider == "paypal" and PAYPAL_LIVE_REQUIRED and PAYPAL_MODE != "live":
-        raise HTTPException(status_code=503, detail="PayPal 正式支付尚未启用。请将 Railway 的 PAYPAL_MODE 设置为 live，并配置 Live Client ID、Secret 和 Webhook ID。")
-    if provider == "paypal" and PAYPAL_MODE == "live" and PAYMENT_TEST_MODE:
-        raise HTTPException(status_code=503, detail="正式支付环境不能开启 PAYMENT_TEST_MODE。请将其设置为 false。")
     session_id = ""
     if provider == "paddle":
         price_id = str(PADDLE_PRICE_MAP.get(payload.plan_id, "")).strip()
@@ -4006,7 +3856,6 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
                     "payment_source": {"paypal": {"experience_context": {"brand_name": "Document Automation AI", "user_action": "PAY_NOW", "return_url": return_url, "cancel_url": cancel_url}}},
                 },
                 token,
-                {"PayPal-Request-Id": payment_number},
             )
             session_id = paypal_order.get("id", "")
             checkout_url = next((link.get("href", "") for link in paypal_order.get("links", []) if link.get("rel") == "payer-action"), "")
@@ -4017,7 +3866,7 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
             message = str(exc)
             if payload.locale.lower().startswith("zh"):
                 if "HTTP 401" in message or "rejected the Client ID or Secret" in message:
-                    detail = "PayPal 凭证验证失败：请确认当前 PAYPAL_MODE 对应的 Client ID 和 Client Secret 来自同一个 Live REST API 应用，并重新复制到 Railway 环境变量。"
+                    detail = "PayPal 凭证验证失败：请确认 Sandbox Client ID 和 Client Secret 来自同一个 REST API 应用，并重新复制到 Vercel 环境变量。"
                 else:
                     detail = f"PayPal 创建支付订单失败：{message}"
             elif payload.locale.lower().startswith("vi"):
@@ -4081,7 +3930,6 @@ def capture_paypal_payment(
     order_id: str = Query(...),
     payment_number: str = Query(default=""),
     email: str = Query(default=""),
-    user: dict = Depends(require_user),
 ) -> dict:
     if payment_provider() != "paypal":
         raise HTTPException(status_code=503, detail="PayPal is not configured.")
@@ -4098,8 +3946,6 @@ def capture_paypal_payment(
             ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Payment order was not found for this PayPal order.")
-    if row["customer_email"].strip().lower() != user["email"].strip().lower():
-        raise HTTPException(status_code=403, detail="This PayPal order belongs to another account.")
     payment_number = row["payment_number"]
     if row["status"] == "paid":
         return {
@@ -4112,27 +3958,13 @@ def capture_paypal_payment(
         raise HTTPException(status_code=400, detail="PayPal order does not match this payment.")
     try:
         token = paypal_access_token()
-        result = paypal_request(
-            f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture",
-            "POST",
-            {},
-            token,
-            {"PayPal-Request-Id": f"capture-{payment_number}"},
-        )
+        result = paypal_request(f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture", "POST", {}, token)
         status = result.get("status", "")
-        purchase_unit = (result.get("purchase_units") or [{}])[0]
-        provider_reference = str(purchase_unit.get("reference_id") or purchase_unit.get("custom_id") or "")
-        if provider_reference and provider_reference != payment_number:
-            raise RuntimeError("PayPal order reference does not match the local payment order.")
-        capture = ((purchase_unit.get("payments") or {}).get("captures") or [{}])[0]
+        capture = (((result.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
         capture_id = capture.get("id", "")
         capture_status = capture.get("status", "")
         if status != "COMPLETED" and capture_status != "COMPLETED":
             raise RuntimeError(f"PayPal capture is not complete: {status or capture_status}")
-        amount = capture.get("amount") or {}
-        expected_value = f"{int(row['amount_cents']) / 100:.2f}"
-        if str(amount.get("currency_code", "")).upper() != str(row["currency"]).upper() or str(amount.get("value", "")) != expected_value:
-            raise RuntimeError("PayPal capture amount or currency does not match the local order.")
         mark_payment_paid(payment_number, order_id, capture_id)
         return {
             "success": True, "status": "paid", "payment_number": payment_number,
@@ -4171,14 +4003,7 @@ async def paypal_webhook(request: Request):
             with get_db() as db:
                 row = db.execute("SELECT payment_number FROM payment_orders WHERE provider='paypal' AND provider_session_id=?", (order_id,)).fetchone()
             if row:
-                with get_db() as db:
-                    payment = db.execute("SELECT * FROM payment_orders WHERE payment_number=?", (row["payment_number"],)).fetchone()
-                amount = resource.get("amount") or {}
-                expected_value = f"{int(payment['amount_cents']) / 100:.2f}" if payment else ""
-                if payment and str(amount.get("currency_code", "")).upper() == str(payment["currency"]).upper() and str(amount.get("value", "")) == expected_value:
-                    mark_payment_paid(row["payment_number"], order_id, resource.get("id", ""))
-                else:
-                    logger.error("PayPal webhook amount mismatch order_id=%s payment_number=%s", order_id, row["payment_number"])
+                mark_payment_paid(row["payment_number"], order_id, resource.get("id", ""))
         return {"received": True}
     except HTTPException:
         raise

@@ -37,7 +37,7 @@ TRANSLATION_MEMORY_PATH = PERSISTENT_ROOT / "data" / "translation_memory.db"
 # Cache namespace is intentionally versioned. V36.0 could persist source-echoed or
 # mixed-language output; changing this value makes those rows unreachable without
 # deleting customer data or blocking startup on a migration.
-TRANSLATION_CACHE_NAMESPACE = "v40.0-watchdog-speed-r1"
+TRANSLATION_CACHE_NAMESPACE = "v44.0.3-pptx-english-repair-r1"
 # Backward-compatible watchdog setting retained for diagnostics/tests.
 # Sequential V40.5 hotfix uses TRANSLATION_FILE_AI_BUDGET_SECONDS as the actual
 # per-file limit and does not queue futures behind this watchdog.
@@ -375,13 +375,77 @@ def public_settings() -> dict[str, Any]:
     return result
 
 
+_TECHNICAL_UNIT_TOKEN_RE = re.compile(
+    r"^(?:"
+    r"V|VAC|VDC|A|mA|kA|W|kW|MW|Hz|kHz|MHz|GHz|"
+    r"Pa|kPa|MPa|bar|psi|N|kN|Nm|N·m|"
+    r"mm|cm|m|km|mm2|mm²|cm2|cm²|m2|m²|"
+    r"ms|s|min|h|rpm|r/min|%|°C|°F|K|"
+    r"Ω|kΩ|MΩ|µΩ|μΩ|ohm|ohms|dB|lx|lm|cd|"
+    r"L|min|L/min|mL|kg|g|mg|µm|μm"
+    r")$",
+    re.I,
+)
+
+
+def _is_nontranslatable_technical_literal(text: str) -> bool:
+    """Return True for values that carry no natural-language content.
+
+    PPT engineering drawings contain many measurements, formulas and identifiers
+    such as ``10^6–10^9 Ω``, ``24 VDC``, ``±0.02 mm`` and ``M8×20``. Sending
+    these values to an AI provider is wasteful and an unchanged response is not a
+    source echo. This detector is deliberately conservative: any CJK prose or
+    ordinary word sequence still goes through the normal translation path.
+    """
+    value = _canonicalize_technical_placeholders(str(text or "")).strip()
+    if not value or re.search(r"[\u3400-\u9fff]", value):
+        return False
+
+    # URLs, email addresses and spreadsheet error literals are data, not prose.
+    if value.startswith(("http://", "https://", "mailto:")):
+        return True
+    if value.upper() in {"#N/A", "#REF!", "#VALUE!", "#DIV/0!", "#NAME?", "#NULL!", "#NUM!"}:
+        return True
+
+    # A compact model/code that contains at least one digit is not translated.
+    compact = re.sub(r"\s+", "", value)
+    if re.fullmatch(r"[A-Za-z]{0,12}[0-9][A-Za-z0-9_.:/+\-×*()\[\]]*", compact):
+        return True
+    if re.fullmatch(r"[A-Z]{1,12}[_-][A-Z0-9_.:/+\-×*()\[\]]+", compact):
+        return True
+
+    # Pure formulas / numeric ranges / dimensions. Permit common scientific and
+    # engineering symbols, including Unicode minus, multiplication and ohm signs.
+    if re.fullmatch(
+        r"[0-9\s.,:;/%+\-−–—_=()\[\]{}<>#@|\\^×*·±°′″µμΩω∞~≈≤≥]+",
+        value,
+    ):
+        return True
+
+    # Numeric expression followed by one or more recognised unit tokens.
+    tokens = value.replace("·", " ").split()
+    if tokens and any(ch.isdigit() for ch in value):
+        non_units = []
+        for token in tokens:
+            stripped = token.strip(".,:;()[]{}<>+-−–—_=^×*±~≈≤≥")
+            if not stripped:
+                continue
+            if re.fullmatch(r"[0-9.,]+", stripped):
+                continue
+            if _TECHNICAL_UNIT_TOKEN_RE.fullmatch(stripped):
+                continue
+            non_units.append(stripped)
+        if not non_units:
+            return True
+
+    return False
+
+
 def _should_translate(text: str) -> bool:
     value = text.strip()
     if not value or len(value) == 1 and not value.isalpha():
         return False
-    if value.startswith(("http://", "https://", "mailto:")):
-        return False
-    if value.upper() in {"#N/A", "#REF!", "#VALUE!", "#DIV/0!", "#NAME?", "#NULL!", "#NUM!"}:
+    if _is_nontranslatable_technical_literal(value):
         return False
     if re.fullmatch(r"[\d\s.,:;/%+\-_=()\[\]{}<>#@|\\]+", value):
         return False
@@ -640,11 +704,81 @@ def _technical_placeholders(text: str) -> list[str]:
     return _PROTECTED_TOKEN_RE.findall(_canonicalize_technical_placeholders(text))
 
 
+def _source_already_matches_target(source: str, target_code: str) -> bool:
+    """Return True when an unchanged provider response is already valid target text.
+
+    Customer PPT files commonly contain a mixture of Chinese annotations and
+    existing English titles, model names and engineering labels.  Rejecting every
+    unchanged response made the first English-only paragraph abort the whole file.
+    For English output, unchanged ASCII/Latin engineering text is valid and should
+    pass through unchanged; Chinese/Vietnamese prose still requires translation.
+    """
+    value = str(source or "").strip()
+    code = str(target_code or "").strip().lower()
+    if not value:
+        return False
+    if code == "en":
+        if re.search(r"[\u3400-\u9fff]", value):
+            return False
+        # Vietnamese-specific letters/diacritics indicate non-English prose.
+        if re.search(r"[ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-ỹ]", value, re.I):
+            return False
+        return bool(re.search(r"[A-Za-z]", value))
+    return False
+
+
+def _clean_provider_translation(source: str, translated: str, target_code: str = "") -> str:
+    """Normalize provider output without weakening final target-language rules.
+
+    Providers occasionally wrap a valid translation with labels, quote the source,
+    or return a bilingual line such as ``定位机构 Positioning mechanism``.  For an
+    English-only delivery we remove those wrappers and CJK echo fragments only
+    when a meaningful Latin translation remains.  A Chinese-only echo is left
+    unchanged so the retry path can still detect and reject it.
+    """
+    source_text = str(source or "").strip()
+    value = str(translated or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"^```(?:text|markdown)?\s*|\s*```$", "", value, flags=re.I | re.S).strip()
+    value = re.sub(
+        r"^\s*(?:translation|translated\s+text|english\s+translation|result)\s*[:：-]\s*",
+        "", value, flags=re.I,
+    ).strip().strip('"“”')
+    if source_text and value.startswith(source_text):
+        tail = value[len(source_text):].lstrip("\r\n :-：—–")
+        if tail:
+            value = tail
+    if str(target_code or "").lower() == "en" and re.search(r"[\u3400-\u9fff]", value):
+        # Prefer clean English-only lines when the model returned source + target.
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        latin_lines = [
+            line for line in lines
+            if not re.search(r"[\u3400-\u9fff]", line) and re.search(r"[A-Za-z]", line)
+        ]
+        if latin_lines:
+            value = "\n".join(latin_lines)
+        else:
+            # Same-line bilingual output: remove CJK runs only if substantial
+            # target-language content remains afterwards.
+            stripped = re.sub(r"[\u3400-\u9fff]+", "", value)
+            stripped = re.sub(r"[ \t]{2,}", " ", stripped)
+            stripped = re.sub(r"\s*([,.;:!?])\s*", r"\1 ", stripped).strip(" \t\r\n-—–:：,，;；")
+            if len(re.findall(r"[A-Za-z]", stripped)) >= 2:
+                value = stripped
+    return value.strip()
+
+
 def _translation_quality_ok(source: str, translated: str, target_code: str = "") -> bool:
     """Reject source echoes, mixed-language pollution and known bad legacy output."""
     source_text = str(source or "").strip()
     value = str(translated or "").strip()
-    if not value or value == source_text:
+    if not value:
+        return False
+    if value == source_text and not (
+        _source_already_matches_target(source_text, target_code)
+        or _is_nontranslatable_technical_literal(source_text)
+    ):
         return False
     lowered = value.casefold()
     bad_fragments = (
@@ -656,6 +790,10 @@ def _translation_quality_ok(source: str, translated: str, target_code: str = "")
     # A Vietnamese target must not carry Chinese prose. PLC identifiers, digits
     # and punctuation remain valid because they are not CJK characters.
     if target_code in {"vi", "vn"} and re.search(r"[\u3400-\u9fff]", value):
+        return False
+    # English-only delivery must not retain Chinese prose.  Existing English
+    # labels are allowed unchanged by _source_already_matches_target above.
+    if target_code == "en" and re.search(r"[\u3400-\u9fff]", value):
         return False
     # Reject duplicated leading PLC/HMI identifiers (e.g. X1040 ... X1040).
     prefix = re.match(r"^\s*([A-Z]{1,8}\d+[A-Za-z0-9_.:/-]*)\b", source_text, re.I)
@@ -852,22 +990,132 @@ class TranslationClient:
         glossary = _glossary_translation(text, self.source_language_code, self.target_language_code)
         if glossary is not None:
             translated = glossary
+        elif _source_already_matches_target(text, self.target_language_code):
+            # Do not call the provider for English titles/model names that are
+            # already suitable for an English-only customer deliverable.
+            translated = text
         else:
             masked, token_map = _mask_protected_tokens(text)
-            translated = _restore_protected_tokens(self._request(masked), token_map)
+            translated = _clean_provider_translation(text, _restore_protected_tokens(self._request(masked), token_map), self.target_language_code)
+            if not _translation_quality_ok(text, translated, self.target_language_code):
+                # The previous repair path passed a second translation instruction
+                # as user content. Providers then translated that instruction as
+                # well as the source, which produced the exact mixed-language
+                # output this guard was intended to prevent. Use a strict system
+                # instruction while keeping the user content source-only.
+                repaired = _clean_provider_translation(
+                    text,
+                    _restore_protected_tokens(self._request(masked, strict=True), token_map),
+                    self.target_language_code,
+                )
+                if _translation_quality_ok(text, repaired, self.target_language_code):
+                    translated = repaired
+                elif self.target_language_code == "en":
+                    # PPT shapes frequently mix an English model/station prefix
+                    # with Chinese prose (for example ``R件定位机构``). Translate
+                    # only the CJK runs and preserve the existing English/code
+                    # fragments in their original order.
+                    segmented = self._translate_cjk_segments_to_english(text)
+                    if _translation_quality_ok(text, segmented, self.target_language_code):
+                        translated = segmented
         self._validate_translation(translated, source=text)
         self.cache[text] = translated
         _memory_put_many(self.source_language_code, self.target_language_code, {text: translated}, self.settings["provider"], self.settings["model"])
         return translated
 
-    @staticmethod
-    def _validate_translation(translated: str, source: str = "") -> None:
+    def _translate_cjk_segments_to_english(self, source: str) -> str:
+        """Translate Chinese runs inside mixed engineering labels to English.
+
+        Existing Latin text, dimensions, model codes and punctuation are copied
+        unchanged. Each Chinese run is sent as source-only content under the
+        strict English system instruction, avoiding instruction translation and
+        limiting a bad provider response to one small segment instead of failing
+        the entire PowerPoint file.
+        """
+        value = _canonicalize_technical_placeholders(str(source or ""))
+        pieces = re.split(r"([\u3400-\u9fff]+)", value)
+        output: list[str] = []
+        for piece in pieces:
+            if not piece:
+                continue
+            if not re.search(r"[\u3400-\u9fff]", piece):
+                output.append(piece)
+                continue
+            masked, token_map = _mask_protected_tokens(piece)
+            candidate = _clean_provider_translation(
+                piece,
+                _restore_protected_tokens(self._request(masked, strict=True), token_map),
+                self.target_language_code,
+            ).strip()
+            if not candidate or re.search(r"[\u3400-\u9fff]", candidate):
+                # One final bounded attempt for the small Chinese phrase.
+                candidate = _clean_provider_translation(
+                    piece,
+                    _restore_protected_tokens(self._request(masked, strict=True), token_map),
+                    self.target_language_code,
+                ).strip()
+            output.append(candidate or piece)
+        return "".join(output).strip()
+
+    def translate_resilient(self, text: str) -> str:
+        """Translate one document paragraph without allowing one bad shape to abort a PPT.
+
+        The normal fast path is used first.  If provider pollution is detected,
+        the paragraph is decomposed by line and punctuation boundaries.  Chinese
+        runs are translated independently while existing English/model codes are
+        retained.  The final value still passes the same strict placeholder and
+        English-only validation before it is returned.
+        """
+        source = _canonicalize_technical_placeholders(str(text or ""))
+        try:
+            return self.translate(source)
+        except RuntimeError as exc:
+            if "source-echoed or polluted mixed-language" not in str(exc):
+                raise
+        if self.target_language_code != "en":
+            raise RuntimeError("Translation provider returned source-echoed or polluted mixed-language output.")
+
+        # Split large PPT paragraphs into bounded units.  Keep separators so the
+        # reconstructed text preserves the original visual structure.
+        parts = re.split(r"(\r?\n|[。；;！？!?]+)", source)
+        rebuilt: list[str] = []
+        for part in parts:
+            if not part:
+                continue
+            if re.fullmatch(r"\r?\n|[。；;！？!?]+", part):
+                rebuilt.append(part)
+                continue
+            if not re.search(r"[\u3400-\u9fff]", part):
+                rebuilt.append(part)
+                continue
+            candidate = self._translate_cjk_segments_to_english(part)
+            candidate = _clean_provider_translation(part, candidate, self.target_language_code)
+            if not _translation_quality_ok(part, candidate, self.target_language_code):
+                # Last bounded strict attempt on this small unit.
+                masked, token_map = _mask_protected_tokens(part)
+                candidate = _clean_provider_translation(
+                    part,
+                    _restore_protected_tokens(self._request(masked, strict=True), token_map),
+                    self.target_language_code,
+                )
+            self._validate_translation(candidate, source=part)
+            rebuilt.append(candidate)
+        result = "".join(rebuilt).strip()
+        self._validate_translation(result, source=source)
+        self.cache[source] = result
+        _memory_put_many(
+            self.source_language_code, self.target_language_code,
+            {source: result}, self.settings["provider"], self.settings["model"],
+        )
+        return result
+
+    def _validate_translation(self, translated: str, source: str = "") -> None:
         invalid = {"\ufffd", "\u25a1", "\u25a0"}
         if any(ch in translated for ch in invalid):
             raise RuntimeError("The AI provider returned invalid replacement glyphs. Translation was rejected.")
         if "Cần xác nhận bản dịch" in translated or "待确认翻译" in translated:
             raise RuntimeError("Translation provider returned a pending-review placeholder.")
-        if source and not _translation_quality_ok(source, translated):
+        if source and not _translation_quality_ok(source, translated, self.target_language_code):
             raise RuntimeError("Translation provider returned source-echoed or polluted mixed-language output.")
         if source and not _placeholder_sequence_satisfied(source, translated):
             raise RuntimeError(
@@ -1178,25 +1426,35 @@ class TranslationClient:
             raise RuntimeError("AI provider returned an invalid translation array.")
         return values
 
-    def _request(self, text: str, batch_mode: bool = False) -> str:
+    def _request(self, text: str, batch_mode: bool = False, strict: bool = False) -> str:
         # File workers and per-file batch workers previously multiplied into up
         # to 15 simultaneous API calls. Providers throttled those requests,
         # causing recursive retries and very long 70% stalls. Keep one global
         # bounded provider lane while preserving parallel parsing and workbook I/O.
         with _PROVIDER_LIMIT:
-            return self._request_unlocked(text, batch_mode=batch_mode)
+            return self._request_unlocked(text, batch_mode=batch_mode, strict=strict)
 
-    def _request_unlocked(self, text: str, batch_mode: bool = False) -> str:
+    def _request_unlocked(self, text: str, batch_mode: bool = False, strict: bool = False) -> str:
         provider = self.settings["provider"]
         provider_meta = PROVIDER_DEFAULTS[provider]
         protocol = provider_meta["protocol"]
-        system = (
-            "You are a professional document translator. Translate accurately from "
-            f"{self.source_language} into {self.target_language}. Preserve numbers, product names, codes, "
-            "line breaks, punctuation and placeholders. Use normal Unicode characters only. Never replace readable "
-            "characters with square boxes, question marks, replacement glyphs, or invented placeholders. "
-            + ("Follow the user's JSON-array output contract exactly." if batch_mode else "Return only the translated text, with no explanation.")
-        )
+        if strict:
+            system = (
+                "You are a professional industrial-automation translator. The user message contains SOURCE TEXT ONLY. "
+                f"Translate it completely from {self.source_language} into {self.target_language}. "
+                "Return ONLY the final target-language text. Never repeat, quote, label or explain the source. "
+                "For English output, no Chinese characters may remain. Preserve existing English model names, station "
+                "codes, numbers, dimensions, placeholders, punctuation and line breaks exactly where practical. "
+                "Use concise professional equipment-engineering terminology and normal Unicode characters only."
+            )
+        else:
+            system = (
+                "You are a professional document translator. Translate accurately from "
+                f"{self.source_language} into {self.target_language}. Preserve numbers, product names, codes, "
+                "line breaks, punctuation and placeholders. Use normal Unicode characters only. Never replace readable "
+                "characters with square boxes, question marks, replacement glyphs, or invented placeholders. "
+                + ("Follow the user's JSON-array output contract exactly." if batch_mode else "Return only the translated text, with no explanation.")
+            )
         if protocol == "openai":
             endpoint = f"{self.settings['base_url']}/chat/completions"
             payload = {
