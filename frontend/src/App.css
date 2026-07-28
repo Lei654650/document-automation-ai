@@ -1461,3 +1461,6 @@ html{scrollbar-gutter:stable}
   .live-tasks-layout .processing-toolbar-actions .danger-outline{min-width:0}
 }
 
+
+/* V44.1 global language and international task controls */
+.option-group-title{display:flex;align-items:center;justify-content:space-between;gap:16px}.option-group-title small{color:#64748b;font-weight:500}.language-search-input{width:100%;box-sizing:border-box;margin:12px 0;padding:12px 14px;border:1px solid #d8e1f0;border-radius:12px;background:#fff;font:inherit;color:#0f2547;outline:none}.language-search-input:focus{border-color:#4169ff;box-shadow:0 0 0 3px rgba(65,105,255,.12)}.language-chip-list{max-height:180px;overflow:auto;align-content:flex-start;padding-right:4px}.global-language-picker{min-width:0}

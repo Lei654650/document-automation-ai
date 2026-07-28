@@ -231,8 +231,10 @@ def _env_settings() -> dict[str, Any]:
 
     # Platform-wide aliases let Railway/Vercel expose one shared AI service to
     # every customer account.  Customers never need to provide their own key.
-    requested = os.getenv("TRANSLATION_PROVIDER", os.getenv("PLATFORM_AI_PROVIDER", os.getenv("AI_PROVIDER", "none"))).strip().lower()
-    shared_key = os.getenv("PLATFORM_AI_API_KEY", os.getenv("AI_API_KEY", "")).strip()
+    requested = os.getenv("TRANSLATION_PROVIDER", os.getenv("PLATFORM_AI_PROVIDER", os.getenv("AI_PROVIDER", os.getenv("DEFAULT_AI_PROVIDER", "none")))).strip().lower()
+    provider_aliases = {"google": "gemini", "google-gemini": "gemini", "anthropic": "claude", "azure-openai": "azure", "azure_openai": "azure", "automatic": "auto"}
+    requested = provider_aliases.get(requested, requested)
+    shared_key = os.getenv("PLATFORM_AI_API_KEY", os.getenv("AI_API_KEY", os.getenv("TRANSLATION_API_KEY", ""))).strip()
     if shared_key and requested in PROVIDER_DEFAULTS and not profiles[requested].get("api_key"):
         profiles[requested]["api_key"] = shared_key
         profiles[requested]["model"] = os.getenv("PLATFORM_AI_MODEL", os.getenv("AI_MODEL", profiles[requested]["model"])).strip()
@@ -296,6 +298,14 @@ def load_settings(include_secret: bool = True) -> dict[str, Any]:
             profiles[pid]["base_url"] = (profiles[pid]["base_url"] or PROVIDER_DEFAULTS[pid]["base_url"]).rstrip("/")
             profiles[pid]["model"] = _normalize_provider_model(pid, profiles[pid]["model"], profiles[pid]["base_url"])
     settings["profiles"] = profiles
+    # Always resolve the active platform provider after all environment, saved
+    # and legacy settings have been merged. This prevents a saved "auto" or
+    # stale provider value from blocking a valid shared Railway API key.
+    provider = str(settings.get("provider", "none")).strip().lower()
+    provider = {"google": "gemini", "google-gemini": "gemini", "anthropic": "claude", "azure-openai": "azure", "azure_openai": "azure"}.get(provider, provider)
+    if provider not in PROVIDER_DEFAULTS or not profiles.get(provider, {}).get("api_key"):
+        provider = next((pid for pid in PROVIDER_DEFAULTS if profiles.get(pid, {}).get("api_key")), "none")
+    settings["provider"] = provider
     settings["timeout_seconds"] = max(10, min(120, int(settings.get("timeout_seconds") or 35)))
     settings["max_retries"] = max(0, min(1, int(settings.get("max_retries") or 0)))
     active = profiles.get(provider, {"api_key": "", "model": "", "base_url": ""})
