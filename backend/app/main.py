@@ -260,6 +260,8 @@ _default_cors_origins = ",".join([
     "https://document-automation-ai.vercel.app",
     "https://document-automation-ai-j3zc.vercel.app",
     "https://document-automation-ai-45y5.vercel.app",
+    "https://docai365.com",
+    "https://www.docai365.com",
 ])
 _cors_env = [
     item.strip().rstrip("/")
