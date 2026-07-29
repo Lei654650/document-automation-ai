@@ -129,7 +129,7 @@ def _load_project_env() -> None:
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "44.0.7"
+APP_VERSION = "44.0.8"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -165,6 +165,10 @@ if PAYPAL_MODE not in {"sandbox", "live"}:
 else:
     logger_mode_value = ""
 PAYPAL_LIVE_REQUIRED = os.getenv("PAYPAL_LIVE_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+try:
+    PAYPAL_TEST_PRICE_CENTS = max(0, int(os.getenv("PAYPAL_TEST_PRICE_CENTS", "0") or "0"))
+except ValueError:
+    PAYPAL_TEST_PRICE_CENTS = 0
 PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
 PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()
@@ -435,6 +439,17 @@ PAYMENT_PLANS = {
     "credits_5000": {"name": "5,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 5900, "currency": "usd", "credits": 5000, "valid_days": 365, "features": []},
     "credits_20000": {"name": "20,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 19900, "currency": "usd", "credits": 20000, "valid_days": 730, "features": []},
 }
+
+# Temporary live-payment acceptance price. It is deliberately server-side so
+# the amount shown in the UI, stored in the database and sent to PayPal always
+# comes from one trusted source. Remove/zero PAYPAL_TEST_PRICE_CENTS after the
+# first real payment acceptance test to restore the normal catalogue price.
+if PAYPAL_TEST_PRICE_CENTS > 0:
+    PAYMENT_PLANS["professional_monthly"] = {
+        **PAYMENT_PLANS["professional_monthly"],
+        "amount_cents": PAYPAL_TEST_PRICE_CENTS,
+        "payment_test_price": True,
+    }
 
 
 def payment_provider() -> str:
@@ -3872,6 +3887,8 @@ def payment_config() -> dict:
         "test_mode": PAYMENT_TEST_MODE,
         "webhook_configured": bool(PAYPAL_WEBHOOK_ID) if provider == "paypal" else True,
         "live_required": PAYPAL_LIVE_REQUIRED if provider == "paypal" else False,
+        "acceptance_price_active": bool(PAYPAL_TEST_PRICE_CENTS > 0),
+        "acceptance_price_cents": PAYPAL_TEST_PRICE_CENTS,
         "currency": "USD",
         "version": APP_VERSION,
         "plans": [{"id": key, **value} for key, value in PAYMENT_PLANS.items()],
