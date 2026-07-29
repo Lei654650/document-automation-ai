@@ -303,68 +303,38 @@ def _needs_multiline_layout(layout: str, changed_values: Iterable[str]) -> bool:
 
 
 def _translate_pptx(source: Path, destination: Path, client: TranslationClient, callback: ProgressCallback | None) -> int:
-    """Translate PowerPoint text in per-slide batches.
-
-    The previous implementation called the provider once for every paragraph. A
-    30-slide engineering deck can contain hundreds of short shapes, so network
-    latency dominated the total runtime. This implementation collects all
-    paragraphs on one slide, submits one batched translation request, and only
-    falls back to the resilient single-item path for rows that still contain
-    source-language text.
-    """
     presentation = Presentation(source)
     translated = 0
     total = max(1, len(presentation.slides))
-
     for slide_index, slide in enumerate(presentation.slides, start=1):
-        targets: list[tuple[object, str, str]] = []
-        originals: list[str] = []
-
         for shape in slide.shapes:
             if getattr(shape, "has_text_frame", False):
                 for paragraph in shape.text_frame.paragraphs:
                     original = "".join(run.text for run in paragraph.runs) or paragraph.text
                     if original.strip():
-                        targets.append((paragraph, "text", original))
-                        originals.append(original)
+                        value = client.translate(original)
+                        if paragraph.runs:
+                            paragraph.runs[0].text = value
+                            for run in paragraph.runs[1:]:
+                                run.text = ""
+                        else:
+                            paragraph.text = value
+                        translated += 1
             if getattr(shape, "has_table", False):
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for paragraph in cell.text_frame.paragraphs:
                             original = "".join(run.text for run in paragraph.runs) or paragraph.text
                             if original.strip():
-                                targets.append((paragraph, "table", original))
-                                originals.append(original)
-
-        if originals:
-            try:
-                values = client.translate_many(originals)
-            except Exception as exc:
-                raise RuntimeError(f"PowerPoint slide {slide_index} batch translation failed: {exc}") from exc
-
-            for (paragraph, kind, original), value in zip(targets, values):
-                # A budgeted batch can intentionally leave an untranslated row.
-                # Retry only that row through the bounded resilient path rather
-                # than failing or re-sending the whole slide.
-                if re.search(r"[\u3400-\u9fff]", original) and (not value.strip() or re.search(r"[\u3400-\u9fff]", value)):
-                    try:
-                        value = client.translate_resilient(original)
-                    except Exception as exc:
-                        preview = re.sub(r"\s+", " ", original).strip()[:120]
-                        label = "table text" if kind == "table" else "text"
-                        raise RuntimeError(
-                            f"PowerPoint slide {slide_index} {label} translation failed: {preview!r}: {exc}"
-                        ) from exc
-                if paragraph.runs:
-                    paragraph.runs[0].text = value
-                    for run in paragraph.runs[1:]:
-                        run.text = ""
-                else:
-                    paragraph.text = value
-                translated += 1
-
+                                value = client.translate(original)
+                                if paragraph.runs:
+                                    paragraph.runs[0].text = value
+                                    for run in paragraph.runs[1:]:
+                                        run.text = ""
+                                else:
+                                    paragraph.text = value
+                                translated += 1
         _update(callback, 35 + int(slide_index / total * 45), "translation", f"Translated PowerPoint slide {slide_index}/{total}")
-
     presentation.save(destination)
     return translated
 

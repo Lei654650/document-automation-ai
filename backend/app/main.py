@@ -41,17 +41,6 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import certifi
 
-from app.security import (
-    SecurityMiddleware,
-    audit_event,
-    login_guard,
-    validate_security_configuration,
-    validate_uploaded_file,
-    webhook_replay_guard,
-)
-from app.security.config import CONFIG as SECURITY_CONFIG
-from app.backup import create_backup_router, start_backup_scheduler
-
 from app.services.document_analyzer import analyze_order_files
 from app.services.runtime_service import storage_diagnostics
 from app.engines.quote_engine import suggest_quote
@@ -107,29 +96,12 @@ def _load_project_env() -> None:
                 env_path.write_text("\n".join(repaired) + "\n", encoding="utf-8")
         except OSError:
             pass
-    # Never let the bundled backend/.env overwrite real deployment variables.
-    # Railway injects SMTP/provider secrets into os.environ before startup.
-    load_dotenv(env_path, override=False)
-
-    # Local-only secret overrides live in backend/.env.local. This file is never
-    # required in Railway/Vercel and is intentionally excluded from Git. Loading
-    # it after .env lets the one-time SMTP setup tool replace the blank example
-    # values without changing any other project configuration.
-    managed_cloud = bool(
-        os.getenv("RAILWAY_ENVIRONMENT")
-        or os.getenv("RAILWAY_PROJECT_ID")
-        or os.getenv("VERCEL")
-        or os.getenv("VERCEL_ENV")
-        or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
-    )
-    local_env_path = BASE_DIR / ".env.local"
-    if not managed_cloud and local_env_path.exists():
-        load_dotenv(local_env_path, override=True)
+    load_dotenv(env_path, override=True)
 
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "44.0.8"
+APP_VERSION = "40.5.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -159,16 +131,6 @@ PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
-if PAYPAL_MODE not in {"sandbox", "live"}:
-    logger_mode_value = PAYPAL_MODE
-    PAYPAL_MODE = "sandbox"
-else:
-    logger_mode_value = ""
-PAYPAL_LIVE_REQUIRED = os.getenv("PAYPAL_LIVE_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
-try:
-    PAYPAL_TEST_PRICE_CENTS = max(0, int(os.getenv("PAYPAL_TEST_PRICE_CENTS", "0") or "0"))
-except ValueError:
-    PAYPAL_TEST_PRICE_CENTS = 0
 PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
 PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()
@@ -193,48 +155,27 @@ SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
 SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Document Automation AI").strip() or "Document Automation AI"
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", os.getenv("EMAIL_FROM", "noreply@docai365.com")).strip()
-RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails").strip()
 PASSWORD_RESET_DEV_CODE_ENABLED = os.getenv("PASSWORD_RESET_DEV_CODE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 PASSWORD_RESET_COOLDOWN_SECONDS = max(30, int(os.getenv("PASSWORD_RESET_COOLDOWN_SECONDS", "60")))
 PASSWORD_RESET_WINDOW_SECONDS = max(300, int(os.getenv("PASSWORD_RESET_WINDOW_SECONDS", "900")))
 PASSWORD_RESET_MAX_SUCCESSFUL_SENDS = max(1, int(os.getenv("PASSWORD_RESET_MAX_SUCCESSFUL_SENDS", "5")))
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", os.getenv("GOOGLE_OAUTH_CLIENT_ID", os.getenv("VITE_GOOGLE_CLIENT_ID", ""))).strip()
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")).strip()
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
 FREE_SIGNUP_CREDITS = max(0, int(os.getenv("FREE_SIGNUP_CREDITS", "500")))
 REGISTRATION_IP_WINDOW_SECONDS = max(300, int(os.getenv("REGISTRATION_IP_WINDOW_SECONDS", "86400")))
 REGISTRATION_IP_MAX_ACCOUNTS = max(1, int(os.getenv("REGISTRATION_IP_MAX_ACCOUNTS", "3")))
 EMAIL_VERIFICATION_TTL_SECONDS = max(300, int(os.getenv("EMAIL_VERIFICATION_TTL_SECONDS", "900")))
 EMAIL_VERIFICATION_COOLDOWN_SECONDS = max(30, int(os.getenv("EMAIL_VERIFICATION_COOLDOWN_SECONDS", "60")))
-# Public registration must remain usable on every network. Email verification is
-# therefore opt-in instead of being enabled merely because SMTP credentials exist.
-# Set EMAIL_VERIFICATION_REQUIRED=true explicitly only after the verification UI
-# and outbound mail delivery have both been validated in production.
-EMAIL_VERIFICATION_REQUIRED = os.getenv(
-    "EMAIL_VERIFICATION_REQUIRED",
-    "false",
-).lower() in {"1", "true", "yes", "on"}
-EMAIL_VERIFICATION_FAIL_OPEN = os.getenv("EMAIL_VERIFICATION_FAIL_OPEN", "true").lower() in {"1", "true", "yes", "on"}
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Keep the API-side whitelist self-contained so main.py can start even when
-# the upload guard implementation changes. Deep content/archive validation is
-# still performed by validate_uploaded_file after the file is written.
 ALLOWED_SUFFIXES = {
-    ".pdf",
-    ".xlsx", ".xls",
-    ".docx", ".doc",
-    ".csv",
-    ".pptx", ".ppt",
-    ".png", ".jpg", ".jpeg",
-    ".bmp", ".tif", ".tiff",
-    ".zip", ".rar", ".7z",
-    ".tar", ".gz", ".tgz",
+    ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv",
+    ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"
 }
 VALID_STATUSES = {
     "waiting_quote", "quoted", "confirmed", "processing",
@@ -267,30 +208,13 @@ def _wait_for_job_control(job_id: int) -> None:
             raise JobCancelled("任务已由用户停止")
     if control["cancel"].is_set():
         raise JobCancelled("任务已由用户停止")
-_default_cors_origins = ",".join([
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://document-automation-ai.vercel.app",
-    "https://document-automation-ai-j3zc.vercel.app",
-    "https://document-automation-ai-45y5.vercel.app",
-    "https://docai365.com",
-    "https://www.docai365.com",
-])
-_cors_env = [
-    item.strip().rstrip("/")
-    for item in os.getenv("CORS_ORIGINS", _default_cors_origins).split(",")
-    if item.strip()
-]
+_cors_env = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_env or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-app.add_middleware(
-    SecurityMiddleware,
-    allowed_origins=_cors_env,
 )
 
 
@@ -440,17 +364,6 @@ PAYMENT_PLANS = {
     "credits_20000": {"name": "20,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 19900, "currency": "usd", "credits": 20000, "valid_days": 730, "features": []},
 }
 
-# Temporary live-payment acceptance price. It is deliberately server-side so
-# the amount shown in the UI, stored in the database and sent to PayPal always
-# comes from one trusted source. Remove/zero PAYPAL_TEST_PRICE_CENTS after the
-# first real payment acceptance test to restore the normal catalogue price.
-if PAYPAL_TEST_PRICE_CENTS > 0:
-    PAYMENT_PLANS["professional_monthly"] = {
-        **PAYMENT_PLANS["professional_monthly"],
-        "amount_cents": PAYPAL_TEST_PRICE_CENTS,
-        "payment_test_price": True,
-    }
-
 
 def payment_provider() -> str:
     # Paddle is the preferred Merchant of Record provider for the commercial release.
@@ -531,20 +444,12 @@ def paypal_api_base() -> str:
     return "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
 
 
-def paypal_request(
-    path: str,
-    method: str = "GET",
-    payload: dict | None = None,
-    access_token: str = "",
-    extra_headers: dict[str, str] | None = None,
-) -> dict:
+def paypal_request(path: str, method: str = "GET", payload: dict | None = None, access_token: str = "") -> dict:
     url = paypal_api_base() + path
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json", "Accept": "application/json", "Prefer": "return=representation", "User-Agent": f"DocumentAutomationAI/{APP_VERSION}"}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
-    if extra_headers:
-        headers.update({str(key): str(value) for key, value in extra_headers.items() if value is not None})
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
@@ -594,65 +499,25 @@ def paypal_access_token() -> str:
         raise RuntimeError(f"Unable to authenticate with PayPal: {exc}") from exc
 
 
-def _plan_period_end(plan: dict, paid_at: datetime | None = None) -> str:
-    paid_at = paid_at or datetime.now(timezone.utc)
-    if plan.get("kind") != "subscription":
-        return ""
-    days = 365 if plan.get("billing") == "yearly" else 30
-    return (paid_at + timedelta(days=days)).isoformat()
-
-
-def _send_payment_receipt_email(payment: dict) -> None:
-    email = str(payment.get("customer_email", "")).strip().lower()
-    if not email:
-        return
-    amount = int(payment.get("amount_cents", 0) or 0) / 100
-    currency = str(payment.get("currency", "USD") or "USD").upper()
-    plan_name = str(payment.get("plan_name", "Plan") or "Plan")
-    payment_number = str(payment.get("payment_number", "") or "")
-    paid_at = str(payment.get("paid_at", "") or utc_now())
-    body = (
-        "您好，\n\n"
-        "您的 Document Automation AI 付款已经成功。\n\n"
-        f"订单号：{payment_number}\n"
-        f"套餐：{plan_name}\n"
-        f"金额：{currency} {amount:.2f}\n"
-        f"支付时间：{paid_at}\n\n"
-        "套餐和 DA AI 点数已经自动到账。\n\n"
-        "Document Automation AI"
-    )
-    try:
-        _send_transactional_email(email, "Document Automation AI 付款成功", body, "payment_receipt")
-    except Exception:
-        logger.exception("Payment receipt email failed payment_number=%s recipient=%s", payment_number, email)
-
-
 def mark_payment_paid(payment_number: str, provider_session_id: str = "", provider_payment_id: str = "") -> bool:
-    result: dict = {}
-
     def operation(db):
         row = db.execute("SELECT * FROM payment_orders WHERE payment_number=?", (payment_number,)).fetchone()
         if row is None:
             return False
         if row["status"] == "paid":
-            result.update(dict(row), already_paid=True)
             return True
         now = utc_now()
-        paid_dt = datetime.now(timezone.utc)
         plan = PAYMENT_PLANS.get(row["plan_id"], {})
         email = row["customer_email"].strip().lower()
         db.execute("UPDATE payment_orders SET status='paid', provider_session_id=COALESCE(NULLIF(?,''),provider_session_id), provider_payment_id=COALESCE(NULLIF(?,''),provider_payment_id), paid_at=?, updated_at=? WHERE id=?", (provider_session_id, provider_payment_id, now, now, row["id"]))
         wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         if wallet is None:
             db.execute("INSERT INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
+            wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         bucket = "purchased" if plan.get("kind") == "credit_pack" else "subscription"
         column = "purchased_credits" if bucket == "purchased" else "subscription_credits"
         if plan.get("kind") == "subscription":
-            period_end = _plan_period_end(plan, paid_dt)
-            db.execute(
-                f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', current_period_end=?, updated_at=? WHERE customer_email=?",
-                (row["credits"], row["plan_id"], period_end, now, email),
-            )
+            db.execute(f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', updated_at=? WHERE customer_email=?", (row["credits"], row["plan_id"], now, email))
         else:
             db.execute(f"UPDATE customer_wallets SET {column}={column}+?, updated_at=? WHERE customer_email=?", (row["credits"], now, email))
         balance = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()["total"]
@@ -663,14 +528,8 @@ def mark_payment_paid(payment_number: str, provider_session_id: str = "", provid
             license_key = "DAI-" + "-".join([secrets.token_hex(2).upper() for _ in range(4)])
             db.execute("INSERT INTO licenses (license_key,customer_email,plan_id,payment_number,status,created_at) VALUES (?,?,?,?,'active',?)", (license_key,email,row["plan_id"],payment_number,now))
             db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "license.issued", json.dumps({"license_key": license_key}), now))
-        updated = db.execute("SELECT * FROM payment_orders WHERE id=?", (row["id"],)).fetchone()
-        result.update(dict(updated), already_paid=False)
         return True
-
-    paid = bool(run_db_write(operation))
-    if paid and result and not result.get("already_paid"):
-        _send_payment_receipt_email(result)
-    return paid
+    return bool(run_db_write(operation))
 
 
 class AITranslationSettingsUpdate(BaseModel):
@@ -1117,226 +976,44 @@ class EmailDeliveryError(RuntimeError):
         self.detail = detail
 
 
-def _smtp_runtime_config() -> dict:
-    """Read SMTP settings from the live process environment.
-
-    Railway variable changes are applied at container startup. Reading them here
-    also prevents stale module constants from producing a false "not configured"
-    result during tests and future runtime reload mechanisms.
-    """
-    username = os.getenv("SMTP_USERNAME", SMTP_USERNAME).strip()
-    sender = os.getenv("SMTP_FROM_EMAIL", SMTP_FROM_EMAIL or username).strip()
-    host = os.getenv("SMTP_HOST", SMTP_HOST).strip()
-    try:
-        port = int(os.getenv("SMTP_PORT", str(SMTP_PORT)) or str(SMTP_PORT))
-    except ValueError:
-        port = 587
-    return {
-        "host": host,
-        "port": port,
-        "username": username,
-        "password": os.getenv("SMTP_PASSWORD", SMTP_PASSWORD).strip(),
-        "sender": sender,
-        "from_name": os.getenv("SMTP_FROM_NAME", SMTP_FROM_NAME).strip() or "Document Automation AI",
-        "use_tls": os.getenv("SMTP_USE_TLS", str(SMTP_USE_TLS)).lower() in {"1", "true", "yes", "on"},
-        "use_ssl": os.getenv("SMTP_USE_SSL", str(SMTP_USE_SSL)).lower() in {"1", "true", "yes", "on"},
-        "configured": bool(host and sender),
-    }
-
-
 def _smtp_configuration_summary() -> dict:
-    config = _smtp_runtime_config()
     return {
-        "configured": config["configured"],
-        "host": config["host"],
-        "port": config["port"],
-        "security": "ssl" if config["use_ssl"] else ("starttls" if config["use_tls"] else "plain"),
-        "username_configured": bool(config["username"]),
-        "sender": config["sender"],
+        "configured": bool(SMTP_HOST and SMTP_FROM_EMAIL),
+        "host": SMTP_HOST,
+        "port": SMTP_PORT,
+        "security": "ssl" if SMTP_USE_SSL else ("starttls" if SMTP_USE_TLS else "plain"),
+        "username_configured": bool(SMTP_USERNAME),
+        "sender": SMTP_FROM_EMAIL,
     }
 
 
-def _configured_platform_admin_emails() -> set[str]:
-    """Return the explicit platform-admin recovery allowlist.
-
-    Railway may start with a fresh persistent database even though the same
-    administrator previously existed in an older Vercel/serverless database.
-    Only addresses explicitly configured as platform administrators may be
-    bootstrapped through the verified password-reset email flow.
-    """
-    raw = os.getenv(
-        "PLATFORM_ADMIN_EMAILS",
-        os.getenv("ADMIN_EMAIL", "654650727@qq.com"),
-    )
-    return {item.strip().lower() for item in raw.split(",") if item.strip()}
-
-
-def _bootstrap_missing_platform_admin(email: str) -> dict | None:
-    normalized = email.strip().lower()
-    if normalized not in _configured_platform_admin_emails():
-        return None
-
-    created_at = utc_now()
-    password_hash, password_salt = _password_hash(secrets.token_urlsafe(48))
-
-    def operation(db):
-        existing = db.execute(
-            "SELECT id,email FROM users WHERE lower(trim(email))=?",
-            (normalized,),
-        ).fetchone()
-        if existing:
-            return dict(existing)
-        cursor = db.execute(
-            "INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) "
-            "VALUES (?,?,?,?, 'active',1,?,?)",
-            ("Platform Administrator", normalized, password_hash, password_salt, created_at, ""),
-        )
-        return {"id": cursor.lastrowid, "email": normalized}
-
-    row = run_db_write(operation)
-    logger.warning(
-        "Password reset bootstrapped missing platform administrator recipient=%s user_id=%s",
-        normalized, row["id"],
-    )
-    return row
-
-
-def _resend_runtime_config() -> dict:
-    """Read Resend HTTPS API settings from the live environment."""
-    api_key = os.getenv("RESEND_API_KEY", RESEND_API_KEY).strip()
-    sender = os.getenv(
-        "RESEND_FROM_EMAIL",
-        os.getenv("EMAIL_FROM", RESEND_FROM_EMAIL or "noreply@docai365.com"),
-    ).strip()
-    api_url = os.getenv("RESEND_API_URL", RESEND_API_URL).strip() or "https://api.resend.com/emails"
-    from_name = os.getenv("SMTP_FROM_NAME", SMTP_FROM_NAME).strip() or "Document Automation AI"
-    return {
-        "api_key": api_key,
-        "sender": sender,
-        "api_url": api_url,
-        "from_name": from_name,
-        "configured": bool(api_key and sender),
-    }
-
-
-def _send_email_via_resend(email: str, subject: str, body: str, purpose: str) -> dict:
-    """Send one transactional email over HTTPS using Resend."""
-    config = _resend_runtime_config()
-    if not config["api_key"]:
-        raise EmailDeliveryError(
-            "resend_not_configured",
-            "邮件 API 尚未配置，请在 Railway 添加 RESEND_API_KEY。",
-        )
-    if not config["sender"]:
-        raise EmailDeliveryError(
-            "resend_from_missing",
-            "邮件 API 已配置，但缺少 RESEND_FROM_EMAIL。",
-        )
-
-    payload = json.dumps(
-        {
-            "from": formataddr((config["from_name"], config["sender"])),
-            "to": [email],
-            "subject": subject,
-            "text": body,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        config["api_url"],
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": f"DocumentAutomationAI/{APP_VERSION}",
-        },
-    )
-    logger.info("Transactional email start recipient=%s provider=resend purpose=%s", email, purpose)
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=20,
-            context=ssl.create_default_context(cafile=certifi.where()),
-        ) as response:
-            response_body = response.read().decode("utf-8", errors="replace")
-            if response.status < 200 or response.status >= 300:
-                raise EmailDeliveryError(
-                    "resend_rejected",
-                    f"邮件 API 返回异常状态：HTTP {response.status}。",
-                )
-            message_id = ""
-            if response_body:
-                try:
-                    message_id = str(json.loads(response_body).get("id", "")).strip()
-                except json.JSONDecodeError:
-                    pass
-    except EmailDeliveryError:
-        raise
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        logger.exception(
-            "Transactional email rejected recipient=%s purpose=%s status=%s detail=%s",
-            email, purpose, exc.code, detail[:800],
-        )
-        if exc.code in {401, 403}:
-            user_detail = "邮件 API 身份验证失败，请检查 RESEND_API_KEY。"
-        elif exc.code == 422:
-            user_detail = "邮件 API 拒绝了发件人或收件人，请检查发件域名与邮箱地址。"
-        else:
-            user_detail = f"邮件 API 发送失败：HTTP {exc.code}。"
-        raise EmailDeliveryError("resend_http_error", user_detail) from exc
-    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
-        logger.exception("Transactional email network failure recipient=%s purpose=%s", email, purpose)
-        raise EmailDeliveryError(
-            "resend_network_failed",
-            "无法连接邮件 API，请稍后重试或检查 Railway 网络状态。",
-        ) from exc
-
-    logger.info(
-        "Transactional email delivered recipient=%s provider=resend purpose=%s message_id=%s",
-        email, purpose, message_id or "<unknown>",
-    )
-    return {
-        "channel": "email",
-        "detail": "resend_delivered",
-        "provider": "resend",
-        "sent_at": utc_now(),
-    }
-
-
-def _send_email_via_smtp(email: str, subject: str, body: str, purpose: str) -> dict:
-    """Local fallback for environments where SMTP is available."""
-    smtp_config = _smtp_runtime_config()
+def _send_verification_email(email: str, code: str) -> dict:
     config = _smtp_configuration_summary()
     if not config["configured"]:
-        raise EmailDeliveryError(
-            "email_provider_not_configured",
-            "邮件服务尚未配置。Railway 请添加 RESEND_API_KEY。",
-        )
-    if smtp_config["username"] and not smtp_config["password"]:
+        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
+    if SMTP_USERNAME and not SMTP_PASSWORD:
         raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。")
-
+    minutes = max(1, EMAIL_VERIFICATION_TTL_SECONDS // 60)
     message = EmailMessage()
-    message["From"] = formataddr((smtp_config["from_name"], smtp_config["sender"]))
+    message["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
     message["To"] = email
-    message["Subject"] = subject
-    message.set_content(body)
+    message["Subject"] = "Document Automation AI 邮箱验证码"
+    message.set_content(
+        "您好，\n\n"
+        f"您的邮箱验证码是：{code}\n\n"
+        f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
+        "如果不是您本人发起的注册，请忽略此邮件。\n\n"
+        "Document Automation AI"
+    )
     context = ssl.create_default_context(cafile=certifi.where())
     try:
-        smtp_context = (
-            smtplib.SMTP_SSL(smtp_config["host"], smtp_config["port"], timeout=20, context=context)
-            if smtp_config["use_ssl"]
-            else smtplib.SMTP(smtp_config["host"], smtp_config["port"], timeout=20)
-        )
+        smtp_context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context) if SMTP_USE_SSL else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
         with smtp_context as smtp:
             smtp.ehlo()
-            if not smtp_config["use_ssl"] and smtp_config["use_tls"]:
-                smtp.starttls(context=context)
-                smtp.ehlo()
-            if smtp_config["username"]:
-                smtp.login(smtp_config["username"], smtp_config["password"])
+            if not SMTP_USE_SSL and SMTP_USE_TLS:
+                smtp.starttls(context=context); smtp.ehlo()
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
             refused = smtp.send_message(message)
             if refused:
                 raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址。")
@@ -1344,47 +1021,78 @@ def _send_email_via_smtp(email: str, subject: str, body: str, purpose: str) -> d
         raise
     except smtplib.SMTPAuthenticationError as exc:
         raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。") from exc
-    except (TimeoutError, socket.timeout, OSError, smtplib.SMTPException) as exc:
-        logger.exception("SMTP fallback failed recipient=%s purpose=%s", email, purpose)
-        raise EmailDeliveryError(
-            "smtp_delivery_failed",
-            "当前部署环境无法连接 SMTP，请配置 RESEND_API_KEY。",
-        ) from exc
-    return {"channel": "email", "detail": "smtp_delivered", "provider": "smtp", "sent_at": utc_now()}
-
-
-def _send_transactional_email(email: str, subject: str, body: str, purpose: str) -> dict:
-    """Use Resend whenever configured; keep SMTP only as a local fallback."""
-    if _resend_runtime_config()["api_key"]:
-        return _send_email_via_resend(email, subject, body, purpose)
-    return _send_email_via_smtp(email, subject, body, purpose)
-
-
-def _send_verification_email(email: str, code: str) -> dict:
-    minutes = max(1, EMAIL_VERIFICATION_TTL_SECONDS // 60)
-    subject = "Document Automation AI 邮箱验证码"
-    body = (
-        "您好，\n\n"
-        f"您的邮箱验证码是：{code}\n\n"
-        f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
-        "如果不是您本人发起的注册，请忽略此邮件。\n\n"
-        "Document Automation AI"
-    )
-    delivery = _send_transactional_email(email, subject, body, "email_verification")
-    return {"delivery": "email", **delivery}
+    except Exception as exc:
+        raise EmailDeliveryError("smtp_send_failed", f"验证码邮件发送失败：{exc}") from exc
+    return {"delivery": "email"}
 
 
 def _send_password_reset_email(email: str, code: str) -> dict:
+    """Send first; only the caller may persist the code after confirmed delivery."""
+    config = _smtp_configuration_summary()
+    logger.info(
+        "Password reset SMTP start recipient=%s host=%s port=%s security=%s sender=%s",
+        email, config["host"] or "<missing>", config["port"], config["security"], config["sender"] or "<missing>",
+    )
+    if not config["configured"]:
+        raise EmailDeliveryError("smtp_not_configured", "SMTP 邮件服务尚未配置，请填写 SMTP_HOST、SMTP_FROM_EMAIL 和邮箱授权码。")
+    if SMTP_USERNAME and not SMTP_PASSWORD:
+        raise EmailDeliveryError("smtp_password_missing", "SMTP 邮箱授权码未配置。QQ 邮箱必须使用 SMTP 授权码，不能使用登录密码。")
+
     minutes = max(1, PASSWORD_RESET_TTL_SECONDS // 60)
-    subject = "Document Automation AI 密码重置验证码"
-    body = (
+    message = EmailMessage()
+    message["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    message["To"] = email
+    message["Subject"] = "Document Automation AI 密码重置验证码"
+    message.set_content(
         "您好，\n\n"
         f"您的密码重置验证码是：{code}\n\n"
         f"验证码将在 {minutes} 分钟后失效。请勿将验证码提供给任何人。\n"
         "如果不是您本人发起的操作，请忽略此邮件。\n\n"
         "Document Automation AI"
     )
-    return _send_transactional_email(email, subject, body, "password_reset")
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        if SMTP_USE_SSL:
+            smtp_context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context)
+        else:
+            smtp_context = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+        with smtp_context as smtp:
+            smtp.ehlo()
+            logger.info("Password reset SMTP connected recipient=%s", email)
+            if not SMTP_USE_SSL and SMTP_USE_TLS:
+                smtp.starttls(context=context)
+                smtp.ehlo()
+                logger.info("Password reset SMTP STARTTLS ready recipient=%s", email)
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                logger.info("Password reset SMTP authenticated recipient=%s", email)
+            refused = smtp.send_message(message)
+            if refused:
+                raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。")
+    except EmailDeliveryError:
+        raise
+    except smtplib.SMTPAuthenticationError as exc:
+        logger.exception("Password reset SMTP authentication failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_auth_failed", "SMTP 登录失败：邮箱账号或授权码不正确。QQ 邮箱请重新生成 SMTP 授权码。") from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        logger.exception("Password reset SMTP recipient refused recipient=%s", email)
+        raise EmailDeliveryError("recipient_refused", "收件服务器拒绝了该邮箱地址，请确认注册邮箱是否正确。") from exc
+    except smtplib.SMTPSenderRefused as exc:
+        logger.exception("Password reset SMTP sender refused recipient=%s", email)
+        raise EmailDeliveryError("sender_refused", "发件邮箱被服务器拒绝，请检查 SMTP_FROM_EMAIL 是否与登录邮箱一致。") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        logger.exception("Password reset SMTP timeout recipient=%s", email)
+        raise EmailDeliveryError("smtp_timeout", "连接邮件服务器超时，请检查网络、SMTP 地址和端口。") from exc
+    except (ssl.SSLError, smtplib.SMTPConnectError) as exc:
+        logger.exception("Password reset SMTP secure connection failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_connection_failed", "无法安全连接邮件服务器，请检查端口以及 SSL/STARTTLS 设置。") from exc
+    except (OSError, smtplib.SMTPException) as exc:
+        logger.exception("Password reset SMTP delivery failed recipient=%s", email)
+        raise EmailDeliveryError("smtp_delivery_failed", f"邮件发送失败：{type(exc).__name__}。请检查 SMTP 配置和网络。") from exc
+
+    logger.info("Password reset SMTP delivered recipient=%s", email)
+    return {"channel": "email", "detail": "smtp_delivered", "sent_at": utc_now()}
 
 
 def current_user_optional(authorization: str | None = Header(default=None)) -> dict | None:
@@ -1409,12 +1117,6 @@ def require_user(user: dict | None = Depends(current_user_optional)) -> dict:
 
 @app.on_event("startup")
 def startup() -> None:
-    validate_security_configuration(
-        cloud_mode=CLOUD_MODE,
-        admin_password=ADMIN_PASSWORD,
-        auth_secret=AUTH_SECRET,
-        strict=SECURITY_CONFIG.strict_startup,
-    )
     delay = 0.25
     for attempt in range(6):
         try:
@@ -1425,7 +1127,6 @@ def startup() -> None:
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 2.0)
-    start_backup_scheduler(BACKUP_ROUTER.backup_service)
     # In-process workers cannot survive a container restart. Mark interrupted jobs clearly.
     with get_db() as db:
         interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing','paused','cancelling')").fetchall()
@@ -1484,62 +1185,6 @@ def register_user(payload: UserRegister, request: Request) -> dict:
     password_hash, salt = _password_hash(payload.password)
     display_name = payload.name.strip() or email.split("@", 1)[0] or "User"
     now, ip = utc_now(), _client_ip(request)
-    device = payload.device_fingerprint.strip()
-
-    # Production deployments may intentionally run before SMTP is configured.
-    # In that case, create an active account and session instead of raising an
-    # unhandled EmailDeliveryError that becomes HTTP 500 for every customer.
-    if not EMAIL_VERIFICATION_REQUIRED:
-        result: dict = {}
-
-        def activate_without_email(db):
-            existing = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-            if existing and existing["email_verified"]:
-                raise HTTPException(status_code=409, detail="An account with this email already exists.")
-            if existing:
-                user_id = existing["id"]
-                db.execute(
-                    "UPDATE users SET name=?,password_hash=?,password_salt=?,status='active',email_verified=1,last_login_at=? WHERE id=?",
-                    (display_name, password_hash, salt, now, user_id),
-                )
-            else:
-                cur = db.execute(
-                    "INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'active',1,?,?)",
-                    (display_name, email, password_hash, salt, now, now),
-                )
-                user_id = cur.lastrowid
-                db.execute(
-                    "INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
-                    (user_id, "email", email, email, now),
-                )
-            risk, grant, decision = _registration_decision(db, email, "email", email, ip, device)
-            db.execute(
-                "INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,?, 'free','active',?)",
-                (email, grant, now),
-            )
-            if grant:
-                db.execute(
-                    "INSERT OR IGNORE INTO free_credit_claims (user_id,identity_key,credits,reason,created_at) VALUES (?,?,?,?,?)",
-                    (user_id, f"email:{email}", grant, "new_user_bonus", now),
-                )
-            db.execute(
-                "INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (user_id, email, "email", ip, device, risk, grant, decision, now),
-            )
-            token = _create_session(db, user_id, now)
-            result.update(user_id=user_id, token=token, grant=grant, decision=decision)
-
-        run_db_write(activate_without_email)
-        logger.warning("Registration completed without email verification because SMTP is not configured: %s", email)
-        return {
-            "token": result["token"],
-            "user": {"id": result["user_id"], "name": display_name, "email": email, "email_verified": True},
-            "free_credits_granted": result["grant"],
-            "registration_decision": result["decision"],
-            "verification_required": False,
-            "verification_bypassed_reason": "smtp_not_configured",
-        }
-
     code = f"{secrets.randbelow(1000000):06d}"
     code_hash = hashlib.sha256(code.encode()).hexdigest()
     expires_at = int(time.time()) + EMAIL_VERIFICATION_TTL_SECONDS
@@ -1550,85 +1195,20 @@ def register_user(payload: UserRegister, request: Request) -> dict:
             if existing["email_verified"]:
                 raise HTTPException(status_code=409, detail="An account with this email already exists.")
             user_id = existing["id"]
-            db.execute(
-                "UPDATE users SET name=?,password_hash=?,password_salt=?,status='pending_verification' WHERE id=?",
-                (display_name, password_hash, salt, user_id),
-            )
+            db.execute("UPDATE users SET name=?,password_hash=?,password_salt=?,status='pending_verification' WHERE id=?",
+                       (display_name, password_hash, salt, user_id))
         else:
-            cur = db.execute(
-                "INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'pending_verification',0,?,?)",
-                (display_name, email, password_hash, salt, now, ""),
-            )
+            cur = db.execute("INSERT INTO users (name,email,password_hash,password_salt,status,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'pending_verification',0,?,?)",
+                             (display_name, email, password_hash, salt, now, ""))
             user_id = cur.lastrowid
-            db.execute(
-                "INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
-                (user_id, "email", email, email, now),
-            )
-        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now, user_id))
-        db.execute(
-            "INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
-            (user_id, code_hash, expires_at, now, ip),
-        )
-
-    run_db_write(operation)
-    try:
+            db.execute("INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
+                       (user_id,"email",email,email,now))
+        db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now,user_id))
+        db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
+                   (user_id,code_hash,expires_at,now,ip))
         _send_verification_email(email, code)
-    except EmailDeliveryError as exc:
-        logger.exception("Registration verification email failed code=%s recipient=%s", exc.code, email)
-        if not EMAIL_VERIFICATION_FAIL_OPEN:
-            raise HTTPException(status_code=503, detail=exc.detail) from exc
-
-        # Keep public registration available when the SMTP provider is unavailable.
-        # The account was already written as pending above; activate it atomically,
-        # grant the normal risk-controlled free credits, and return a valid session.
-        fallback: dict = {}
-
-        def activate_after_delivery_failure(db):
-            user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-            if not user:
-                raise RuntimeError("Registration account disappeared before fallback activation.")
-            db.execute(
-                "UPDATE users SET status='active',email_verified=1,last_login_at=? WHERE id=?",
-                (now, user["id"]),
-            )
-            db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now, user["id"]))
-            risk, grant, decision = _registration_decision(db, email, "email", email, ip, device)
-            db.execute(
-                "INSERT OR IGNORE INTO customer_wallets (customer_email,subscription_credits,plan_id,plan_status,updated_at) VALUES (?,?, 'free','active',?)",
-                (email, grant, now),
-            )
-            if grant:
-                db.execute(
-                    "INSERT OR IGNORE INTO free_credit_claims (user_id,identity_key,credits,reason,created_at) VALUES (?,?,?,?,?)",
-                    (user["id"], f"email:{email}", grant, "new_user_bonus", now),
-                )
-            db.execute(
-                "INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (user["id"], email, "email", ip, device, risk, grant, decision, now),
-            )
-            fallback.update(
-                user_id=user["id"],
-                token=_create_session(db, user["id"], now),
-                grant=grant,
-                decision=decision,
-            )
-
-        run_db_write(activate_after_delivery_failure)
-        logger.warning("Registration activated through SMTP fail-open fallback recipient=%s code=%s", email, exc.code)
-        return {
-            "token": fallback["token"],
-            "user": {"id": fallback["user_id"], "name": display_name, "email": email, "email_verified": True},
-            "free_credits_granted": fallback["grant"],
-            "registration_decision": fallback["decision"],
-            "verification_required": False,
-            "verification_bypassed_reason": exc.code,
-        }
-    return {
-        "verification_required": True,
-        "email": email,
-        "delivery": "email",
-        "cooldown_seconds": EMAIL_VERIFICATION_COOLDOWN_SECONDS,
-    }
+    run_db_write(operation)
+    return {"verification_required": True, "email": email, "delivery": "email", "cooldown_seconds": EMAIL_VERIFICATION_COOLDOWN_SECONDS}
 
 
 @app.post("/api/auth/email-verification/resend")
@@ -1718,91 +1298,34 @@ def google_login(payload: GoogleLoginRequest, request: Request) -> dict:
 
 
 @app.post("/api/auth/login")
-def login_user(payload: UserLogin, request: Request) -> dict:
-    email = payload.email.strip().lower()
-    ip = _client_ip(request)
-    request_id = getattr(request.state, "request_id", "")
-    retry_after = login_guard.check(email, ip)
-    if retry_after:
-        audit_event("auth.login", outcome="blocked", ip=ip, actor=email, request_id=request_id, details={"reason": "temporary_lock", "retry_after": retry_after})
-        raise HTTPException(status_code=429, detail=f"Too many failed login attempts. Try again in {retry_after} seconds.", headers={"Retry-After": str(retry_after)})
+def login_user(payload: UserLogin) -> dict:
+    email=payload.email.strip().lower()
     with get_db() as db:
-        row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        row=db.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
     if row is None:
-        lock_seconds = login_guard.failure(email, ip)
-        audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "invalid_credentials", "locked": bool(lock_seconds)})
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
-    expected, _ = _password_hash(payload.password, base64.urlsafe_b64decode(row["password_salt"].encode()))
-    if not secrets.compare_digest(expected, row["password_hash"]):
-        lock_seconds = login_guard.failure(email, ip)
-        audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "invalid_credentials", "locked": bool(lock_seconds)})
+    expected,_=_password_hash(payload.password,base64.urlsafe_b64decode(row["password_salt"].encode()))
+    if not secrets.compare_digest(expected,row["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
     if row["status"] != "active":
-        # Repair accounts left in pending/inactive state by an earlier SMTP or
-        # deployment failure. The password has already been verified above, so
-        # activating a verified account here does not weaken authentication.
-        can_recover = bool(row["email_verified"]) or (
-            row["status"] == "pending_verification" and EMAIL_VERIFICATION_FAIL_OPEN
-        )
-        if can_recover:
-            recovered_at = utc_now()
-
-            def recover_account(db):
-                db.execute(
-                    "UPDATE users SET status='active',email_verified=1,last_login_at=? WHERE id=?",
-                    (recovered_at, row["id"]),
-                )
-                db.execute(
-                    "UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''",
-                    (recovered_at, row["id"]),
-                )
-
-            run_db_write(recover_account)
-            row = dict(row)
-            row["status"] = "active"
-            row["email_verified"] = 1
-            audit_event(
-                "auth.login",
-                outcome="recovered",
-                ip=ip,
-                actor=email,
-                request_id=request_id,
-                details={"reason": "stale_pending_account"},
-            )
-        else:
-            audit_event("auth.login", outcome="failure", ip=ip, actor=email, request_id=request_id, details={"reason": "inactive_account"})
-            raise HTTPException(status_code=403, detail="This account is not active.")
-    login_guard.success(email, ip)
-    token = _session_token()
-    expires = int(time.time()) + SESSION_TTL_SECONDS
-    now = utc_now()
+        raise HTTPException(status_code=403, detail="This account is not active.")
+    token=_session_token();expires=int(time.time())+SESSION_TTL_SECONDS;now=utc_now()
     def operation(db):
-        db.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, row["id"]))
-        db.execute("DELETE FROM user_sessions WHERE expires_at<=?", (int(time.time()),))
-        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)", (row["id"], _session_hash(token), expires, now))
+        db.execute("UPDATE users SET last_login_at=? WHERE id=?",(now,row["id"]))
+        db.execute("DELETE FROM user_sessions WHERE expires_at<=?",(int(time.time()),))
+        db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)",(row["id"],_session_hash(token),expires,now))
     run_db_write(operation)
-    audit_event("auth.login", outcome="success", ip=ip, actor=email, request_id=request_id)
-    return {"token": token, "user": {"id": row["id"], "name": row["name"], "email": row["email"], "email_verified": bool(row["email_verified"])}}
+    return {"token":token,"user":{"id":row["id"],"name":row["name"],"email":row["email"],"email_verified":bool(row["email_verified"])}}
 
 
 @app.post("/api/auth/password-reset/request")
 def request_password_reset(payload: PasswordResetRequest, request: Request) -> dict:
     email = payload.email.strip().lower()
     generic = {"success": True, "message": "If the account exists, a reset code has been sent."}
-    logger.info("Password reset request received recipient=%s", email)
     with get_db() as db:
-        row = db.execute(
-            "SELECT id,email FROM users WHERE lower(trim(email))=?",
-            (email,),
-        ).fetchone()
+        row = db.execute("SELECT id,email FROM users WHERE email=?", (email,)).fetchone()
     if row is None:
-        row = _bootstrap_missing_platform_admin(email)
-    if row is None:
-        logger.warning("Password reset ignored because account does not exist recipient=%s", email)
         return generic
-    if not isinstance(row, dict):
-        row = dict(row)
-    logger.info("Password reset account resolved recipient=%s user_id=%s", email, row["id"])
 
     now_ts = int(time.time())
     cooldown_after = (datetime.now(timezone.utc) - timedelta(seconds=PASSWORD_RESET_COOLDOWN_SECONDS)).isoformat()
@@ -1921,113 +1444,6 @@ def public_config() -> dict:
         "recommended_chunk_size_bytes": 2 * 1024 * 1024,
         "registration_enabled": True,
         "real_payments_configured": payment_provider() in {"paddle","paypal","stripe"},
-    }
-
-
-
-DEFAULT_PLATFORM_ADMIN_EMAIL = "654650727@qq.com"
-PLATFORM_ADMIN_EMAILS = {
-    item.strip().lower()
-    for item in os.getenv(
-        "PLATFORM_ADMIN_EMAILS",
-        os.getenv("ADMIN_EMAIL", DEFAULT_PLATFORM_ADMIN_EMAIL),
-    ).split(",")
-    if item.strip()
-}
-
-
-def _is_platform_admin(user: dict | None) -> bool:
-    if not user:
-        return False
-    # Platform data is private in both localhost and cloud deployments.
-    # Never grant access merely because the request comes from localhost.
-    return str(user.get("email", "")).strip().lower() in PLATFORM_ADMIN_EMAILS
-
-
-def require_platform_admin(user: dict = Depends(require_user)) -> dict:
-    if not _is_platform_admin(user):
-        raise HTTPException(status_code=403, detail="Platform administrator access is required.")
-    return user
-
-
-BACKUP_ROUTER = create_backup_router(
-    base_dir=BASE_DIR,
-    persistent_root=PERSISTENT_ROOT,
-    db_path=DB_PATH,
-    require_platform_admin=require_platform_admin,
-)
-app.include_router(BACKUP_ROUTER)
-
-
-def _safe_scalar(db: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
-    try:
-        row = db.execute(sql, params).fetchone()
-        return int(row[0] or 0) if row else 0
-    except (sqlite3.Error, TypeError, ValueError):
-        return 0
-
-
-@app.get("/api/admin/monitoring/access")
-def monitoring_access(user: dict = Depends(require_user)) -> dict:
-    return {"allowed": _is_platform_admin(user), "email": user.get("email", "")}
-
-
-@app.get("/api/admin/monitoring", dependencies=[Depends(require_platform_admin)])
-def admin_monitoring() -> dict:
-    now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
-    seven_days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
-    with get_db() as db:
-        users_total = _safe_scalar(db, "SELECT COUNT(*) FROM users")
-        users_today = _safe_scalar(db, "SELECT COUNT(*) FROM users WHERE substr(created_at,1,10)=?", (today,))
-        sessions_online = _safe_scalar(db, "SELECT COUNT(*) FROM user_sessions WHERE expires_at>?", (int(time.time()),))
-        orders_total = _safe_scalar(db, "SELECT COUNT(*) FROM orders")
-        orders_today = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE substr(created_at,1,10)=?", (today,))
-        completed = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE lower(status) IN ('completed','complete','done','partial_completed')")
-        failed = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE lower(status) LIKE '%fail%'")
-        active = _safe_scalar(db, "SELECT COUNT(*) FROM orders WHERE lower(status) IN ('processing','queued','waiting','running','pending')")
-        revenue_today = 0.0
-        try:
-            row = db.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payment_orders WHERE status='paid' AND substr(COALESCE(paid_at,updated_at,created_at),1,10)=?", (today,)).fetchone()
-            revenue_today = round(float(row[0] or 0) / 100, 2)
-        except sqlite3.Error:
-            pass
-        trend=[]
-        for day in seven_days:
-            trend.append({"date":day, "orders":_safe_scalar(db,"SELECT COUNT(*) FROM orders WHERE substr(created_at,1,10)=?",(day,)), "users":_safe_scalar(db,"SELECT COUNT(*) FROM users WHERE substr(created_at,1,10)=?",(day,))})
-        alerts=[]
-        if failed:
-            alerts.append({"level":"warning","title":"Failed document jobs","detail":f"{failed} failed jobs require review."})
-        try:
-            recent=db.execute("SELECT action,message,created_at FROM audit_logs ORDER BY id DESC LIMIT 5").fetchall()
-            alerts.extend({"level":"info","title":str(r[0]),"detail":str(r[1]),"created_at":str(r[2])} for r in recent)
-        except sqlite3.Error:
-            pass
-    storage = storage_diagnostics(PERSISTENT_ROOT, DB_PATH, UPLOAD_DIR, OUTPUT_DIR)
-    translation = translation_capability().__dict__
-    return {
-        "generated_at": utc_now(),
-        "metrics": {
-            "online_users": sessions_online,
-            "users_total": users_total,
-            "users_today": users_today,
-            "orders_total": orders_total,
-            "orders_today": orders_today,
-            "active_jobs": active,
-            "completed_jobs": completed,
-            "failed_jobs": failed,
-            "success_rate": round(completed / max(1, completed + failed) * 100, 1),
-            "revenue_today": revenue_today,
-        },
-        "services": {
-            "backend": {"status":"online","version":APP_VERSION},
-            "database": {"status":"online" if DB_PATH.exists() else "warning","path":str(DB_PATH)},
-            "storage": {"status":"online" if storage.get("writable") else "error","writable":bool(storage.get("writable")),"temporary":bool(storage.get("temporary_storage"))},
-            "ai": {"status":"online" if translation.get("configured") else "not_configured","provider":translation.get("provider") or "—","model":translation.get("model") or "—"},
-            "payments": {"status":"online" if payment_provider() in {"paddle","stripe","paypal"} else "not_configured","provider":payment_provider()},
-        },
-        "trend": trend,
-        "alerts": alerts[:8],
     }
 
 
@@ -2164,7 +1580,6 @@ async def save_upload(upload: UploadFile, folder: Path) -> tuple[str, str, int]:
                 raise HTTPException(status_code=413, detail=f"{original_name} exceeds {MAX_FILE_SIZE_MB} MB.")
             output.write(chunk)
 
-    validate_uploaded_file(stored_path, original_name)
     return original_name, str(stored_path), total_size
 
 
@@ -2389,10 +1804,7 @@ def _safe_extract_archive(archive_path: Path, destination: Path, depth: int = 0)
             extracted.extend(_safe_extract_archive(target,nested_dir,depth+1))
             continue
         suffix=target.suffix.lower()
-        if suffix not in ALLOWED_SUFFIXES:
-            shutil.rmtree(destination, ignore_errors=True)
-            raise HTTPException(status_code=400, detail=f"压缩包中包含当前版本不支持处理的文件：{target.name}。请移除后重新上传。")
-        if suffix in ARCHIVE_SUFFIXES: continue
+        if suffix not in ALLOWED_SUFFIXES or suffix in ARCHIVE_SUFFIXES: continue
         size=target.stat().st_size
         if size>MAX_FILE_SIZE: raise HTTPException(status_code=413, detail=f"{target.name} 超过 {MAX_FILE_SIZE_MB} MB。")
         try: display=str(target.relative_to(destination)).replace('\\','/')
@@ -2576,7 +1988,6 @@ def complete_chunk_upload(upload_id: str) -> dict:
     payload = UPLOAD_SESSION_DIR / upload_id / "payload.bin"
     if not payload.exists() or payload.stat().st_size != int(meta["size_bytes"]):
         raise HTTPException(status_code=409, detail="Uploaded file could not be verified.")
-    validate_uploaded_file(payload, meta["filename"])
     meta["complete"] = True
     meta["completed_at"] = utc_now()
     _session_meta_path(upload_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
@@ -3873,22 +3284,13 @@ def payment_config() -> dict:
     return {
         "provider": provider,
         "configured": provider in {"paddle", "stripe", "paypal"},
-        "production_ready": (
-            provider in {"paddle", "stripe", "paypal"}
-            and not PAYMENT_TEST_MODE
-            and (provider != "paypal" or PAYPAL_MODE == "live")
-        ),
+        "production_ready": provider in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE,
         "requires_login": True,
         "checkout_available": provider in {"paddle", "stripe", "paypal"} or (provider == "demo" and PAYMENT_TEST_MODE),
         "provider_label": "Paddle" if provider == "paddle" else ("PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo")),
         "provider_mode": PADDLE_ENV if provider == "paddle" else (PAYPAL_MODE if provider == "paypal" else ""),
         "paypal_mode": PAYPAL_MODE if provider == "paypal" else "",
-        "live_checkout": provider == "paypal" and PAYPAL_MODE == "live" and not PAYMENT_TEST_MODE,
         "test_mode": PAYMENT_TEST_MODE,
-        "webhook_configured": bool(PAYPAL_WEBHOOK_ID) if provider == "paypal" else True,
-        "live_required": PAYPAL_LIVE_REQUIRED if provider == "paypal" else False,
-        "acceptance_price_active": bool(PAYPAL_TEST_PRICE_CENTS > 0),
-        "acceptance_price_cents": PAYPAL_TEST_PRICE_CENTS,
         "currency": "USD",
         "version": APP_VERSION,
         "plans": [{"id": key, **value} for key, value in PAYMENT_PLANS.items()],
@@ -3974,10 +3376,6 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
         raise HTTPException(status_code=400, detail="The Free plan does not require checkout.")
     if provider not in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE:
         raise HTTPException(status_code=503, detail="Real payment is not configured yet. Add Paddle, PayPal, or Stripe credentials in the server environment.")
-    if provider == "paypal" and PAYPAL_LIVE_REQUIRED and PAYPAL_MODE != "live":
-        raise HTTPException(status_code=503, detail="PayPal 正式支付尚未启用。请将 Railway 的 PAYPAL_MODE 设置为 live，并配置 Live Client ID、Secret 和 Webhook ID。")
-    if provider == "paypal" and PAYPAL_MODE == "live" and PAYMENT_TEST_MODE:
-        raise HTTPException(status_code=503, detail="正式支付环境不能开启 PAYMENT_TEST_MODE。请将其设置为 false。")
     session_id = ""
     if provider == "paddle":
         price_id = str(PADDLE_PRICE_MAP.get(payload.plan_id, "")).strip()
@@ -4023,7 +3421,6 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
                     "payment_source": {"paypal": {"experience_context": {"brand_name": "Document Automation AI", "user_action": "PAY_NOW", "return_url": return_url, "cancel_url": cancel_url}}},
                 },
                 token,
-                {"PayPal-Request-Id": payment_number},
             )
             session_id = paypal_order.get("id", "")
             checkout_url = next((link.get("href", "") for link in paypal_order.get("links", []) if link.get("rel") == "payer-action"), "")
@@ -4034,7 +3431,7 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
             message = str(exc)
             if payload.locale.lower().startswith("zh"):
                 if "HTTP 401" in message or "rejected the Client ID or Secret" in message:
-                    detail = "PayPal 凭证验证失败：请确认当前 PAYPAL_MODE 对应的 Client ID 和 Client Secret 来自同一个 Live REST API 应用，并重新复制到 Railway 环境变量。"
+                    detail = "PayPal 凭证验证失败：请确认 Sandbox Client ID 和 Client Secret 来自同一个 REST API 应用，并重新复制到 Vercel 环境变量。"
                 else:
                     detail = f"PayPal 创建支付订单失败：{message}"
             elif payload.locale.lower().startswith("vi"):
@@ -4098,7 +3495,6 @@ def capture_paypal_payment(
     order_id: str = Query(...),
     payment_number: str = Query(default=""),
     email: str = Query(default=""),
-    user: dict = Depends(require_user),
 ) -> dict:
     if payment_provider() != "paypal":
         raise HTTPException(status_code=503, detail="PayPal is not configured.")
@@ -4115,8 +3511,6 @@ def capture_paypal_payment(
             ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Payment order was not found for this PayPal order.")
-    if row["customer_email"].strip().lower() != user["email"].strip().lower():
-        raise HTTPException(status_code=403, detail="This PayPal order belongs to another account.")
     payment_number = row["payment_number"]
     if row["status"] == "paid":
         return {
@@ -4129,27 +3523,13 @@ def capture_paypal_payment(
         raise HTTPException(status_code=400, detail="PayPal order does not match this payment.")
     try:
         token = paypal_access_token()
-        result = paypal_request(
-            f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture",
-            "POST",
-            {},
-            token,
-            {"PayPal-Request-Id": f"capture-{payment_number}"},
-        )
+        result = paypal_request(f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture", "POST", {}, token)
         status = result.get("status", "")
-        purchase_unit = (result.get("purchase_units") or [{}])[0]
-        provider_reference = str(purchase_unit.get("reference_id") or purchase_unit.get("custom_id") or "")
-        if provider_reference and provider_reference != payment_number:
-            raise RuntimeError("PayPal order reference does not match the local payment order.")
-        capture = ((purchase_unit.get("payments") or {}).get("captures") or [{}])[0]
+        capture = (((result.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
         capture_id = capture.get("id", "")
         capture_status = capture.get("status", "")
         if status != "COMPLETED" and capture_status != "COMPLETED":
             raise RuntimeError(f"PayPal capture is not complete: {status or capture_status}")
-        amount = capture.get("amount") or {}
-        expected_value = f"{int(row['amount_cents']) / 100:.2f}"
-        if str(amount.get("currency_code", "")).upper() != str(row["currency"]).upper() or str(amount.get("value", "")) != expected_value:
-            raise RuntimeError("PayPal capture amount or currency does not match the local order.")
         mark_payment_paid(payment_number, order_id, capture_id)
         return {
             "success": True, "status": "paid", "payment_number": payment_number,
@@ -4158,15 +3538,7 @@ def capture_paypal_payment(
             "provider_payment_id": capture_id, "already_processed": False,
         }
     except Exception as exc:
-        logger.exception("PayPal capture failed payment_number=%s order_id=%s", payment_number, order_id)
-        message = str(exc)
-        if "INSTRUMENT_DECLINED" in message or "declined by the processor" in message:
-            detail = "PAYMENT_METHOD_DECLINED"
-        elif "CANNOT_PAY_SELF" in message:
-            detail = "PAYPAL_SELF_PAYMENT_NOT_ALLOWED"
-        else:
-            detail = "PAYPAL_CAPTURE_FAILED"
-        raise HTTPException(status_code=502, detail=detail) from exc
+        raise HTTPException(status_code=502, detail=f"PayPal capture failed: {exc}")
 
 
 @app.post("/api/payments/paypal/webhook")
@@ -4187,23 +3559,13 @@ async def paypal_webhook(request: Request):
         }, token)
         if verification.get("verification_status") != "SUCCESS":
             raise HTTPException(status_code=400, detail="Invalid PayPal webhook signature.")
-        event_id = str(event.get("id", ""))
-        if not webhook_replay_guard.accept("paypal", event_id):
-            return {"received": True, "duplicate": True}
         if event.get("event_type") == "PAYMENT.CAPTURE.COMPLETED":
             resource = event.get("resource") or {}
             order_id = ((resource.get("supplementary_data") or {}).get("related_ids") or {}).get("order_id", "")
             with get_db() as db:
                 row = db.execute("SELECT payment_number FROM payment_orders WHERE provider='paypal' AND provider_session_id=?", (order_id,)).fetchone()
             if row:
-                with get_db() as db:
-                    payment = db.execute("SELECT * FROM payment_orders WHERE payment_number=?", (row["payment_number"],)).fetchone()
-                amount = resource.get("amount") or {}
-                expected_value = f"{int(payment['amount_cents']) / 100:.2f}" if payment else ""
-                if payment and str(amount.get("currency_code", "")).upper() == str(payment["currency"]).upper() and str(amount.get("value", "")) == expected_value:
-                    mark_payment_paid(row["payment_number"], order_id, resource.get("id", ""))
-                else:
-                    logger.error("PayPal webhook amount mismatch order_id=%s payment_number=%s", order_id, row["payment_number"])
+                mark_payment_paid(row["payment_number"], order_id, resource.get("id", ""))
         return {"received": True}
     except HTTPException:
         raise
@@ -4223,9 +3585,6 @@ async def paddle_webhook(request: Request):
         event = json.loads(raw_body.decode("utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid Paddle webhook payload: {exc}")
-    event_id = str(event.get("event_id") or event.get("notification_id") or "")
-    if not webhook_replay_guard.accept("paddle", event_id):
-        return {"received": True, "duplicate": True}
     event_type = event.get("event_type", "")
     data = event.get("data") or {}
     if event_type in {"transaction.completed", "transaction.paid"}:
@@ -4252,9 +3611,6 @@ async def stripe_webhook(request: Request):
         event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}")
-    event_id = str(event.get("id", ""))
-    if not webhook_replay_guard.accept("stripe", event_id):
-        return {"received": True, "duplicate": True}
     event_type = event.get("type", "")
     obj = event.get("data", {}).get("object", {})
     if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"} and obj.get("payment_status") == "paid":

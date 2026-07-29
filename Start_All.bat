@@ -9,14 +9,14 @@ set "LOGDIR=%ROOT%logs"
 set "STARTLOG=%LOGDIR%\startup.log"
 set "VENV_PY=%BACKEND%\.venv\Scripts\python.exe"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
-set "APP_VERSION=41.1.0"
+set "APP_VERSION=40.5.0"
 cd /d "%ROOT%"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 if not exist "%RUNTIME%" mkdir "%RUNTIME%"
-title Document Automation AI V%APP_VERSION%
+title Document Automation AI V40.5.0
 
 echo ============================================================
-echo Document Automation AI V%APP_VERSION% - One Click Start
+echo Document Automation AI V40.5.0 - One Click Start
 echo ============================================================
 echo Project root: %ROOT%
 echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
@@ -64,20 +64,16 @@ call :STOP_PORT 8000 Backend
 call :STOP_PORT 5173 Frontend
 
 echo Starting backend...
-start "Document Automation AI Backend V%APP_VERSION%" "%ComSpec%" /d /q /k ""%ROOT%Start_Backend.bat""
+start "Document Automation AI Backend V40.5.0" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
 
-echo Waiting for backend health check and project identity...
+echo Waiting for backend health check and version identity...
 set /a COUNT=0
 :WAIT_BACKEND
 set /a COUNT+=1
-set "BACKEND_STATE="
-for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "try { $h=Invoke-RestMethod -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8000/api/health; $expected=[IO.Path]::GetFullPath('%ROOT%').TrimEnd([char]92); $actual=[IO.Path]::GetFullPath([string]$h.project_root).TrimEnd([char]92); if(($h.status -eq 'ok') -and ($h.readiness -ne 'blocked') -and ($actual -eq $expected)){ 'READY|' + [string]$h.version } } catch {}"`) do set "BACKEND_STATE=%%V"
-if /I "!BACKEND_STATE:~0,6!"=="READY|" (
-  set "BACKEND_VERSION=!BACKEND_STATE:~6!"
-  goto BACKEND_READY
-)
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "try { $h=Invoke-RestMethod -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8000/api/health; if(($h.version -eq '%APP_VERSION%') -and ([IO.Path]::GetFullPath($h.project_root).TrimEnd([char]92) -eq [IO.Path]::GetFullPath('%ROOT%').TrimEnd([char]92))){ 'READY' } } catch {}"`) do set "BACKEND_STATE=%%V"
+if /I "!BACKEND_STATE!"=="READY" goto BACKEND_READY
 if !COUNT! GEQ 180 (
-  echo [ERROR] Backend did not become healthy for this project within 180 seconds.
+  echo [ERROR] Backend did not become healthy as V%APP_VERSION% within 180 seconds.
   echo Check logs\backend.log and logs\startup.log.
   pause
   exit /b 1
@@ -86,10 +82,9 @@ timeout /t 1 /nobreak >nul
 goto WAIT_BACKEND
 
 :BACKEND_READY
-if not defined BACKEND_VERSION set "BACKEND_VERSION=unknown"
-echo Backend V!BACKEND_VERSION! is healthy.
+echo Backend V%APP_VERSION% is healthy.
 echo Starting frontend...
-start "Document Automation AI Frontend V%APP_VERSION%" "%ComSpec%" /d /q /k ""%ROOT%Start_Frontend.bat""
+start "Document Automation AI Frontend V40.5.0" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
 
 echo Waiting for frontend...
 set /a COUNT=0
