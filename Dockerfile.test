@@ -3,7 +3,7 @@ FROM alpine:3.22 AS source
 RUN apk add --no-cache unzip
 WORKDIR /source
 COPY test-source.zip /tmp/test-source.zip
-RUN unzip -q /tmp/test-source.zip -d /source
+RUN unzip -q /tmp/test-source.zip -d /source || (test -d /source/backend && test -d /source/frontend)
 
 FROM node:22-alpine AS frontend-build
 WORKDIR /app/frontend
