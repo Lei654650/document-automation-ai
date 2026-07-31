@@ -38,8 +38,8 @@ def test_three_stage_engineering_reconstruction(tmp_path: Path):
     stats=_clean_xlsx(source,clean)
     assert stats['mode']=='enterprise_reconstruction'
     wb=load_workbook(clean)
-    assert wb['PLC输入信号']['C1'].value=='中文功能'
-    assert wb['PLC输入信号']['D1'].value=='越南语功能'
+    assert wb['PLC输入信号']['C1'].value=='中文功能\nChức năng tiếng Trung'
+    assert wb['PLC输入信号']['D1'].value=='越南语功能\nChức năng tiếng Việt'
     tips=wb['操作提示']
     assert tips.max_row==2
     assert tips['B2'].value=='操作条件不满足'

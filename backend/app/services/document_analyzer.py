@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import re
+import time
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -9,7 +11,8 @@ from typing import Any
 FORMAT_LABELS = {
     '.pdf': 'PDF', '.xlsx': 'Excel', '.xls': 'Excel', '.docx': 'Word', '.doc': 'Word',
     '.pptx': 'PowerPoint', '.ppt': 'PowerPoint', '.csv': 'CSV', '.png': '图片',
-    '.jpg': '图片', '.jpeg': '图片', '.bmp': '图片', '.tif': '图片', '.tiff': '图片', '.zip': 'ZIP',
+    '.jpg': '图片', '.jpeg': '图片', '.bmp': '图片', '.tif': '图片', '.tiff': '图片',
+    '.txt': 'TXT', '.zip': 'ZIP',
 }
 
 
@@ -49,6 +52,18 @@ def _analyze_pdf(item: dict, path: Path) -> None:
     reader = PdfReader(str(path))
     pages = len(reader.pages)
     chunks = [(page.extract_text() or '')[:4000] for page in reader.pages[:8]]
+    image_count = 0
+    for page in reader.pages:
+        try:
+            resources = page.get("/Resources") or {}
+            x_objects = resources.get("/XObject") or {}
+            x_objects = x_objects.get_object() if hasattr(x_objects, "get_object") else x_objects
+            for value in x_objects.values():
+                obj = value.get_object() if hasattr(value, "get_object") else value
+                if obj.get("/Subtype") == "/Image":
+                    image_count += 1
+        except Exception:
+            continue
     sample = '\n'.join(chunks)
     avg = len(sample.strip()) / max(1, min(pages, 8))
     item['_text_sample'] = sample
@@ -57,6 +72,7 @@ def _analyze_pdf(item: dict, path: Path) -> None:
         'extractable_text_chars_sample': len(sample),
         'likely_scanned': avg < 40,
         'encrypted': bool(reader.is_encrypted),
+        'image_count': image_count,
     })
     item['capabilities'] += ['文本提取', '页数识别']
     if avg < 40:
@@ -111,10 +127,19 @@ def _analyze_docx(item: dict, path: Path) -> None:
     table_cells = [cell.text for table in doc.tables for row in table.rows for cell in row.cells if cell.text.strip()]
     sections = len(doc.sections)
     item['_text_sample'] = '\n'.join((paragraphs + table_cells)[:800])
+    page_count = 0
+    try:
+        with zipfile.ZipFile(path) as package:
+            if 'docProps/app.xml' in package.namelist():
+                root = ET.fromstring(package.read('docProps/app.xml'))
+                page_count = int(root.findtext('{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}Pages') or 0)
+    except (ValueError, ET.ParseError, zipfile.BadZipFile):
+        page_count = 0
     item['details'].update({
         'paragraph_count': len(doc.paragraphs), 'non_empty_paragraph_count': len(paragraphs),
         'table_count': len(doc.tables), 'image_count': len(doc.inline_shapes), 'section_count': sections,
         'heading_count': sum(1 for p in doc.paragraphs if p.style and p.style.name.lower().startswith('heading')),
+        'page_count': page_count,
     })
     item['capabilities'] += ['段落识别', '表格识别', '图片统计', '标题结构识别']
 
@@ -175,6 +200,16 @@ def _analyze_csv(item: dict, path: Path) -> None:
     item['capabilities'] += ['行列结构识别', '文本提取']
 
 
+def _analyze_txt(item: dict, path: Path) -> None:
+    text = path.read_text(encoding='utf-8-sig', errors='replace')
+    item['_text_sample'] = text[:30000]
+    item['details'].update({
+        'character_count': len(text),
+        'line_count': len(text.splitlines()),
+    })
+    item['capabilities'] += ['纯文本提取', '语言识别']
+
+
 def _analyze_image(item: dict, path: Path) -> None:
     from PIL import Image
     with Image.open(path) as im:
@@ -210,7 +245,31 @@ def _category(files: list[dict], requirements: str) -> str:
     return '通用文档'
 
 
+def _industry(files: list[dict], requirements: str) -> str:
+    text = (' '.join(x['name'] for x in files) + ' ' + requirements + ' ' + ' '.join(x.get('_text_sample', '')[:3000] for x in files)).lower()
+    rules = [
+        (['vehicle', 'automotive', 'engine', 'ecu', 'can bus', '汽车', '车辆', '发动机', '整车'], '汽车'),
+        (['patient', 'clinical', 'diagnosis', 'medical', 'hospital', '医疗', '患者', '临床', '医院'], '医疗'),
+        (['contract', 'agreement', 'legal', 'liability', '合同', '协议', '条款', '法律'], '法律'),
+        (['invoice', 'balance sheet', 'financial', 'accounting', '发票', '财务', '会计', '审计'], '金融与财务'),
+        (['training', 'course', 'curriculum', 'education', '培训', '课程', '教材', '教育'], '教育'),
+        (['software', 'database', 'server', 'api', 'cloud', '代码', '软件', '数据库', '服务器'], 'IT'),
+        (['solar', 'wind power', 'battery', 'energy', 'oil', 'gas', '电力', '能源', '光伏', '风电', '电池'], '能源'),
+        (['construction', 'building', 'architecture', 'bim', '建筑', '施工', '工程图', '土木'], '建筑'),
+        (['logistics', 'warehouse', 'shipping', 'freight', 'inventory', '物流', '仓库', '运输', '库存'], '物流'),
+        (['pcb', 'semiconductor', 'electronics', 'chip', 'circuit', '电子', '芯片', '电路', '元器件'], '电子'),
+        (['plc', 'hmi', 'scada', 'servo', '变频器', '自动化', 'i/o'], '工业自动化'),
+        (['bom', 'assembly', 'process sheet', '工艺', '制造', '产线', '零件', '物料'], '制造业'),
+        (['marketing', 'campaign', '品牌推广', '营销'], '市场营销'),
+    ]
+    for keys, label in rules:
+        if any(key in text for key in keys):
+            return label
+    return '通用'
+
+
 def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requirements: str, translation: dict) -> dict:
+    started_at = time.perf_counter()
     files = []
     for name, raw in paths:
         path = Path(raw); item = _base(name, path)
@@ -221,6 +280,7 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
             elif ext == '.docx': _analyze_docx(item, path)
             elif ext == '.pptx': _analyze_pptx(item, path)
             elif ext == '.csv': _analyze_csv(item, path)
+            elif ext == '.txt': _analyze_txt(item, path)
             elif ext in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff'}: _analyze_image(item, path)
             elif ext == '.zip': _analyze_zip(item, path)
             elif ext in {'.xls','.doc','.ppt'}:
@@ -232,10 +292,9 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
             item['details']['ocr_status'] = '已启用'
         language = _detect_language(item.get('_text_sample',''))
         item['details']['detected_language'] = language
-        item.pop('_text_sample', None)
         files.append(item)
 
-    workflow = ['接收并校验文件', '识别文件格式与内部结构', '检测文档主要语言']
+    workflow = ['接收并校验文件', '识别文件格式与内部结构', '检测文档主要语言与行业']
     formats = {x['format'] for x in files}
     if 'PowerPoint' in formats: workflow.append('PowerPoint 对象解析（幻灯片、文字、表格、图片、图表）')
     if 'ocr' in services or any(x['details'].get('likely_scanned') or x['format']=='图片' for x in files): workflow.append('OCR 文字与表格识别')
@@ -250,17 +309,69 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
     workflow.append('交付文件')
 
     total = sum(x['size_bytes'] for x in files)
+    total_pages = 0
+    total_images = 0
+    total_tables = 0
+    page_count_complete = True
+    image_count_complete = True
+    table_count_complete = True
+    ocr_required = False
+    ocr_languages: set[str] = set()
+    for item in files:
+        details = item.get('details', {})
+        fmt = item.get('format')
+        page_value = details.get('pages')
+        if page_value is None and fmt == 'PowerPoint':
+            page_value = details.get('slide_count')
+        if page_value is None and fmt == 'Word':
+            page_value = details.get('page_count')
+        if page_value is None and fmt == '图片':
+            page_value = 1
+        if page_value:
+            total_pages += int(page_value)
+        elif fmt in {'PDF', 'Word', 'PowerPoint', '图片'}:
+            page_count_complete = False
+
+        image_value = details.get('image_count')
+        if image_value is None and fmt == 'PowerPoint':
+            image_value = details.get('picture_count')
+        if image_value is not None:
+            total_images += int(image_value or 0)
+        elif fmt in {'PDF', 'Word', 'PowerPoint'}:
+            image_count_complete = False
+
+        table_value = details.get('table_count')
+        if table_value is not None:
+            total_tables += int(table_value or 0)
+        elif fmt in {'PDF', '图片'}:
+            table_count_complete = False
+
+        needs_ocr = bool(details.get('likely_scanned')) or fmt == '图片'
+        if needs_ocr:
+            ocr_required = True
+            language_name = details.get('detected_language', {}).get('name')
+            if language_name and language_name != '未知':
+                ocr_languages.add(language_name)
     warnings = [w for x in files for w in x['warnings']]
     complexity = '低'
     object_count = sum((x['details'].get('text_shape_count') or 0) + (x['details'].get('table_count') or 0) + (x['details'].get('picture_count') or 0) for x in files)
     if len(files)>3 or total>20*1024*1024 or object_count>100: complexity='中'
     if len(files)>10 or total>100*1024*1024 or object_count>500 or any((x['details'].get('pages') or x['details'].get('slide_count') or 0)>100 for x in files): complexity='高'
     category = _category(files, requirements)
+    industry = _industry(files, requirements)
     languages = sorted({x['details'].get('detected_language',{}).get('name','未知') for x in files})
+    for item in files:
+        item.pop('_text_sample', None)
+    duration_ms = max(1, round((time.perf_counter() - started_at) * 1000))
     return {
         'engine_version': '11.2-document-analyzer', 'status': 'completed', 'file_count': len(files), 'total_size_bytes': total,
-        'input_formats': sorted(formats), 'detected_languages': languages, 'document_category': category,
+        'input_formats': sorted(formats), 'detected_languages': languages, 'document_category': category, 'industry': industry,
         'complexity': complexity, 'files': files, 'recommended_workflow': workflow,
+        'total_pages': total_pages, 'page_count_complete': page_count_complete,
+        'total_images': total_images, 'image_count_complete': image_count_complete,
+        'total_tables': total_tables, 'table_count_complete': table_count_complete,
+        'ocr_required': ocr_required, 'ocr_languages': sorted(ocr_languages),
+        'analysis_duration_ms': duration_ms,
         'warnings': warnings or ['未发现明显风险。'],
-        'summary': f'已深度识别 {len(files)} 个文件；格式：{", ".join(sorted(formats))}；文档类别：“{category}”；语言：{", ".join(languages)}；复杂度：{complexity}。'
+        'summary': f'已深度识别 {len(files)} 个文件；格式：{", ".join(sorted(formats))}；文档类别：“{category}”；行业：“{industry}”；语言：{", ".join(languages)}；复杂度：{complexity}。'
     }

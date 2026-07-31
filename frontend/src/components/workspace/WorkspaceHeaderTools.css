@@ -1,0 +1,233 @@
+.v45-header-tools-mounted > *:not(.workspace-header-tools-v45) {
+  display: none !important;
+}
+
+.workspace-header-tools-v45 {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.workspace-header-tools-v45 button {
+  cursor: pointer;
+}
+
+.workspace-header-primary-v45,
+.workspace-header-help-v45,
+.workspace-header-icon-v45,
+.workspace-header-account-v45 {
+  min-height: 42px;
+  border: 1px solid #dce4f0;
+  border-radius: 11px;
+  background: #fff;
+  color: #294063;
+}
+
+.workspace-header-primary-v45,
+.workspace-header-help-v45 {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  font-weight: 800;
+}
+
+.workspace-header-primary-v45 {
+  border-color: #3157ff;
+  background: #3157ff;
+  color: #fff;
+}
+
+.workspace-header-primary-v45 svg,
+.workspace-header-help-v45 svg,
+.workspace-header-icon-v45 svg {
+  width: 17px;
+}
+
+.workspace-header-icon-v45 {
+  display: grid;
+  width: 42px;
+  padding: 0;
+  place-items: center;
+}
+
+.workspace-header-account-v45 {
+  display: flex;
+  max-width: 220px;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 10px 4px 5px;
+  text-align: left;
+}
+
+.workspace-header-account-v45 > i {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  background: #edf3ff;
+  color: #3157d8;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.workspace-header-account-v45 > i svg {
+  width: 17px;
+}
+
+.workspace-header-account-v45 > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workspace-header-account-v45 b,
+.workspace-header-account-v45 small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-header-account-v45 b {
+  font-size: 11px;
+}
+
+.workspace-header-account-v45 small {
+  color: #7d899d;
+  font-size: 8px;
+}
+
+.workspace-help-backdrop-v45 {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: grid;
+  padding: 24px;
+  place-items: center;
+  background: rgba(8, 18, 38, .48);
+  backdrop-filter: blur(5px);
+}
+
+.workspace-help-center-v45 {
+  width: min(760px, 100%);
+  overflow: hidden;
+  border: 1px solid #dfe6f0;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 30px 90px rgba(12, 27, 57, .24);
+}
+
+.workspace-help-center-v45 > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 24px 26px 20px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.workspace-help-center-v45 > header span {
+  color: #3157d8;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .13em;
+}
+
+.workspace-help-center-v45 > header h2 {
+  margin: 7px 0 5px;
+  font-size: 24px;
+}
+
+.workspace-help-center-v45 > header p {
+  margin: 0;
+  color: #748096;
+  font-size: 11px;
+}
+
+.workspace-help-center-v45 > header > button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #e1e6ef;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.workspace-help-center-v45 > header > button svg {
+  width: 17px;
+}
+
+.workspace-help-grid-v45 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 20px 26px 26px;
+}
+
+.workspace-help-grid-v45 > button {
+  display: grid;
+  min-height: 92px;
+  grid-template-columns: 38px 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid #e2e7ef;
+  border-radius: 13px;
+  background: #fff;
+  color: #31415b;
+  text-align: left;
+  transition: .16s ease;
+}
+
+.workspace-help-grid-v45 > button:hover {
+  border-color: #9fb2f7;
+  background: #f7f9ff;
+  transform: translateY(-1px);
+}
+
+.workspace-help-grid-v45 > button > svg {
+  width: 38px;
+  height: 38px;
+  padding: 9px;
+  border-radius: 10px;
+  background: #edf3ff;
+  color: #3157d8;
+}
+
+.workspace-help-grid-v45 > button span {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.workspace-help-grid-v45 b {
+  font-size: 12px;
+}
+
+.workspace-help-grid-v45 small {
+  color: #7b8799;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .workspace-header-account-v45 > span,
+  .workspace-header-help-v45 > span {
+    display: none;
+  }
+
+  .workspace-header-account-v45 {
+    padding-right: 5px;
+  }
+
+  .workspace-help-grid-v45 {
+    grid-template-columns: 1fr;
+  }
+}

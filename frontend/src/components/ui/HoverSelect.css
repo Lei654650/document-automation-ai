@@ -1,0 +1,122 @@
+.hover-select-v45 {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+}
+
+.hover-select-trigger-v45 {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  border: 1px solid #dbe2ed;
+  border-radius: 10px;
+  background: #fff;
+  color: #26334a;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: left;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+
+.hover-select-trigger-v45 > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hover-select-trigger-v45 svg {
+  flex: 0 0 auto;
+  width: 15px;
+  transition: transform .16s ease;
+}
+
+.hover-select-v45.open .hover-select-trigger-v45 {
+  border-color: #3157ff;
+  box-shadow: 0 0 0 3px rgba(49, 87, 255, .12);
+}
+
+.hover-select-v45.open .hover-select-trigger-v45 svg {
+  transform: rotate(180deg);
+}
+
+.hover-select-v45.disabled .hover-select-trigger-v45 {
+  cursor: not-allowed;
+  background: #f2f4f8;
+  color: #8a94a6;
+}
+
+.hover-select-menu-v45 {
+  position: absolute;
+  z-index: 1600;
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: min(280px, 48vh);
+  gap: 3px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #dce3ee;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 44px rgba(30, 46, 80, .18);
+}
+
+.hover-select-v45.down .hover-select-menu-v45 {
+  top: calc(100% + 5px);
+}
+
+.hover-select-v45.up .hover-select-menu-v45 {
+  bottom: calc(100% + 5px);
+}
+
+.hover-select-menu-v45 > button {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #435168;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.hover-select-menu-v45 > button:hover,
+.hover-select-menu-v45 > button.active,
+.hover-select-menu-v45 > button.focused {
+  background: #edf3ff;
+  color: #3157d8;
+}
+
+.hover-select-menu-v45 > button:disabled {
+  opacity: .45;
+}
+
+.hover-select-menu-v45 > button > span {
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.hover-select-menu-v45 > button svg {
+  flex: 0 0 auto;
+  width: 14px;
+}
+
+@media (max-width: 620px) {
+  .hover-select-trigger-v45 {
+    min-height: 44px;
+    font-size: 12px;
+  }
+}

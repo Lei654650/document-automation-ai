@@ -4,7 +4,7 @@ from app.engines.translation_engine import TranslationClient
 from app.engines.conversion_engine import convert_outputs
 
 
-def test_batch_resilient_splits_instead_of_single_item_storm(monkeypatch):
+def test_batch_resilient_stops_before_single_item_request_storm(monkeypatch):
     client = object.__new__(TranslationClient)
     client.cache = {}
     calls = []
@@ -18,8 +18,8 @@ def test_batch_resilient_splits_instead_of_single_item_storm(monkeypatch):
     monkeypatch.setattr(client, "_request_batch", fake_batch)
     monkeypatch.setattr(client, "translate", lambda text: f"T:{text}")
     result = client._request_batch_resilient(["a", "b", "c", "d", "e", "f", "g", "h"])
-    assert result == [f"T:{x}" for x in "abcdefgh"]
-    assert calls == [8, 4, 2, 2, 4, 2, 2]
+    assert result == list("abcdefgh")
+    assert calls == [8]
 
 
 def test_same_format_conversion_is_immediate(tmp_path):

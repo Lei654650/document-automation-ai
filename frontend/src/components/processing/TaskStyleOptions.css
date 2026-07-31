@@ -1,0 +1,53 @@
+.task-style-options-v45 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #dfe6f3;
+  border-radius: 12px;
+  background: #f8faff;
+}
+
+.task-style-options-v45 > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.task-style-options-v45 > div > svg {
+  width: 19px;
+  color: #3157d8;
+}
+
+.task-style-options-v45 span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.task-style-options-v45 b {
+  font-size: 11px;
+}
+
+.task-style-options-v45 small {
+  color: #7b879a;
+  font-size: 9px;
+}
+
+.task-style-options-v45 select {
+  width: min(310px, 45%);
+}
+
+@media (max-width: 620px) {
+  .task-style-options-v45 {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .task-style-options-v45 select {
+    width: 100%;
+  }
+}

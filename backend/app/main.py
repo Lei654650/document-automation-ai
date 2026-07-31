@@ -101,10 +101,12 @@ def _load_project_env() -> None:
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "40.5.0"
+APP_VERSION = "45.0.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
+OWNER_EMAIL = os.getenv("OWNER_EMAIL", "654650727@qq.com").strip().lower()
+ADMIN_ROLES = {"owner", "admin"}
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
 if IS_VERCEL:
     # Vercel's deployed bundle (/var/task) is read-only. Only /tmp is writable.
@@ -142,7 +144,7 @@ except json.JSONDecodeError:
 PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "").strip()
 PAYMENT_CANCEL_URL = os.getenv("PAYMENT_CANCEL_URL", "").strip()
 PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "false").lower() in {"1", "true", "yes", "on"}
-ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "false").lower() in {"1", "true", "yes", "on"}
+ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "true").lower() in {"1", "true", "yes", "on"}
 JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "300")))
 AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip() or secrets.token_urlsafe(48)
 SESSION_TTL_SECONDS = max(3600, int(os.getenv("SESSION_TTL_SECONDS", "2592000")))
@@ -173,7 +175,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_SUFFIXES = {
-    ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv",
+    ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv", ".txt",
     ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
     ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"
 }
@@ -208,10 +210,24 @@ def _wait_for_job_control(job_id: int) -> None:
             raise JobCancelled("任务已由用户停止")
     if control["cancel"].is_set():
         raise JobCancelled("任务已由用户停止")
-_cors_env = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if item.strip()]
+# Production accepts only explicitly configured origins. Development origins can
+# still be enabled deliberately through CORS_ORIGINS without weakening production.
+_configured_cors_origins = {
+    item.strip()
+    for item in os.getenv("CORS_ORIGINS", "").split(",")
+    if item.strip()
+}
+if PUBLIC_BASE_URL.startswith(("http://", "https://")):
+    _configured_cors_origins.add(PUBLIC_BASE_URL)
+if not CLOUD_MODE:
+    _configured_cors_origins.update({
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    })
+_cors_origins = sorted(_configured_cors_origins)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_env or ["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -263,6 +279,11 @@ class EmailVerificationResend(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+
+
+class UserSettingsUpdate(BaseModel):
+    preferences: dict = Field(default_factory=dict)
+    profile: dict = Field(default_factory=dict)
 
 
 class PasswordResetRequest(BaseModel):
@@ -330,6 +351,25 @@ class WalletAdjustment(BaseModel):
     note: str = "Administrator adjustment"
 
 
+class AdminUserUpdate(BaseModel):
+    status: Literal["active", "disabled"] | None = None
+    plan: str | None = Field(default=None, min_length=1, max_length=80)
+    credits: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    reason: str = Field(default="Administrator update", min_length=1, max_length=500)
+
+
+class AdminTenantUpdate(BaseModel):
+    company_name: str | None = Field(default=None, min_length=1, max_length=160)
+    industry: str | None = Field(default=None, max_length=120)
+    country: str | None = Field(default=None, max_length=120)
+    contact_name: str | None = Field(default=None, max_length=120)
+    contact_phone: str | None = Field(default=None, max_length=80)
+    plan: str | None = Field(default=None, min_length=1, max_length=80)
+    credits: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    status: Literal["active", "trial", "suspended", "expired"] | None = None
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class UploadInitRequest(BaseModel):
     filename: str
     size_bytes: int = Field(ge=1)
@@ -374,6 +414,19 @@ def payment_provider() -> str:
     if STRIPE_SECRET_KEY:
         return "stripe"
     return "demo"
+
+
+def payment_production_ready() -> bool:
+    provider = payment_provider()
+    if PAYMENT_TEST_MODE:
+        return False
+    if provider == "paypal":
+        return PAYPAL_MODE == "live" and bool(PAYPAL_WEBHOOK_ID)
+    if provider == "paddle":
+        return PADDLE_ENV == "production" and bool(PADDLE_WEBHOOK_SECRET)
+    if provider == "stripe":
+        return bool(STRIPE_WEBHOOK_SECRET)
+    return False
 
 
 def paddle_api_base() -> str:
@@ -545,20 +598,22 @@ class AITranslationSettingsUpdate(BaseModel):
 
 def require_admin(
     request: Request,
+    authorization: Annotated[str | None, Header()] = None,
     x_admin_key: Annotated[str | None, Header()] = None,
-) -> None:
-    """Protect administrator endpoints.
+) -> dict:
+    """Protect administrator endpoints with the signed-in user's role.
 
-    The packaged Windows application is a localhost-only desktop deployment, so
-    administrators should not be locked out after replacing the project folder.
-    Cloud deployments still require the configured ADMIN_PASSWORD header.
+    Owner/admin bearer sessions are the primary authorization path. The legacy
+    X-Admin-Key remains available for operational compatibility only.
     """
-    client_host = request.client.host if request.client else ""
-    is_local_client = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
-    if not CLOUD_MODE and is_local_client:
-        return
-    if not x_admin_key or not secrets.compare_digest(x_admin_key, ADMIN_PASSWORD):
-        raise HTTPException(status_code=401, detail="Administrator authentication failed. Check the administrator password.")
+    user = current_user_optional(authorization)
+    if user:
+        if str(user.get("role") or "user").lower() in ADMIN_ROLES:
+            return user
+        raise HTTPException(status_code=403, detail="Administrator permission is required.")
+    if x_admin_key and secrets.compare_digest(x_admin_key, ADMIN_PASSWORD):
+        return {"id": 0, "name": "Legacy administrator", "email": "", "role": "admin", "status": "active"}
+    raise HTTPException(status_code=401, detail="Please sign in with an administrator account.")
 
 
 def public_order(order_number: str, email: str) -> dict:
@@ -776,10 +831,60 @@ def initialize_db() -> None:
                 password_hash TEXT NOT NULL,
                 password_salt TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
+                role TEXT NOT NULL DEFAULT 'user',
                 email_verified INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 last_login_at TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                preferences_json TEXT NOT NULL DEFAULT '{}',
+                profile_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_user_id INTEGER,
+                actor_email TEXT NOT NULL DEFAULT '',
+                actor_role TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL DEFAULT '',
+                before_json TEXT NOT NULL DEFAULT '{}',
+                after_json TEXT NOT NULL DEFAULT '{}',
+                reason TEXT NOT NULL DEFAULT '',
+                ip_address TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(id DESC);
+            CREATE TABLE IF NOT EXISTS tenants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_key TEXT NOT NULL UNIQUE,
+                company_name TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL UNIQUE,
+                owner_email TEXT NOT NULL,
+                industry TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                contact_name TEXT NOT NULL DEFAULT '',
+                contact_phone TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS tenant_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                UNIQUE(tenant_id, user_id),
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_tenant_members_tenant ON tenant_members(tenant_id);
             CREATE TABLE IF NOT EXISTS user_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -935,12 +1040,32 @@ def initialize_db() -> None:
             );
             """
         )
+        # Tenant schema migrations for projects upgraded from earlier admin builds.
+        # CREATE TABLE IF NOT EXISTS does not add new columns to an existing table,
+        # so every field used by the tenant API must be migrated explicitly.
+        ensure_column(db, "tenants", "industry", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "tenants", "country", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "tenants", "contact_name", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "tenants", "contact_phone", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "tenants", "status", "TEXT NOT NULL DEFAULT 'active'")
+        ensure_column(db, "tenants", "updated_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "tenant_members", "role", "TEXT NOT NULL DEFAULT 'member'")
+        ensure_column(db, "tenant_members", "status", "TEXT NOT NULL DEFAULT 'active'")
+        ensure_column(db, "tenant_members", "created_at", "TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status)")
+        db.execute("UPDATE tenants SET updated_at=COALESCE(NULLIF(updated_at,''),created_at)")
+        db.execute("UPDATE tenants SET status='active' WHERE status IS NULL OR TRIM(status)=''")
+        db.execute("UPDATE tenant_members SET role='member' WHERE role IS NULL OR TRIM(role)=''")
+        db.execute("UPDATE tenant_members SET status='active' WHERE status IS NULL OR TRIM(status)=''")
+
         db.execute(
             "INSERT OR IGNORE INTO workspace_settings (id, name, plan, monthly_credit_limit, updated_at) VALUES (1, 'Document Automation AI', 'Enterprise', 10000, ?)",
             (utc_now(),),
         )
         ensure_column(db, "project_metadata", "deleted", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "project_metadata", "deleted_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
+        db.execute("UPDATE users SET role='owner' WHERE LOWER(email)=LOWER(?)", (OWNER_EMAIL,))
         ensure_column(db, "password_reset_tokens", "email_sent", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "password_reset_tokens", "delivery_channel", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "password_reset_tokens", "delivery_detail", "TEXT NOT NULL DEFAULT ''")
@@ -1103,8 +1228,18 @@ def current_user_optional(authorization: str | None = Header(default=None)) -> d
         return None
     now = int(time.time())
     with get_db() as db:
-        row = db.execute("SELECT u.id,u.name,u.email,u.status,u.email_verified FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", (_session_hash(token), now)).fetchone()
-    return dict(row) if row else None
+        row = db.execute(
+            "SELECT u.id,u.name,u.email,u.status,u.role,u.email_verified "
+            "FROM user_sessions s JOIN users u ON u.id=s.user_id "
+            "WHERE s.token_hash=? AND s.expires_at>?",
+            (_session_hash(token), now),
+        ).fetchone()
+    if not row:
+        return None
+    user = dict(row)
+    user["role"] = "owner" if str(user.get("email", "")).strip().lower() == OWNER_EMAIL else str(user.get("role") or "user").lower()
+    user["email_verified"] = bool(user.get("email_verified"))
+    return user
 
 
 def require_user(user: dict | None = Depends(current_user_optional)) -> dict:
@@ -1127,6 +1262,12 @@ def startup() -> None:
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 2.0)
+    # Complete tenant bootstrap during startup so the first admin request cannot fail
+    # because of a partial migration or missing default tenant rows.
+    def bootstrap_tenants(db: sqlite3.Connection) -> None:
+        _ensure_default_tenants(db)
+    run_db_write(bootstrap_tenants)
+
     # In-process workers cannot survive a container restart. Mark interrupted jobs clearly.
     with get_db() as db:
         interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing','paused','cancelling')").fetchall()
@@ -1294,7 +1435,8 @@ def google_login(payload: GoogleLoginRequest, request: Request) -> dict:
             db.execute("INSERT INTO registration_events (user_id,email,provider,ip_address,device_fingerprint,risk_score,free_credits_granted,decision,created_at) VALUES (?,?,?,?,?,?,?,?,?)",(user_id,email,"google",ip,device,risk,grant,decision,now))
         token=_create_session(db,user_id,now); result.update(user_id=user_id,token=token,grant=grant,decision=decision)
     run_db_write(operation)
-    return {"token":result["token"],"user":{"id":result["user_id"],"name":name,"email":email,"email_verified":True},"free_credits_granted":result["grant"],"registration_decision":result["decision"]}
+    role = "owner" if email == OWNER_EMAIL else "user"
+    return {"token":result["token"],"user":{"id":result["user_id"],"name":name,"email":email,"role":role,"email_verified":True},"free_credits_granted":result["grant"],"registration_decision":result["decision"]}
 
 
 @app.post("/api/auth/login")
@@ -1315,7 +1457,8 @@ def login_user(payload: UserLogin) -> dict:
         db.execute("DELETE FROM user_sessions WHERE expires_at<=?",(int(time.time()),))
         db.execute("INSERT INTO user_sessions (user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?)",(row["id"],_session_hash(token),expires,now))
     run_db_write(operation)
-    return {"token":token,"user":{"id":row["id"],"name":row["name"],"email":row["email"],"email_verified":bool(row["email_verified"])}}
+    role = "owner" if email == OWNER_EMAIL else str(row["role"] or "user").lower()
+    return {"token":token,"user":{"id":row["id"],"name":row["name"],"email":row["email"],"role":role,"email_verified":bool(row["email_verified"])}}
 
 
 @app.post("/api/auth/password-reset/request")
@@ -1423,6 +1566,86 @@ def confirm_password_reset(payload: PasswordResetConfirm) -> dict:
 @app.get("/api/auth/me")
 def auth_me(user: dict = Depends(require_user)) -> dict:
     return {"user":user}
+
+
+def _decode_settings_json(raw: str | None) -> dict:
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def _user_settings_response(user: dict) -> dict:
+    with get_db() as db:
+        row = db.execute(
+            "SELECT preferences_json,profile_json,updated_at FROM user_settings WHERE user_id=?",
+            (user["id"],),
+        ).fetchone()
+        identity = db.execute(
+            "SELECT name,email,role,created_at,last_login_at FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+    preferences = _decode_settings_json(row["preferences_json"] if row else None)
+    profile = _decode_settings_json(row["profile_json"] if row else None)
+    if identity:
+        profile.update({
+            "id": user["id"],
+            "name": profile.get("name") or identity["name"],
+            "email": identity["email"],
+            "role": user.get("role") or identity["role"],
+            "created_at": identity["created_at"],
+            "last_login_at": identity["last_login_at"],
+        })
+    return {
+        "preferences": preferences,
+        "profile": profile,
+        "updated_at": row["updated_at"] if row else "",
+    }
+
+
+@app.get("/api/user/settings")
+def get_user_settings(user: dict = Depends(require_user)) -> dict:
+    return _user_settings_response(user)
+
+
+@app.put("/api/user/settings")
+def update_user_settings(payload: UserSettingsUpdate, user: dict = Depends(require_user)) -> dict:
+    allowed_profile_fields = {
+        "name", "company", "phone", "job_title", "department", "country",
+        "timezone", "theme", "language", "avatar",
+    }
+    profile = {
+        key: value
+        for key, value in payload.profile.items()
+        if key in allowed_profile_fields
+    }
+    preferences_json = json.dumps(payload.preferences, ensure_ascii=False, separators=(",", ":"))
+    profile_json = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
+    if len(preferences_json.encode("utf-8")) > 200_000:
+        raise HTTPException(status_code=413, detail="Settings payload is too large.")
+    if len(profile_json.encode("utf-8")) > 3_000_000:
+        raise HTTPException(status_code=413, detail="Profile payload is too large.")
+    updated_at = utc_now()
+
+    def operation(db: sqlite3.Connection) -> None:
+        db.execute(
+            """
+            INSERT INTO user_settings (user_id,preferences_json,profile_json,updated_at)
+            VALUES (?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                preferences_json=excluded.preferences_json,
+                profile_json=excluded.profile_json,
+                updated_at=excluded.updated_at
+            """,
+            (user["id"], preferences_json, profile_json, updated_at),
+        )
+        name = str(profile.get("name") or "").strip()
+        if name:
+            db.execute("UPDATE users SET name=? WHERE id=?", (name[:120], user["id"]))
+
+    run_db_write(operation)
+    return {"success": True, **_user_settings_response(user)}
 
 
 @app.post("/api/auth/logout")
@@ -1915,9 +2138,195 @@ def _archive_capabilities() -> dict:
 def archive_capabilities() -> dict:
     return {"success": True, **_archive_capabilities()}
 
+
+def _build_workspace_recommendation(analysis: dict) -> dict:
+    """Turn real document analysis into a stable, provider-neutral workspace plan."""
+    formats = {str(item).lower() for item in analysis.get("input_formats", [])}
+    files = analysis.get("files", [])
+    scanned = any(
+        bool(item.get("details", {}).get("likely_scanned"))
+        or item.get("format") == "图片"
+        for item in files
+    )
+    spreadsheet = bool(formats & {"excel", "csv"})
+    presentation = "powerpoint" in formats
+    image_only = formats and formats <= {"图片"}
+
+    if scanned or image_only:
+        profile = "scan"
+        services = ["ocr", "translation", "conversion"]
+        outputs = ["original", "pdf", "docx"]
+        reason = "检测到扫描内容或图片，建议先识别文字，再完成翻译、质量检查与版式交付。"
+    elif spreadsheet:
+        profile = "spreadsheet"
+        services = ["translation", "conversion"]
+        outputs = ["original", "xlsx", "csv", "pdf"]
+        reason = "检测到表格结构，建议保护公式、合并单元格、技术编号与变量后进行处理。"
+    elif presentation:
+        profile = "presentation"
+        services = ["translation", "conversion"]
+        outputs = ["original", "pptx", "pdf"]
+        reason = "检测到演示文稿，建议保留文本框、图片、图表与幻灯片层级。"
+    else:
+        profile = "document"
+        services = ["translation", "conversion"]
+        outputs = ["original", "docx", "pdf"]
+        if "pdf" in formats:
+            outputs.append("images")
+        reason = "检测到可编辑文档结构，建议保留原始版式并完成翻译与质量检查。"
+
+    detected_languages = analysis.get("detected_languages", [])
+    detected_text = "、".join(str(item) for item in detected_languages)
+    if "中文" in detected_text:
+        target = "en"
+    elif "越南" in detected_text:
+        target = "zh"
+    elif "英文" in detected_text or "English" in detected_text:
+        target = "zh"
+    else:
+        target = "en"
+
+    warnings = [
+        warning
+        for warning in analysis.get("warnings", [])
+        if warning and warning != "未发现明显风险。"
+    ]
+    confidence = 0.94 if not warnings else 0.84
+    file_count = int(analysis.get("file_count") or len(files) or 1)
+    total_size_bytes = int(analysis.get("total_size_bytes") or 0)
+    size_mb = total_size_bytes / 1024 / 1024
+    pages = int(analysis.get("total_pages") or file_count)
+    images = int(analysis.get("total_images") or 0)
+    tables = int(analysis.get("total_tables") or 0)
+    complexity = str(analysis.get("complexity") or "低")
+    complexity_multiplier = {"低": 1.0, "中": 1.25, "高": 1.6}.get(complexity, 1.15)
+    estimated_seconds = max(
+        8,
+        round(
+            (6 + file_count * 2.5 + size_mb * 0.35 + pages * 0.8 + images * 0.2 + tables * 0.35)
+            * complexity_multiplier
+            * (1.25 if scanned else 1.0)
+        ),
+    )
+    estimated_credits = _estimate_order_credits(analysis, services, file_count, total_size_bytes)
+    quality_score = 98
+    if complexity == "中":
+        quality_score -= 2
+    elif complexity == "高":
+        quality_score -= 4
+    quality_score -= min(5, len(warnings))
+    if scanned:
+        quality_score -= 1
+    quality_score = max(86, quality_score)
+
+    input_category_map = {
+        "word": "Office", "excel": "Office", "powerpoint": "Office",
+        "pdf": "PDF", "图片": "图片", "zip": "压缩包",
+        "csv": "结构化数据", "txt": "文本与数据",
+    }
+    input_group_map: dict[str, list[str]] = {}
+    for value in analysis.get("input_formats", []):
+        category_name = input_category_map.get(str(value).lower(), "其它")
+        input_group_map.setdefault(category_name, []).append(str(value))
+    input_groups = [
+        {"category": category_name, "formats": sorted(set(values))}
+        for category_name, values in input_group_map.items()
+    ]
+
+    output_category_map = {
+        "original": "源文件", "docx": "Office", "xlsx": "Office", "pptx": "Office",
+        "pdf": "PDF", "csv": "结构化数据", "images": "图片",
+    }
+    output_group_map: dict[str, list[str]] = {}
+    for value in outputs:
+        output_group_map.setdefault(output_category_map[value], []).append(value)
+    output_groups = [
+        {"category": category_name, "formats": values}
+        for category_name, values in output_group_map.items()
+    ]
+
+    reason_details = [reason]
+    industry = analysis.get("industry", "通用")
+    if industry and industry != "通用":
+        reason_details.append(f"文件内容更接近“{industry}”行业，将优先使用对应专业术语与质量规则。")
+    reason_details.append("输出格式已按当前输入与真实转换能力过滤，不会展示不兼容选项。")
+    if scanned:
+        reason_details.append("扫描件或图片需要 OCR，建议在翻译前先完成文字识别。")
+
+    return {
+        "profile": profile,
+        "recommended_services": services,
+        "compatible_outputs": outputs,
+        "recommended_target_language": target,
+        "confidence": confidence,
+        "reason": reason,
+        "reason_details": reason_details,
+        "category": analysis.get("document_category", "通用文档"),
+        "industry": industry,
+        "complexity": complexity,
+        "detected_languages": detected_languages,
+        "ocr_required": bool(analysis.get("ocr_required") or scanned),
+        "ocr_languages": analysis.get("ocr_languages", []),
+        "estimated_seconds": estimated_seconds,
+        "estimated_credits": estimated_credits,
+        "quality_score": quality_score,
+        "quality_label": "企业级",
+        "input_groups": input_groups,
+        "output_groups": output_groups,
+        "warnings": warnings[:5],
+        "provider_strategy": "provider-neutral",
+    }
+
+
+@app.post("/api/workspace/analyze")
+async def analyze_workspace_uploads(
+    files: list[UploadFile] = File(...),
+    user: dict = Depends(require_user),
+) -> dict:
+    """Analyze selected files before order creation without starting a job."""
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required.")
+    temp_root = Path(tempfile.mkdtemp(prefix="dai_workspace_analysis_", dir=str(PERSISTENT_ROOT)))
+    analysis_paths: list[tuple[str, str]] = []
+    try:
+        for index, upload in enumerate(files):
+            original_name = Path(upload.filename or f"document-{index + 1}").name
+            suffix = Path(original_name).suffix.lower()
+            if suffix not in ALLOWED_SUFFIXES:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or 'unknown'}")
+            stored_path = temp_root / f"{index:03d}-{original_name}"
+            total_size = 0
+            with stored_path.open("wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    total_size += len(chunk)
+                    if total_size > MAX_FILE_SIZE:
+                        raise HTTPException(status_code=413, detail=f"{original_name} exceeds {MAX_FILE_SIZE_MB} MB.")
+                    output.write(chunk)
+            if suffix in ARCHIVE_SUFFIXES:
+                expanded = _safe_extract_archive(stored_path, temp_root / f"expanded-{index}")
+                analysis_paths.extend((name, path) for name, path, _ in expanded)
+            else:
+                analysis_paths.append((original_name, str(stored_path)))
+        if not analysis_paths:
+            raise HTTPException(status_code=400, detail="No supported documents were found.")
+        analysis = analyze_order_files(analysis_paths, [], "", {})
+        return {
+            "success": True,
+            "analysis": analysis,
+            "recommendation": _build_workspace_recommendation(analysis),
+            "started_processing": False,
+            "owner": user["email"],
+        }
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 @app.post("/api/uploads/inspect-archive")
 @app.post("/api/uploads/inspect-zip")
-async def inspect_archive_upload(file: UploadFile = File(...)) -> dict:
+async def inspect_archive_upload(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_user),
+) -> dict:
     """Inspect and safely extract ZIP/RAR/7Z/TAR/GZ archives before order creation."""
     original_name = Path(file.filename or "archive").name
     kind = _archive_kind(Path(original_name))
@@ -1943,7 +2352,10 @@ async def inspect_archive_upload(file: UploadFile = File(...)) -> dict:
 
 
 @app.post("/api/uploads/init")
-def init_chunk_upload(payload: UploadInitRequest) -> dict:
+def init_chunk_upload(
+    payload: UploadInitRequest,
+    user: dict = Depends(require_user),
+) -> dict:
     filename = Path(payload.filename).name
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -1953,14 +2365,31 @@ def init_chunk_upload(payload: UploadInitRequest) -> dict:
     upload_id = uuid.uuid4().hex
     folder = UPLOAD_SESSION_DIR / upload_id
     folder.mkdir(parents=True, exist_ok=False)
-    meta = {"upload_id": upload_id, "filename": filename, "size_bytes": payload.size_bytes, "content_type": payload.content_type, "received_bytes": 0, "next_index": 0, "created_at": utc_now(), "complete": False}
+    meta = {
+        "upload_id": upload_id,
+        "filename": filename,
+        "size_bytes": payload.size_bytes,
+        "content_type": payload.content_type,
+        "received_bytes": 0,
+        "next_index": 0,
+        "created_at": utc_now(),
+        "complete": False,
+        "owner_email": user["email"].strip().lower(),
+    }
     _session_meta_path(upload_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     return {"upload_id": upload_id, "chunk_size": 2 * 1024 * 1024}
 
 
 @app.put("/api/uploads/{upload_id}/chunks/{chunk_index}")
-async def upload_chunk(upload_id: str, chunk_index: int, request: Request) -> dict:
+async def upload_chunk(
+    upload_id: str,
+    chunk_index: int,
+    request: Request,
+    user: dict = Depends(require_user),
+) -> dict:
     meta = _read_upload_meta(upload_id)
+    if meta.get("owner_email", "").lower() != user["email"].strip().lower():
+        raise HTTPException(status_code=404, detail="Upload session was not found.")
     if meta.get("complete"):
         return {"success": True, "received_bytes": meta["received_bytes"], "complete": True}
     if chunk_index != int(meta.get("next_index", 0)):
@@ -1981,8 +2410,13 @@ async def upload_chunk(upload_id: str, chunk_index: int, request: Request) -> di
 
 
 @app.post("/api/uploads/{upload_id}/complete")
-def complete_chunk_upload(upload_id: str) -> dict:
+def complete_chunk_upload(
+    upload_id: str,
+    user: dict = Depends(require_user),
+) -> dict:
     meta = _read_upload_meta(upload_id)
+    if meta.get("owner_email", "").lower() != user["email"].strip().lower():
+        raise HTTPException(status_code=404, detail="Upload session was not found.")
     if int(meta.get("received_bytes", 0)) != int(meta["size_bytes"]):
         raise HTTPException(status_code=409, detail=f"Upload incomplete: {meta.get('received_bytes', 0)} of {meta['size_bytes']} bytes received.")
     payload = UPLOAD_SESSION_DIR / upload_id / "payload.bin"
@@ -1994,7 +2428,9 @@ def complete_chunk_upload(upload_id: str) -> dict:
     return {"success": True, "upload_id": upload_id, "filename": meta["filename"], "size_bytes": meta["size_bytes"]}
 
 
-def _create_order_from_paths(payload: ChunkedOrderCreate) -> dict:
+def _create_order_from_paths(payload: ChunkedOrderCreate, user: dict) -> dict:
+    payload.email = user["email"].strip().lower()
+    payload.name = (user.get("name") or payload.name or payload.email.split("@")[0]).strip()
     if not payload.name.strip() or not payload.email.strip():
         raise HTTPException(status_code=400, detail="Name and email are required.")
     if not payload.upload_ids:
@@ -2010,6 +2446,8 @@ def _create_order_from_paths(payload: ChunkedOrderCreate) -> dict:
     try:
         for upload_id in payload.upload_ids:
             meta = _read_upload_meta(upload_id)
+            if meta.get("owner_email", "").lower() != payload.email:
+                raise HTTPException(status_code=404, detail="Upload session was not found.")
             if not meta.get("complete"):
                 raise HTTPException(status_code=409, detail=f"{meta.get('filename','File')} upload is incomplete.")
             source = UPLOAD_SESSION_DIR / upload_id / "payload.bin"
@@ -2046,8 +2484,11 @@ def _create_order_from_paths(payload: ChunkedOrderCreate) -> dict:
 
 
 @app.post("/api/orders/from-uploads")
-def create_order_from_uploads(payload: ChunkedOrderCreate) -> dict:
-    return _create_order_from_paths(payload)
+def create_order_from_uploads(
+    payload: ChunkedOrderCreate,
+    user: dict = Depends(require_user),
+) -> dict:
+    return _create_order_from_paths(payload, user)
 
 
 @app.post("/api/orders")
@@ -2063,7 +2504,10 @@ async def create_order(
     requirements: Annotated[str, Form()] = "",
     translation_json: Annotated[str, Form()] = "{}",
     conversion_json: Annotated[str, Form()] = "{}",
+    user: dict = Depends(require_user),
 ) -> dict:
+    email = user["email"].strip().lower()
+    name = (user.get("name") or name or email.split("@")[0]).strip()
     if not name.strip() or not email.strip():
         raise HTTPException(status_code=400, detail="Name and email are required.")
     if not files:
@@ -2666,6 +3110,7 @@ def payment_center_admin() -> dict:
         "stripe": {"configured": bool(STRIPE_SECRET_KEY)},
         "paddle": {"configured": bool(PADDLE_API_KEY and PADDLE_PRICE_MAP), "mode": PADDLE_ENV},
         "checkout_available": provider in {"paypal", "stripe", "paddle"} or PAYMENT_TEST_MODE,
+        "production_ready": payment_production_ready(),
         "server_validation": True,
         "idempotent_entitlement": True,
     }
@@ -3045,10 +3490,16 @@ def start_processing(order_id: int) -> dict:
     return {"success": True, "job_id": job_id, "state": "queued", "progress": 0}
 
 
-@app.post("/api/processing-center/jobs/{job_id}/pause", dependencies=[Depends(require_admin)])
-def pause_processing_job(job_id: int) -> dict:
+@app.post("/api/processing-center/jobs/{job_id}/pause")
+def pause_processing_job(job_id: int, user: dict = Depends(require_user)) -> dict:
     with get_db() as db:
-        row = db.execute("SELECT id,state,progress FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+        row = db.execute(
+            """SELECT j.id,j.state,j.progress,j.order_id
+               FROM processing_jobs j
+               JOIN orders o ON o.id=j.order_id
+               WHERE j.id=? AND lower(o.email)=lower(?)""",
+            (job_id, user["email"]),
+        ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Processing job not found.")
         if row["state"] not in {"queued","processing","paused"}:
@@ -3061,10 +3512,16 @@ def pause_processing_job(job_id: int) -> dict:
         db.commit()
     return {"success": True, "state": "paused"}
 
-@app.post("/api/processing-center/jobs/{job_id}/resume", dependencies=[Depends(require_admin)])
-def resume_processing_job(job_id: int) -> dict:
+@app.post("/api/processing-center/jobs/{job_id}/resume")
+def resume_processing_job(job_id: int, user: dict = Depends(require_user)) -> dict:
     with get_db() as db:
-        row = db.execute("SELECT id,state FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+        row = db.execute(
+            """SELECT j.id,j.state,j.order_id
+               FROM processing_jobs j
+               JOIN orders o ON o.id=j.order_id
+               WHERE j.id=? AND lower(o.email)=lower(?)""",
+            (job_id, user["email"]),
+        ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Processing job not found.")
         control = _job_control(job_id)
@@ -3075,10 +3532,16 @@ def resume_processing_job(job_id: int) -> dict:
         db.commit()
     return {"success": True, "state": "processing"}
 
-@app.post("/api/processing-center/jobs/{job_id}/stop", dependencies=[Depends(require_admin)])
-def stop_processing_job(job_id: int) -> dict:
+@app.post("/api/processing-center/jobs/{job_id}/stop")
+def stop_processing_job(job_id: int, user: dict = Depends(require_user)) -> dict:
     with get_db() as db:
-        row = db.execute("SELECT id,state,order_id,progress FROM processing_jobs WHERE id=?", (job_id,)).fetchone()
+        row = db.execute(
+            """SELECT j.id,j.state,j.order_id,j.progress
+               FROM processing_jobs j
+               JOIN orders o ON o.id=j.order_id
+               WHERE j.id=? AND lower(o.email)=lower(?)""",
+            (job_id, user["email"]),
+        ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Processing job not found.")
         if row["state"] in {"completed","partial_completed","failed","cancelled"}:
@@ -3092,8 +3555,12 @@ def stop_processing_job(job_id: int) -> dict:
     return {"success": True, "state": "cancelling"}
 
 @app.post("/api/orders/{order_id}/recover")
-def recover_stalled_order(order_id: int) -> dict:
+def recover_stalled_order(
+    order_id: int,
+    user: dict = Depends(require_user),
+) -> dict:
     with get_db() as db:
+        _owned_order(db, order_id, user)
         row=db.execute("SELECT id,state,progress,updated_at FROM processing_jobs WHERE order_id=? ORDER BY id DESC LIMIT 1",(order_id,)).fetchone()
         if row is None: raise HTTPException(status_code=404,detail="Processing job not found.")
         if row["state"] not in {"queued","processing"}: return {"success":True,"state":row["state"],"already_terminal":True}
@@ -3284,7 +3751,7 @@ def payment_config() -> dict:
     return {
         "provider": provider,
         "configured": provider in {"paddle", "stripe", "paypal"},
-        "production_ready": provider in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE,
+        "production_ready": payment_production_ready(),
         "requires_login": True,
         "checkout_available": provider in {"paddle", "stripe", "paypal"} or (provider == "demo" and PAYMENT_TEST_MODE),
         "provider_label": "Paddle" if provider == "paddle" else ("PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo")),
@@ -3324,8 +3791,11 @@ def wallet(user: dict = Depends(require_user)) -> dict:
 
 
 @app.post("/api/plans/free-activate")
-def activate_free_plan(payload: FreePlanActivate) -> dict:
-    email = payload.customer_email.strip().lower()
+def activate_free_plan(
+    payload: FreePlanActivate,
+    user: dict = Depends(require_user),
+) -> dict:
+    email = user["email"].strip().lower()
     if "@" not in email:
         raise HTTPException(status_code=400, detail="A valid customer email is required.")
     now = utc_now()
@@ -3650,7 +4120,7 @@ def activate_license(license_key: str, device_id: str = Query(...), customer_ema
 def run_enterprise_acceptance() -> dict:
     checks=[]
     def add(cid,name,ok,detail): checks.append({"id":cid,"name":name,"status":"PASS" if ok else "FAIL","detail":detail})
-    add("V28-001","版本信息",APP_VERSION=="29.0.0",f"Backend version {APP_VERSION}")
+    add("V28-001","版本信息",APP_VERSION=="45.0.0",f"Backend version {APP_VERSION}")
     try:
         with get_db() as db:
             tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -3674,6 +4144,273 @@ def run_enterprise_acceptance() -> dict:
     passed=sum(1 for x in checks if x["status"]=="PASS")
     failed=len(checks)-passed
     return {"version":APP_VERSION,"generated_at":utc_now(),"total":len(checks),"passed":passed,"failed":failed,"result":"PASS" if failed==0 else "FAIL","checks":checks}
+
+
+def _admin_user_row(db: sqlite3.Connection, user_id: int) -> dict:
+    row = db.execute(
+        """
+        SELECT
+            u.id, u.name, u.email, u.role, u.status AS account_status, u.email_verified,
+            u.created_at, u.last_login_at,
+            COALESCE(w.plan_id, 'free') AS plan,
+            COALESCE(w.subscription_credits, 0)
+              + COALESCE(w.purchased_credits, 0)
+              + COALESCE(w.bonus_credits, 0) AS credits,
+            COALESCE((SELECT COUNT(*) FROM orders o WHERE LOWER(o.email)=LOWER(u.email)), 0) AS documents_count,
+            COALESCE((SELECT COUNT(*) FROM payment_orders p WHERE LOWER(p.customer_email)=LOWER(u.email)), 0) AS payments_count
+        FROM users u
+        LEFT JOIN customer_wallets w ON LOWER(w.customer_email)=LOWER(u.email)
+        WHERE u.id=?
+        """,
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    item = dict(row)
+    item["email_verified"] = bool(item["email_verified"] or 0)
+    account_status = str(item.pop("account_status") or "active")
+    item["status"] = "pending_verification" if account_status == "active" and not item["email_verified"] else account_status
+    item["credits"] = int(item.get("credits") or 0)
+    item["documents_count"] = int(item.get("documents_count") or 0)
+    item["payments_count"] = int(item.get("payments_count") or 0)
+    return item
+
+
+@app.get("/api/admin/monitoring", dependencies=[Depends(require_admin)])
+def admin_monitoring() -> dict:
+    today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_epoch = int(time.time())
+    with get_db() as db:
+        users_total = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        users_today = db.execute("SELECT COUNT(*) FROM users WHERE created_at LIKE ?", (today_prefix + "%",)).fetchone()[0]
+        orders_total = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        queued_jobs = db.execute(
+            "SELECT COUNT(*) FROM processing_jobs WHERE LOWER(state) IN ('queued','processing','paused','cancelling')"
+        ).fetchone()[0]
+        online_users = db.execute("SELECT COUNT(DISTINCT user_id) FROM user_sessions WHERE expires_at>?", (now_epoch,)).fetchone()[0]
+        processing_jobs = db.execute("SELECT COUNT(*) FROM processing_jobs").fetchone()[0]
+        db.execute("SELECT 1").fetchone()
+    return {
+        "api_status": "healthy",
+        "database_status": "healthy",
+        "users_total": int(users_total),
+        "users_today": int(users_today),
+        "orders_total": int(orders_total),
+        "online_users": int(online_users),
+        "queued_jobs": int(queued_jobs),
+        "processing_jobs": int(processing_jobs),
+        "generated_at": utc_now(),
+    }
+
+
+@app.get("/api/admin/users", dependencies=[Depends(require_admin)])
+def admin_users(
+    query: str = Query(default="", max_length=200),
+    status: str = Query(default="all", max_length=40),
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    conditions: list[str] = []
+    params: list[object] = []
+    search = query.strip().lower()
+    if search:
+        wildcard = f"%{search}%"
+        if search.isdigit():
+            conditions.append("(LOWER(u.name) LIKE ? OR LOWER(u.email) LIKE ? OR u.id=?)")
+            params.extend([wildcard, wildcard, int(search)])
+        else:
+            conditions.append("(LOWER(u.name) LIKE ? OR LOWER(u.email) LIKE ?)")
+            params.extend([wildcard, wildcard])
+    normalized_status = status.strip().lower()
+    if normalized_status == "pending_verification":
+        conditions.append("u.status='active' AND u.email_verified=0")
+    elif normalized_status in {"active", "disabled"}:
+        conditions.append("u.status=?")
+        params.append(normalized_status)
+        if normalized_status == "active":
+            conditions.append("u.email_verified=1")
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+    with get_db() as db:
+        total = db.execute(f"SELECT COUNT(*) FROM users u{where}", tuple(params)).fetchone()[0]
+        ids = [row[0] for row in db.execute(
+            f"SELECT u.id FROM users u{where} ORDER BY u.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [limit, offset]),
+        ).fetchall()]
+        users = [_admin_user_row(db, user_id) for user_id in ids]
+    return {"users": users, "total": int(total), "limit": limit, "offset": offset}
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(
+    user_id: int,
+    payload: AdminUserUpdate,
+    request: Request,
+    actor: dict = Depends(require_admin),
+) -> dict:
+    if payload.status is None and payload.plan is None and payload.credits is None:
+        raise HTTPException(status_code=400, detail="No user fields were provided.")
+
+    def operation(db: sqlite3.Connection) -> dict:
+        user = db.execute("SELECT id,email,role,status FROM users WHERE id=?", (user_id,)).fetchone()
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        before = _admin_user_row(db, user_id)
+        if str(user["role"] or "").lower() == "owner" and payload.status == "disabled":
+            raise HTTPException(status_code=422, detail="The Owner account cannot be disabled.")
+        now = utc_now()
+        email = str(user["email"]).strip().lower()
+        if payload.status is not None:
+            db.execute("UPDATE users SET status=? WHERE id=?", (payload.status, user_id))
+            if payload.status == "disabled":
+                db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+        if payload.plan is not None or payload.credits is not None:
+            db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
+        if payload.plan is not None:
+            plan = payload.plan.strip().lower()
+            allowed_plans = {"free", "starter", "professional", "business", "enterprise"}
+            if plan not in allowed_plans and plan not in PAYMENT_PLANS:
+                raise HTTPException(status_code=422, detail="Unsupported plan.")
+            db.execute("UPDATE customer_wallets SET plan_id=?,plan_status='active',updated_at=? WHERE customer_email=?", (plan, now, email))
+        if payload.credits is not None:
+            previous = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+            previous_total = int(previous["total"] or 0)
+            target = int(payload.credits)
+            delta = target - previous_total
+            db.execute("UPDATE customer_wallets SET subscription_credits=0,purchased_credits=0,bonus_credits=?,updated_at=? WHERE customer_email=?", (target, now, email))
+            if delta:
+                db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email, "adjustment", "bonus", delta, target, f"ADMIN-USER-{user_id}", payload.reason, now))
+        after = _admin_user_row(db, user_id)
+        db.execute(
+            "INSERT INTO admin_audit_logs (actor_user_id,actor_email,actor_role,action,target_type,target_id,before_json,after_json,reason,ip_address,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (actor.get("id"), str(actor.get("email") or ""), str(actor.get("role") or "admin"), "user.update", "user", str(user_id), json.dumps(before, ensure_ascii=False, default=str), json.dumps(after, ensure_ascii=False, default=str), payload.reason.strip(), request.client.host if request.client else "", now),
+        )
+        return after
+
+    return {"success": True, "user": run_db_write(operation)}
+
+
+def _ensure_default_tenants(db: sqlite3.Connection) -> None:
+    now = utc_now()
+    users = db.execute("SELECT id,name,email,status,created_at,last_login_at FROM users ORDER BY id").fetchall()
+    for user in users:
+        existing = db.execute("SELECT id FROM tenants WHERE owner_user_id=?", (user["id"],)).fetchone()
+        if existing:
+            db.execute("INSERT OR IGNORE INTO tenant_members (tenant_id,user_id,role,status,created_at) VALUES (?,?,?,?,?)", (existing["id"], user["id"], "owner", user["status"] or "active", now))
+            continue
+        tenant_key = f"TEN-{int(user['id']):06d}"
+        display = str(user["name"] or user["email"].split("@", 1)[0]).strip()
+        company_name = f"{display} Workspace"
+        cur = db.execute(
+            "INSERT INTO tenants (tenant_key,company_name,owner_user_id,owner_email,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (tenant_key, company_name, user["id"], str(user["email"]).lower(), "active", user["created_at"] or now, now),
+        )
+        db.execute("INSERT OR IGNORE INTO tenant_members (tenant_id,user_id,role,status,created_at) VALUES (?,?,?,?,?)", (cur.lastrowid, user["id"], "owner", user["status"] or "active", now))
+
+
+def _tenant_row(db: sqlite3.Connection, tenant_id: int) -> dict:
+    row = db.execute(
+        """
+        SELECT t.*, u.name AS owner_name, u.last_login_at,
+               COUNT(DISTINCT tm.user_id) AS member_count,
+               COALESCE(w.plan_id,'free') AS plan,
+               COALESCE(w.subscription_credits+w.purchased_credits+w.bonus_credits,0) AS credits,
+               COUNT(DISTINCT o.id) AS documents_count
+        FROM tenants t
+        LEFT JOIN users u ON u.id=t.owner_user_id
+        LEFT JOIN tenant_members tm ON tm.tenant_id=t.id AND tm.status!='disabled'
+        LEFT JOIN customer_wallets w ON LOWER(w.customer_email)=LOWER(t.owner_email)
+        LEFT JOIN orders o ON LOWER(o.email)=LOWER(t.owner_email)
+        WHERE t.id=?
+        GROUP BY t.id
+        """, (tenant_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+    item = dict(row)
+    members = [dict(x) for x in db.execute(
+        """SELECT u.id,u.name,u.email,tm.role,tm.status,u.last_login_at
+             FROM tenant_members tm JOIN users u ON u.id=tm.user_id
+             WHERE tm.tenant_id=? ORDER BY CASE tm.role WHEN 'owner' THEN 0 ELSE 1 END,u.id""", (tenant_id,)
+    ).fetchall()]
+    item["members"] = members
+    return item
+
+
+@app.get("/api/admin/tenants", dependencies=[Depends(require_admin)])
+def admin_tenants(limit: int = Query(default=500, ge=1, le=1000), offset: int = Query(default=0, ge=0)) -> dict:
+    def operation(db: sqlite3.Connection) -> dict:
+        _ensure_default_tenants(db)
+        ids = [r[0] for r in db.execute("SELECT id FROM tenants ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()]
+        tenants = [_tenant_row(db, tenant_id) for tenant_id in ids]
+        summary = {"total": len(tenants), "free": 0, "professional": 0, "enterprise": 0}
+        for tenant in tenants:
+            plan = str(tenant.get("plan") or "free").lower()
+            if plan.startswith("professional"):
+                summary["professional"] += 1
+            elif plan == "enterprise":
+                summary["enterprise"] += 1
+            elif plan == "free":
+                summary["free"] += 1
+        return {"tenants": tenants, "summary": summary, "total": len(ids), "limit": limit, "offset": offset}
+    return run_db_write(operation)
+
+
+@app.patch("/api/admin/tenants/{tenant_id}")
+def admin_update_tenant(tenant_id: int, payload: AdminTenantUpdate, request: Request, actor: dict = Depends(require_admin)) -> dict:
+    def operation(db: sqlite3.Connection) -> dict:
+        _ensure_default_tenants(db)
+        before = _tenant_row(db, tenant_id)
+        now = utc_now()
+        updates, params = [], []
+        for field in ("company_name", "industry", "country", "contact_name", "contact_phone", "status"):
+            value = getattr(payload, field)
+            if value is not None:
+                updates.append(f"{field}=?")
+                params.append(value.strip() if isinstance(value, str) else value)
+        if updates:
+            updates.append("updated_at=?")
+            params.append(now)
+            params.append(tenant_id)
+            db.execute(f"UPDATE tenants SET {', '.join(updates)} WHERE id=?", tuple(params))
+        owner_email = str(before["owner_email"]).lower()
+        if payload.plan is not None or payload.credits is not None:
+            db.execute("INSERT OR IGNORE INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (owner_email, now))
+        if payload.plan is not None:
+            plan = payload.plan.strip().lower()
+            allowed = {"free", "starter", "professional", "business", "enterprise"} | set(PAYMENT_PLANS)
+            if plan not in allowed:
+                raise HTTPException(status_code=422, detail="Unsupported plan.")
+            db.execute("UPDATE customer_wallets SET plan_id=?,plan_status='active',updated_at=? WHERE customer_email=?", (plan, now, owner_email))
+        if payload.credits is not None:
+            current = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (owner_email,)).fetchone()
+            old_total = int(current["total"] or 0)
+            target = int(payload.credits)
+            delta = target - old_total
+            db.execute("UPDATE customer_wallets SET subscription_credits=0,purchased_credits=0,bonus_credits=?,updated_at=? WHERE customer_email=?", (target, now, owner_email))
+            if delta:
+                db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (owner_email,"adjustment","bonus",delta,target,f"ADMIN-TENANT-{tenant_id}",payload.reason.strip(),now))
+        after = _tenant_row(db, tenant_id)
+        db.execute(
+            "INSERT INTO admin_audit_logs (actor_user_id,actor_email,actor_role,action,target_type,target_id,before_json,after_json,reason,ip_address,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (actor.get("id"), str(actor.get("email") or ""), str(actor.get("role") or "admin"), "tenant.update", "tenant", str(tenant_id), json.dumps(before, ensure_ascii=False, default=str), json.dumps(after, ensure_ascii=False, default=str), payload.reason.strip(), request.client.host if request.client else "", now),
+        )
+        return {"success": True, "tenant": after}
+    return run_db_write(operation)
+
+
+@app.get("/api/admin/audit-logs")
+def admin_audit_logs(
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    actor: dict = Depends(require_admin),
+) -> dict:
+    with get_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM admin_audit_logs").fetchone()[0]
+        rows = [dict(row) for row in db.execute(
+            "SELECT id,actor_user_id,actor_email,actor_role,action,target_type,target_id,reason,ip_address,created_at FROM admin_audit_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()]
+    return {"logs": rows, "total": int(total), "limit": limit, "offset": offset}
 
 
 @app.post("/api/admin/wallet-adjustment", dependencies=[Depends(require_admin)])

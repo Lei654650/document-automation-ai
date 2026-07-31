@@ -1,0 +1,88 @@
+/* V45 shared Select contract: one height, one focus state, native adaptive opening and scrolling. */
+:where(.app-shell) select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 40px 0 12px;
+  border: 1px solid #dbe2ed;
+  border-radius: 10px;
+  outline: none;
+  background-color: #fff;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #718097 50%),
+    linear-gradient(135deg, #718097 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) 18px,
+    calc(100% - 12px) 18px;
+  background-repeat: no-repeat;
+  background-size: 5px 5px, 5px 5px;
+  color: #26334a;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 40px;
+  appearance: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+:where(.app-shell) select:hover {
+  border-color: #aebbea;
+}
+
+:where(.app-shell) select:focus-visible {
+  border-color: #3157ff;
+  box-shadow: 0 0 0 3px rgba(49, 87, 255, 0.12);
+}
+
+:where(.app-shell) select:disabled {
+  cursor: not-allowed;
+  background-color: #f2f4f8;
+  color: #8a94a6;
+}
+
+:where(.app-shell) select option {
+  min-height: 36px;
+  padding: 8px 10px;
+  background: #fff;
+  color: #27344a;
+}
+
+/* The operating-system menu automatically scrolls and opens upward near the viewport bottom. */
+.settings-save-v333 {
+  z-index: 20;
+}
+
+/* Language has one Workspace-level entry. Retained values remain compatible with saved profiles. */
+.settings-header-actions-v381 > .settings-icon-btn:nth-child(2) {
+  display: none !important;
+}
+
+.settings-sidebar-v337 > section:nth-child(2) > button:first-of-type {
+  font-size: 0;
+}
+
+.settings-sidebar-v337 > section:nth-child(2) > button:first-of-type::after {
+  content: 'Default processing template';
+  font-size: 11px;
+}
+
+html[lang^='zh'] .settings-sidebar-v337 > section:nth-child(2) > button:first-of-type::after {
+  content: '默认处理模板';
+}
+
+html[lang^='vi'] .settings-sidebar-v337 > section:nth-child(2) > button:first-of-type::after {
+  content: 'Mẫu xử lý mặc định';
+}
+
+/* Dashboard tools are provided by the shared Workspace top navigation. */
+.ew-top-v51 .ew-top-actions .ew-header-tool,
+.ew-top-v51 .ew-top-actions .ew-avatar {
+  display: none;
+}
+
+@media (max-width: 620px) {
+  :where(.app-shell) select {
+    min-height: 44px;
+    font-size: 12px;
+  }
+}

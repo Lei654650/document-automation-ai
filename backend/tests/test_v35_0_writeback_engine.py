@@ -42,7 +42,7 @@ def test_primary_xlsx_publish_does_not_use_replace(tmp_path: Path, monkeypatch) 
     with ZipFile(output, "r") as archive:
         assert archive.testzip() is None
     wb2 = load_workbook(output)
-    assert "Khoi dong" in wb2.active["A1"].value
+    assert "Khởi động" in wb2.active["A1"].value
     wb2.close()
 
 

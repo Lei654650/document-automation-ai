@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import pytest
 from openpyxl import load_workbook
 from app.engines.job_engine import _reconstruct_plc_configuration, _translate_reconstructed_xlsx
 
@@ -7,8 +9,19 @@ class FakeClient:
     def translate_many(self, texts):
         return [f'Bản dịch {i+1}' for i,_ in enumerate(texts)]
 
+def _fixture(name: str) -> Path:
+    candidates = [
+        Path(os.getenv("DAI_ACCEPTANCE_DATA", "")) / name,
+        Path(__file__).resolve().parents[2] / "samples" / name,
+        Path("/mnt/data") / name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    pytest.skip(f"Optional customer acceptance fixture is unavailable: {name}")
+
 def test_v213_reconstruction_has_adjacent_bilingual_columns(tmp_path: Path):
-    source=Path('/mnt/data/st07.xlsx')
+    source=_fixture('st07.xlsx')
     out=tmp_path/'reconstructed.xlsx'
     stats=_reconstruct_plc_configuration(source,out)
     assert stats and stats['terminology_version']=='21.3'
@@ -23,7 +36,7 @@ def test_v213_reconstruction_has_adjacent_bilingual_columns(tmp_path: Path):
     wb.close()
 
 def test_v213_translation_fills_unknown_target_cells(tmp_path: Path):
-    source=Path('/mnt/data/st07.xlsx')
+    source=_fixture('st07.xlsx')
     reconstructed=tmp_path/'reconstructed.xlsx'
     final=tmp_path/'final.xlsx'
     _reconstruct_plc_configuration(source,reconstructed)

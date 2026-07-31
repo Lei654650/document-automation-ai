@@ -1,0 +1,251 @@
+.workspace-global-topbar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 1200;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0 24px;
+  border-bottom: 1px solid #e7ebf2;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 30px rgba(28, 42, 73, 0.06);
+  backdrop-filter: blur(18px);
+}
+
+.workspace-global-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #101a2d;
+  text-align: left;
+}
+
+.workspace-global-brand > span {
+  display: grid;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 11px;
+  background: linear-gradient(135deg, #3157ff, #7857e8);
+  box-shadow: 0 8px 22px rgba(49, 87, 255, 0.24);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.workspace-global-brand div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workspace-global-brand b {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-global-brand small {
+  color: #7b879b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.workspace-global-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-global-actions button {
+  cursor: pointer;
+}
+
+.workspace-global-text-action,
+.workspace-global-primary,
+.workspace-global-icon,
+.workspace-global-language,
+.workspace-global-avatar {
+  min-height: 40px;
+  border: 1px solid #e1e6ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #526078;
+}
+
+.workspace-global-text-action,
+.workspace-global-primary,
+.workspace-global-language {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workspace-global-primary {
+  border-color: #3157ff;
+  background: #3157ff;
+  color: #fff;
+  box-shadow: 0 9px 22px rgba(49, 87, 255, 0.2);
+}
+
+.workspace-global-text-action svg,
+.workspace-global-primary svg,
+.workspace-global-icon svg {
+  width: 16px;
+}
+
+.workspace-global-icon,
+.workspace-global-avatar {
+  display: grid;
+  width: 40px;
+  padding: 0;
+  place-items: center;
+}
+
+.workspace-global-avatar {
+  border: 0;
+  background: #101d36;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.workspace-language-menu {
+  position: relative;
+}
+
+.workspace-global-language svg {
+  width: 16px;
+}
+
+.workspace-global-language svg:last-child {
+  width: 13px;
+  transition: transform 0.18s ease;
+}
+
+.workspace-global-language svg.open {
+  transform: rotate(180deg);
+}
+
+.workspace-language-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 288px;
+  overflow: hidden;
+  border: 1px solid #dfe5ef;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 22px 55px rgba(24, 38, 69, 0.18);
+}
+
+.workspace-language-popover header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 14px 16px 11px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.workspace-language-popover header b {
+  font-size: 12px;
+}
+
+.workspace-language-popover header small {
+  color: #8791a3;
+  font-size: 10px;
+}
+
+.workspace-language-popover > div {
+  display: grid;
+  max-height: min(360px, calc(100vh - 126px));
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.workspace-language-popover button {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #3f4c63;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.workspace-language-popover button:hover,
+.workspace-language-popover button.active {
+  background: #eef3ff;
+  color: #3157d8;
+}
+
+.workspace-language-popover button span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.workspace-language-popover button i {
+  font-style: normal;
+}
+
+.workspace-language-popover button svg {
+  width: 14px;
+}
+
+.workspace-global-topbar + main,
+.workspace-global-topbar + div {
+  padding-top: 72px;
+}
+
+@media (max-width: 760px) {
+  .workspace-global-topbar {
+    height: 64px;
+    padding: 0 12px;
+  }
+
+  .workspace-global-brand div,
+  .workspace-global-text-action,
+  .workspace-global-icon {
+    display: none;
+  }
+
+  .workspace-global-primary,
+  .workspace-global-language {
+    min-height: 38px;
+    padding: 0 10px;
+  }
+
+  .workspace-language-popover {
+    position: fixed;
+    top: 68px;
+    right: 10px;
+    left: 10px;
+    width: auto;
+  }
+
+  .workspace-global-topbar + main,
+  .workspace-global-topbar + div {
+    padding-top: 64px;
+  }
+}

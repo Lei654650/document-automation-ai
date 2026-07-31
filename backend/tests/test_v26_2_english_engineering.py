@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import pytest
 from openpyxl import load_workbook
 from app.engines.job_engine import _translate_reconstructed_xlsx, _automation_en_fallback, _polish_automation_en
 
@@ -10,13 +12,24 @@ class EnglishClient:
     def invalidate(self, texts):
         return None
 
+def _fixture(name: str) -> Path:
+    candidates = [
+        Path(os.getenv("DAI_ACCEPTANCE_DATA", "")) / name,
+        Path(__file__).resolve().parents[2] / "samples" / name,
+        Path("/mnt/data") / name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    pytest.skip(f"Optional customer acceptance fixture is unavailable: {name}")
+
 def test_english_fallback_uses_engineering_terms():
     assert _automation_en_fallback('载具右出料阻挡降位') == 'Pallet Right Outfeed Stopper Lowered Position'
     assert 'Unloading' in _automation_en_fallback('小弹簧下料下层感应')
     assert _polish_automation_en('大弹簧出盘气缸回位','Large spring discharge cylinder return') == 'Large Spring Tray Outfeed Cylinder Retracted Position'
 
 def test_reconstructed_english_overwrites_vietnamese_columns(tmp_path):
-    source=Path('/mnt/data/st08_zh-en.xlsx')
+    source=_fixture('st08_zh-en.xlsx')
     output=tmp_path/'fixed.xlsx'
     count=_translate_reconstructed_xlsx(source,output,EnglishClient(),None)
     assert count and count > 0

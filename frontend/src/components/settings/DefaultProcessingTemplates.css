@@ -1,0 +1,192 @@
+.default-processing-templates-v45 {
+  display: grid;
+  gap: 24px;
+}
+
+.default-processing-templates-v45 > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22px;
+}
+
+.default-processing-templates-v45 > header > div > span {
+  color: #3157d8;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.13em;
+}
+
+.default-processing-templates-v45 > header h2 {
+  margin: 8px 0 7px;
+  font-size: 21px;
+}
+
+.default-processing-templates-v45 > header p {
+  margin: 0;
+  color: #748096;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.default-processing-templates-v45 > header > svg {
+  flex: 0 0 42px;
+  width: 42px;
+  height: 42px;
+  padding: 10px;
+  border-radius: 12px;
+  background: #edf3ff;
+  color: #3157d8;
+}
+
+.processing-template-grid-v45 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.processing-template-grid-v45 > button {
+  position: relative;
+  display: grid;
+  min-height: 116px;
+  grid-template-columns: 42px 1fr;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #e2e7ef;
+  border-radius: 14px;
+  background: #fff;
+  color: #2f3b50;
+  text-align: left;
+  transition: 0.18s ease;
+}
+
+.processing-template-grid-v45 > button:hover {
+  border-color: #9fb1f8;
+  transform: translateY(-1px);
+}
+
+.processing-template-grid-v45 > button.active {
+  border-color: #3157ff;
+  background: linear-gradient(145deg, #f7f9ff, #edf3ff);
+  box-shadow: 0 0 0 2px rgba(49, 87, 255, 0.08);
+}
+
+.processing-template-icon-v45 {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 11px;
+  background: #f0f3f8;
+  color: #59677e;
+}
+
+.active .processing-template-icon-v45 {
+  background: #3157ff;
+  color: #fff;
+}
+
+.processing-template-icon-v45 svg {
+  width: 20px;
+}
+
+.processing-template-grid-v45 > button > span:nth-child(2) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.processing-template-grid-v45 b {
+  font-size: 13px;
+}
+
+.processing-template-grid-v45 small {
+  color: #788397;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.processing-template-grid-v45 em {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #e8f8f1;
+  color: #11815c;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.processing-template-grid-v45 > button > i {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: #3157ff;
+  color: #fff;
+}
+
+.processing-template-grid-v45 > button > i svg {
+  width: 12px;
+}
+
+.processing-template-details-v45 {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #e5eaf2;
+  border-radius: 14px;
+  background: #f8faff;
+}
+
+.processing-template-details-v45 > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.processing-template-details-v45 > div:first-child b {
+  font-size: 13px;
+}
+
+.processing-template-details-v45 > div:first-child small {
+  color: #7a869a;
+  font-size: 10px;
+}
+
+.processing-template-fields-v45 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.processing-template-fields-v45 label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.processing-template-fields-v45 label > span {
+  color: #536177;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+body.v45-processing-template-active .settings-content > .settings-panel-card:not(.default-processing-templates-v45) {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .processing-template-grid-v45,
+  .processing-template-fields-v45 {
+    grid-template-columns: 1fr;
+  }
+}

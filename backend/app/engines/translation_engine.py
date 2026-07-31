@@ -383,7 +383,7 @@ _AUTOMATION_GLOSSARY_ZH_VI = {
     "压力传感器名称": "Tên cảm biến áp suất",
     "位移传感器名称": "Tên cảm biến dịch chuyển",
     "电批名称": "Tên súng siết vít điện",
-    "气缸IO输入_原点": "I/O đầu vào xi lanh - vị trí gốc",
+    "气缸IO输入_原点": "I/O đầu vào xi lanh - Vị trí gốc",
     "备用": "Dự phòng",
     "单步": "Chạy từng bước",
     "载具左进料阻挡无料延时": "Thời gian trễ không có vật liệu tại cơ cấu chặn cấp liệu bên trái của đồ gá",

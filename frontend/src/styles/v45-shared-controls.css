@@ -1,0 +1,130 @@
+/* V45 shared form-control contract. Native selects are retained for untouched modules. */
+:where(.app-shell) select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 40px 0 12px;
+  border: 1px solid #dbe2ed;
+  border-radius: 10px;
+  outline: none;
+  background-color: #fff;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #718097 50%),
+    linear-gradient(135deg, #718097 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) 18px,
+    calc(100% - 12px) 18px;
+  background-repeat: no-repeat;
+  background-size: 5px 5px, 5px 5px;
+  color: #26334a;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 40px;
+  appearance: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+:where(.app-shell) select:hover {
+  border-color: #aebbea;
+}
+
+:where(.app-shell) select:focus-visible {
+  border-color: #3157ff;
+  box-shadow: 0 0 0 3px rgba(49, 87, 255, 0.12);
+}
+
+:where(.app-shell) select:disabled {
+  cursor: not-allowed;
+  background-color: #f2f4f8;
+  color: #8a94a6;
+}
+
+/* Keep the renamed settings entry on one line in every supported interface language. */
+.settings-v333-shell {
+  grid-template-columns: 274px minmax(0, 1fr) !important;
+  align-items: stretch !important;
+  margin-bottom: 24px !important;
+}
+
+.settings-sidebar-v337 > section:nth-child(2) > button:first-of-type {
+  font-size: 11px !important;
+  white-space: nowrap;
+}
+
+.settings-sidebar-v337 > section:nth-child(2) > button:first-of-type::after {
+  content: none !important;
+}
+
+/* Settings is one continuous white workspace; the save action belongs to the card. */
+.settings-v333-content {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.settings-content-v333 {
+  display: flex !important;
+  min-height: calc(100vh - 188px) !important;
+  flex-direction: column !important;
+  overflow: visible !important;
+  border: 1px solid #e1e7f0;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(42, 59, 92, 0.07);
+}
+
+.settings-content-v333 > .settings-panel-card {
+  flex: 1 1 auto;
+  min-height: 0 !important;
+  border: 0 !important;
+  border-radius: 20px 20px 0 0 !important;
+  box-shadow: none !important;
+}
+
+.settings-content-v333 > .settings-save-v333,
+.provider-only-v52 .settings-content-v333 > .settings-save-v333 {
+  position: static !important;
+  z-index: 2;
+  order: 99;
+  bottom: auto !important;
+  margin: 0 !important;
+  padding: 18px 28px !important;
+  border-top: 1px solid #edf0f5;
+  border-radius: 0 0 20px 20px;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+/* The duplicated global Workspace bar was removed; page headers now sit closer to content. */
+.settings-v333-top {
+  min-height: 78px !important;
+}
+
+@media (max-width: 980px) {
+  .settings-v333-shell {
+    grid-template-columns: 250px minmax(0, 1fr) !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .settings-v333-shell {
+    grid-template-columns: 1fr !important;
+  }
+
+  .settings-content-v333 {
+    min-height: 620px !important;
+  }
+}
+
+@media (max-width: 620px) {
+  :where(.app-shell) select {
+    min-height: 44px;
+    font-size: 12px;
+  }
+
+  .settings-content-v333 > .settings-save-v333,
+  .provider-only-v52 .settings-content-v333 > .settings-save-v333 {
+    padding: 14px 16px !important;
+  }
+}

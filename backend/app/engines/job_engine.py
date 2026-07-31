@@ -288,6 +288,11 @@ def _update(callback: ProgressCallback | None, progress: int, step: str, message
         _PROGRESS_LATEST[key] = (callback, progress, step, message)
     if should_submit:
         _PROGRESS_EXECUTOR.submit(_dispatch_progress, key)
+    if progress >= 100:
+        # A terminal event must be observable before run_local_job returns.
+        # Queue a barrier behind the single dispatcher so an older coalesced
+        # event can never overwrite 100% in the UI after completion.
+        _PROGRESS_EXECUTOR.submit(lambda: None).result(timeout=10)
 
 
 def _needs_multiline_layout(layout: str, changed_values: Iterable[str]) -> bool:
@@ -724,14 +729,23 @@ def _clean_translation_candidate(source: str, translated: str) -> str:
 def _resolve_bilingual_layout(layout: str | None, file_type: str = "xlsx") -> str:
     """Normalize UI/API layout values to a stable processing rule."""
     value = str(layout or "auto").strip().lower().replace("_", "-")
-    aliases = {"horizontal": "inline", "same-line": "inline", "side-by-side": "columns", "target-only": "target-only"}
+    aliases = {
+        "horizontal": "inline",
+        "same-line": "inline",
+        "side-by-side": "columns",
+        "single-language": "target-only",
+        "target-only": "target-only",
+        "bilingual-paired": "inline",
+        "publishing": "vertical",
+        "industrial": "columns",
+    }
     value = aliases.get(value, value)
     if value == "auto":
         return "inline" if file_type in {"xlsx", "xls", "csv", "table"} else "vertical"
     return value if value in {"inline", "vertical", "columns", "target-only"} else "inline"
 
 
-def _normalize_bilingual_value(source: str, translated: str, layout: str = "vertical", options: dict[str, Any] | None = None) -> str:
+def _normalize_bilingual_value(source: str, translated: str, layout: str | None = None, options: dict[str, Any] | None = None) -> str:
     """Create bilingual content while preserving PLC/HMI identifiers."""
     existing = _split_existing_bilingual_text(source)
     source_side = existing[0] if existing else str(source or "").strip()
@@ -742,18 +756,20 @@ def _normalize_bilingual_value(source: str, translated: str, layout: str = "vert
         candidate = existing[1].strip()
     body = body.replace("|", " ").strip()
     source_clean = " ".join(part for part in (prefix, body) if part).strip()
-    mode = _resolve_bilingual_layout(layout, "xlsx")
+    legacy_auto = layout is None
+    mode = _resolve_bilingual_layout(layout or "vertical", "xlsx")
     options = options or {}
     if not candidate:
         return source_clean
+    if legacy_auto and not prefix:
+        return f"{body} —— {candidate}" if body else candidate
     if mode == "target-only":
         return " ".join(part for part in (prefix, candidate) if part).strip()
     if mode == "vertical":
-        source_line = source_clean
-        target_line = " ".join(part for part in (prefix, candidate) if part).strip()
+        lines = [part for part in (prefix, body, candidate) if part]
         if str(options.get("vertical_order") or "source-first") == "target-first":
-            return f"{target_line}\n{source_line}"
-        return f"{source_line}\n{target_line}"
+            lines = [candidate, *[part for part in (prefix, body) if part]]
+        return "\n".join(lines)
     if mode == "columns":
         return " ".join(part for part in (prefix, candidate) if part).strip()
     inline_style = str(options.get("inline_style") or "dash")
@@ -1757,7 +1773,7 @@ def _translate_xlsx(source: Path, destination: Path, client: TranslationClient, 
     _debug_step(source.name, "delivery_validation", "FINISHED", step_started)
     perf.mark("delivery_validation")
     _debug_step(source.name, "translate_xlsx", "FINISHED", changed=changed)
-    _update(callback, 80, "translation", f"Excel 原位翻译完成；PLC 编号已保护，双语排版为 {bilingual_layout}；缓存命中 {getattr(client, 'persistent_cache_hits', 0)}；性能：{perf.summary()}")
+    _update(callback, 80, "translation", f"Excel 原位翻译完成；PLC 编号已保护，双语排版为 {bilingual_layout}；缓存命中 {getattr(client, 'persistent_cache_hits', 0)}；约剩余 0 秒；性能：{perf.summary()}")
     return changed
 
 
@@ -3012,7 +3028,7 @@ _HMI_EXACT_ZH_VI = {
     '光源触发关闭延时':'Thời gian trễ tắt kích hoạt nguồn sáng',
     '相机触发间隔':'Khoảng thời gian kích hoạt camera','未连接':'Chưa kết nối','已连接':'Đã kết nối',
     '二维码':'Mã QR','MES软件':'Phần mềm MES','目标位置':'Vị trí mục tiêu',
-    '报警':'Cảnh báo','工位':'Trạm','序号':'STT','初始化':'Khởi tạo',
+    '急停报警':'Báo động dừng khẩn cấp','报警':'Cảnh báo','工位':'Trạm','序号':'STT','初始化':'Khởi tạo',
     '上升':'Nâng lên','下降':'Hạ xuống','伸出':'Đưa ra','缩回':'Thu về',
     '原位':'Vị trí gốc','动位':'Vị trí tác động','清零':'Đặt về 0',
 }

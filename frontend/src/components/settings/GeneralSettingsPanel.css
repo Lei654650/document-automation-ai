@@ -1,0 +1,147 @@
+.general-settings-v45 {
+  display: grid;
+  gap: 22px;
+}
+
+.general-settings-v45 > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.general-settings-v45 > header span {
+  color: #3157d8;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .13em;
+}
+
+.general-settings-v45 > header h2 {
+  margin: 7px 0 6px;
+  font-size: 22px;
+}
+
+.general-settings-v45 > header p {
+  margin: 0;
+  color: #748096;
+  font-size: 11px;
+}
+
+.general-settings-v45 > header > svg {
+  width: 42px;
+  height: 42px;
+  padding: 10px;
+  border-radius: 12px;
+  background: #edf3ff;
+  color: #3157d8;
+}
+
+.general-language-card-v45 {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid #e2e7ef;
+  border-radius: 15px;
+  background: #f9fbff;
+}
+
+.general-language-title-v45 {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.general-language-title-v45 > svg {
+  width: 38px;
+  height: 38px;
+  padding: 9px;
+  border-radius: 10px;
+  background: #fff;
+  color: #3157d8;
+  box-shadow: 0 5px 16px rgba(40, 72, 145, .08);
+}
+
+.general-language-title-v45 > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.general-language-title-v45 b {
+  font-size: 13px;
+}
+
+.general-language-title-v45 small {
+  color: #7c889a;
+  font-size: 10px;
+}
+
+.general-language-options-v45 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.general-language-options-v45 > button {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 14px;
+  border: 1px solid #dfe5ee;
+  border-radius: 12px;
+  background: #fff;
+  color: #41506a;
+}
+
+.general-language-options-v45 > button.active {
+  border-color: #3157ff;
+  background: #edf3ff;
+  color: #3157d8;
+  box-shadow: 0 0 0 2px rgba(49, 87, 255, .08);
+}
+
+.general-language-options-v45 > button > span {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.general-language-options-v45 i {
+  font-size: 19px;
+  font-style: normal;
+}
+
+.general-language-options-v45 svg {
+  width: 16px;
+}
+
+.general-language-note-v45 {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #eef3ff;
+  color: #53627c;
+}
+
+.general-language-note-v45 svg {
+  flex: 0 0 auto;
+  width: 16px;
+  color: #3157d8;
+}
+
+.general-language-note-v45 p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .general-language-options-v45 {
+    grid-template-columns: 1fr;
+  }
+}
