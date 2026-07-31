@@ -542,6 +542,36 @@ class AITranslationSettingsUpdate(BaseModel):
     clear_api_key: bool = False
 
 
+class ProviderTestRequest(BaseModel):
+    provider: Literal["deepseek", "openai"]
+    target_language: str = "zh"
+
+
+_OPENAI_PLANS = {"business_monthly", "business_yearly", "enterprise"}
+
+
+def _provider_entitlement(db: sqlite3.Connection, email: str, translation: dict) -> dict:
+    wallet = db.execute(
+        "SELECT plan_id,plan_status FROM customer_wallets WHERE LOWER(customer_email)=LOWER(?)",
+        (email.strip(),),
+    ).fetchone()
+    plan_id = str(wallet["plan_id"] if wallet else "free").strip().lower()
+    plan_status = str(wallet["plan_status"] if wallet else "").strip().lower()
+    requested = str((translation or {}).get("quality_mode") or "balanced").strip().lower()
+    wants_enterprise = requested in {"enterprise", "premium", "high_quality"}
+    openai_allowed = plan_id in _OPENAI_PLANS and plan_status == "active"
+    if wants_enterprise and not openai_allowed:
+        raise HTTPException(status_code=403, detail="Enterprise quality requires an active Business or Enterprise subscription.")
+    return {
+        "plan_id": plan_id,
+        "plan_status": plan_status,
+        "requested_quality_mode": requested,
+        "approved_quality_mode": "enterprise" if wants_enterprise else "balanced",
+        "openai_allowed": bool(wants_enterprise and openai_allowed),
+        "decision": "allowed" if not wants_enterprise or openai_allowed else "denied",
+    }
+
+
 
 def require_admin(
     request: Request,
@@ -2000,6 +2030,8 @@ def _create_order_from_paths(payload: ChunkedOrderCreate) -> dict:
     if not payload.upload_ids:
         raise HTTPException(status_code=400, detail="At least one uploaded file is required.")
     selected_services = payload.services or ["standard"]
+    with get_db() as db:
+        _provider_entitlement(db, payload.email, payload.translation)
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
     order_folder = UPLOAD_DIR / order_number
@@ -2082,6 +2114,8 @@ async def create_order(
         raise HTTPException(status_code=400, detail="Invalid processing settings.") from exc
     if not isinstance(translation_data, dict) or not isinstance(conversion_data, dict):
         raise HTTPException(status_code=400, detail="Invalid processing settings.")
+    with get_db() as db:
+        _provider_entitlement(db, email, translation_data)
 
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
@@ -2733,11 +2767,40 @@ def update_translation_settings(payload: AITranslationSettingsUpdate) -> dict:
 
 
 @app.post("/api/admin/translation-settings/test", dependencies=[Depends(require_admin)])
-def test_ai_translation() -> dict:
+def test_ai_translation(payload: ProviderTestRequest) -> dict:
     try:
-        return test_translation_connection()
+        result = test_translation_connection(
+            text="Safety test: translate this short sentence.",
+            target_language=payload.target_language,
+            provider=payload.provider,
+        )
+        usage = result.pop("usage", {}) or {}
+        result.update({
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+            "request_count": int(usage.get("request_count") or 0),
+        })
+        result.pop("source_text", None)
+        return result
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = str(exc).lower()
+        if "429" in message:
+            category = "rate_limited"
+        elif any(code in message for code in ("500", "502", "503", "504")):
+            category = "provider_5xx"
+        elif "timeout" in message or "timed out" in message:
+            category = "timeout"
+        elif "401" in message or "403" in message or "auth" in message:
+            category = "authentication_failed"
+        elif "budget" in message:
+            category = "budget_exceeded"
+        else:
+            category = "request_rejected"
+        raise HTTPException(
+            status_code=400,
+            detail={"success": False, "provider": payload.provider, "error_category": category},
+        ) from None
 
 
 class _ProgressEventDispatcher:
@@ -2990,6 +3053,9 @@ def start_processing(order_id: int) -> dict:
         if active is not None:
             return {"success": True, "job_id": active["id"], "state": active["state"], "already_running": True}
         order = row_to_order(db, row)
+        # Re-evaluate against the server wallet immediately before execution.
+        # Client-supplied provider/model/plan fields are intentionally ignored.
+        order["provider_entitlement"] = _provider_entitlement(db, order["email"], order.get("translation") or {})
         source_rows = db.execute(
             "SELECT original_name, stored_path FROM order_files WHERE order_id = ? ORDER BY id",
             (order_id,),

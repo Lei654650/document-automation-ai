@@ -3351,6 +3351,7 @@ def _create_enterprise_analysis(source: Path, destination: Path, callback: Progr
 
 
 def _process_file(original_name: str, stored_path: str, output_dir: Path, client: TranslationClient | None, callback: ProgressCallback | None, use_ocr: bool = False, use_cleanup: bool = False, output_options: dict[str, Any] | None = None) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
     source = Path(stored_path)
     suffix = source.suffix.lower()
     safe_stem = Path(original_name).stem
@@ -3407,16 +3408,35 @@ def _process_file(original_name: str, stored_path: str, output_dir: Path, client
                 count = _translate_pdf_to_docx(source, destination, client, callback)
         else:
             count = _translate_pdf_to_docx(source, destination, client, callback)
-    else:
-        destination = output_dir / Path(original_name).name
-        shutil.copy2(source, destination)
+    elif suffix == ".txt":
+        destination = output_dir / f"{safe_stem}_{suffix_label}.txt"
+        raw = source.read_bytes()
+        encoding = "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            text = raw.decode("cp1252")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        pieces = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        translated: list[str] = []
         count = 0
+        for piece in pieces:
+            if not piece.strip():
+                translated.append(piece)
+                continue
+            value = client.translate(piece)
+            translated.append(value)
+            count += int(value != piece)
+        destination.write_text(newline.join(translated), encoding="utf-8", newline="")
+        details = {"encoding": "utf-8", "line_count": len(pieces), "mode": "txt_translation"}
+    else:
+        raise RuntimeError(f"Unsupported translation format: {suffix or 'unknown'}")
     if cleanup_stats and source != Path(stored_path) and destination != source:
         try:
             source.unlink(missing_ok=True)
         except OSError:
             LOGGER.warning("Unable to remove intermediate safe-cleanup workbook: %s", source)
-    return {"name": destination.name, "path": str(destination), "translated_items": count, "mode": "translated" if count else "copied", "cleanup_stats": cleanup_stats, **details}
+    return {"name": destination.name, "path": str(destination), "translated_items": count, "mode": "translated" if count else details.get("mode", "translated"), "cleanup_stats": cleanup_stats, **details}
 
 
 def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], output_dir: Path, progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
@@ -3497,6 +3517,9 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
         return {"state": "waiting_configuration", "progress": 25, "current_step": "configuration", "plan": plan, "blockers": blockers, "manifest_path": str(manifest_path), "outputs": []}
 
     translation_data = order.get("translation") or {}
+    entitlement = dict(order.get("provider_entitlement") or {})
+    approved_quality = str(entitlement.get("approved_quality_mode") or "balanced").lower()
+    selected_provider = "openai" if approved_quality == "enterprise" and entitlement.get("openai_allowed") else "deepseek"
 
     shared_client: TranslationClient | None = None
 
@@ -3513,6 +3536,8 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
                 target_language=translation_data.get("target_language", "en"),
                 custom_source=translation_data.get("custom_source_language", ""),
                 custom_target=translation_data.get("custom_target_language", ""),
+                provider=selected_provider,
+                entitlement=entitlement,
             )
             shared_client.bilingual_layout = translation_data.get("bilingual_layout") or (conversion_data.get("options") or {}).get("bilingual_layout") or "auto"
         return shared_client
@@ -3689,6 +3714,14 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
     aggregate_usage = None
     if usage_rows:
         aggregate_usage = {
+            "provider": (
+                next(iter({str(r.get("provider") or "") for r in usage_rows}))
+                if len({str(r.get("provider") or "") for r in usage_rows}) == 1 else "mixed"
+            ),
+            "model": (
+                next(iter({str(r.get("model") or "") for r in usage_rows}))
+                if len({str(r.get("model") or "") for r in usage_rows}) == 1 else "mixed"
+            ),
             "input_tokens": sum(int(r.get("input_tokens") or 0) for r in usage_rows),
             "output_tokens": sum(int(r.get("output_tokens") or 0) for r in usage_rows),
             "total_tokens": sum(int(r.get("total_tokens") or 0) for r in usage_rows),
@@ -3696,6 +3729,9 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
             "files": len(usage_rows),
             "memory_cache_hits": sum(int(r.get("memory_cache_hits") or 0) for r in usage_rows),
             "session_cache_hits": sum(int(r.get("session_cache_hits") or 0) for r in usage_rows),
+            "request_count": sum(int(r.get("request_count") or 0) for r in usage_rows),
+            "provider_attempts": [attempt for row in usage_rows for attempt in (row.get("provider_attempts") or [])],
+            "budget_limit_reached": any(bool(r.get("budget_limit_reached")) for r in usage_rows),
         }
 
     successful_output_count = len(outputs)
@@ -3718,6 +3754,7 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
     manifest["requested_output_formats"] = requested_formats
     manifest["outputs"] = outputs
     manifest["translation_usage"] = aggregate_usage
+    manifest["provider_entitlement"] = entitlement
     manifest["failures"] = failure_rows
     manifest["partial_success"] = state == "partial_completed"
     manifest["successful_output_count"] = successful_output_count
@@ -3729,6 +3766,9 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
     return {
         "state": state, "progress": 100, "current_step": state, "plan": plan, "blockers": [],
         "manifest_path": str(manifest_path), "outputs": outputs, "translation_usage": aggregate_usage,
+        "provider": (aggregate_usage or {}).get("provider", ""),
+        "model": (aggregate_usage or {}).get("model", ""),
+        "provider_entitlement": entitlement,
         "failures": failure_rows, "partial_success": state == "partial_completed",
         "successful_output_count": successful_output_count,
         "failure_count": failure_count,

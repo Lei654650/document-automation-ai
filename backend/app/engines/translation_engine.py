@@ -37,7 +37,7 @@ TRANSLATION_MEMORY_PATH = PERSISTENT_ROOT / "data" / "translation_memory.db"
 # Cache namespace is intentionally versioned. V36.0 could persist source-echoed or
 # mixed-language output; changing this value makes those rows unreachable without
 # deleting customer data or blocking startup on a migration.
-TRANSLATION_CACHE_NAMESPACE = "v40.0-watchdog-speed-r1"
+TRANSLATION_CACHE_NAMESPACE = "v38.0-v45-provider-isolated-r1"
 # Backward-compatible watchdog setting retained for diagnostics/tests.
 # Sequential V40.5 hotfix uses TRANSLATION_FILE_AI_BUDGET_SECONDS as the actual
 # per-file limit and does not queue futures behind this watchdog.
@@ -47,19 +47,25 @@ TRANSLATION_BATCH_WATCHDOG_SECONDS = max(20, min(180, int(os.getenv("TRANSLATION
 # PLC/HMI labels across many workbooks. Keeping validated translations in RAM
 # avoids reopening SQLite and revalidating the same rows for every file.
 _HOT_MEMORY_LOCK = Lock()
-_HOT_MEMORY: dict[tuple[str, str, str], str] = {}
+_HOT_MEMORY: dict[tuple[str, str, str, str, str], str] = {}
 _HOT_MEMORY_MAX = max(1000, min(200000, int(os.getenv("TRANSLATION_HOT_CACHE_SIZE", "50000"))))
 
-def _hot_memory_get_many(source: str, target: str, texts: list[str]) -> dict[str, str]:
+def _hot_memory_get_many(*args) -> dict[str, str]:
+    provider, model, source, target, texts = (
+        args if len(args) == 5 else ("test", "test", *args)
+    )
     result: dict[str, str] = {}
     with _HOT_MEMORY_LOCK:
         for text in texts:
-            value = _HOT_MEMORY.get((source, target, text))
+            value = _HOT_MEMORY.get((provider, model, source, target, text))
             if value is not None:
                 result[text] = value
     return result
 
-def _hot_memory_put_many(source: str, target: str, rows: dict[str, str]) -> None:
+def _hot_memory_put_many(*args) -> None:
+    provider, model, source, target, rows = (
+        args if len(args) == 5 else ("test", "test", *args)
+    )
     if not rows:
         return
     with _HOT_MEMORY_LOCK:
@@ -70,14 +76,17 @@ def _hot_memory_put_many(source: str, target: str, rows: dict[str, str]) -> None
             for key in list(_HOT_MEMORY)[:remove_count]:
                 _HOT_MEMORY.pop(key, None)
         for text, value in rows.items():
-            _HOT_MEMORY[(source, target, text)] = value
+            _HOT_MEMORY[(provider, model, source, target, text)] = value
 
-def _hot_memory_delete_many(source: str, target: str, texts: list[str]) -> None:
+def _hot_memory_delete_many(*args) -> None:
+    provider, model, source, target, texts = (
+        args if len(args) == 5 else ("test", "test", *args)
+    )
     if not texts:
         return
     with _HOT_MEMORY_LOCK:
         for text in texts:
-            _HOT_MEMORY.pop((source, target, text), None)
+            _HOT_MEMORY.pop((provider, model, source, target, text), None)
 
 
 @dataclass(frozen=True)
@@ -157,6 +166,34 @@ PROVIDER_DEFAULTS = {
 
 _DEEPSEEK_OFFICIAL_MODELS = {"deepseek-chat", "deepseek-reasoner"}
 _DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+_ENV_PREFIXES = {
+    "openai": "OPENAI", "deepseek": "DEEPSEEK", "gemini": "GEMINI",
+    "claude": "CLAUDE", "azure": "AZURE_OPENAI", "openrouter": "OPENROUTER",
+}
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_error_category(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "429" in text:
+        return "rate_limited"
+    if any(code in text for code in ("500", "502", "503", "504")):
+        return "provider_5xx"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "401" in text or "403" in text or "auth" in text:
+        return "authentication_failed"
+    if "json" in text or "parse" in text:
+        return "invalid_provider_response"
+    if "budget" in text or "token limit" in text:
+        return "budget_exceeded"
+    return "request_failed"
 
 def _normalize_provider_model(provider: str, model: str, base_url: str) -> str:
     """Keep official DeepSeek models, but migrate legacy names for V4-compatible gateways."""
@@ -211,15 +248,11 @@ def _empty_profiles() -> dict[str, dict[str, str]]:
 def _env_settings() -> dict[str, Any]:
     provider = os.getenv("TRANSLATION_PROVIDER", "none").strip().lower()
     profiles = _empty_profiles()
-    env_prefix = {
-        "openai": "OPENAI", "deepseek": "DEEPSEEK", "gemini": "GEMINI",
-        "claude": "CLAUDE", "azure": "AZURE_OPENAI", "openrouter": "OPENROUTER",
-    }.get(provider)
-    if env_prefix and provider in PROVIDER_DEFAULTS:
-        profiles[provider] = {
+    for provider_id, env_prefix in _ENV_PREFIXES.items():
+        profiles[provider_id] = {
             "api_key": os.getenv(f"{env_prefix}_API_KEY", ""),
-            "model": os.getenv(f"{env_prefix}_MODEL", PROVIDER_DEFAULTS[provider]["model"]),
-            "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider]["base_url"]),
+            "model": os.getenv(f"{env_prefix}_MODEL", PROVIDER_DEFAULTS[provider_id]["model"]),
+            "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider_id]["base_url"]),
         }
     return {
         "provider": provider,
@@ -230,7 +263,13 @@ def _env_settings() -> dict[str, Any]:
 
 
 def load_settings(include_secret: bool = True) -> dict[str, Any]:
-    settings = _env_settings()
+    env_settings = _env_settings()
+    settings = {
+        "provider": DEFAULTS["provider"],
+        "profiles": _empty_profiles(),
+        "timeout_seconds": DEFAULTS["timeout_seconds"],
+        "max_retries": DEFAULTS["max_retries"],
+    }
     if SETTINGS_PATH.exists():
         try:
             stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
@@ -246,6 +285,19 @@ def load_settings(include_secret: bool = True) -> dict[str, Any]:
                     }
         except (OSError, json.JSONDecodeError):
             pass
+    # Deployment environment is authoritative. JSON is only a local-development
+    # fallback and must never override provider credentials managed by Render.
+    if os.getenv("TRANSLATION_PROVIDER") is not None:
+        settings["provider"] = env_settings["provider"]
+    settings["timeout_seconds"] = env_settings["timeout_seconds"]
+    settings["max_retries"] = env_settings["max_retries"]
+    stored_profiles = settings.get("profiles") or {}
+    for pid, env_profile in env_settings["profiles"].items():
+        prefix = _ENV_PREFIXES[pid]
+        profile = stored_profiles.setdefault(pid, {})
+        for field, suffix in (("api_key", "API_KEY"), ("model", "MODEL"), ("base_url", "BASE_URL")):
+            if os.getenv(f"{prefix}_{suffix}") is not None:
+                profile[field] = env_profile[field]
     provider = str(settings.get("provider", "none")).strip().lower()
     settings["provider"] = provider
     profiles = _empty_profiles()
@@ -268,10 +320,8 @@ def load_settings(include_secret: bool = True) -> dict[str, Any]:
                 "model": profile.get("model", ""),
                 "base_url": profile.get("base_url", ""),
                 "configured": bool(key),
-                "api_key_masked": f"{key[:4]}...{key[-4:]}" if len(key) >= 10 else ("configured" if key else ""),
             }
         settings["profiles"] = public_profiles
-        settings["api_key_masked"] = public_profiles.get(provider, {}).get("api_key_masked", "")
         settings.pop("api_key", None)
     return settings
 
@@ -282,14 +332,17 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Unsupported translation provider.")
     current = load_settings(include_secret=True)
     profiles = current.get("profiles") or _empty_profiles()
+    if os.getenv("TRANSLATION_PROVIDER") is not None:
+        provider = current["provider"]
     if provider in PROVIDER_DEFAULTS:
         profile = profiles[provider]
         for field in ("model", "base_url"):
-            if field in payload:
+            env_name = f"{_ENV_PREFIXES[provider]}_{'MODEL' if field == 'model' else 'BASE_URL'}"
+            if field in payload and os.getenv(env_name) is None:
                 profile[field] = str(payload.get(field) or "").strip()
-        if str(payload.get("api_key") or "").strip():
+        if str(payload.get("api_key") or "").strip() and os.getenv(f"{_ENV_PREFIXES[provider]}_API_KEY") is None:
             profile["api_key"] = str(payload["api_key"]).strip()
-        if payload.get("clear_api_key"):
+        if payload.get("clear_api_key") and os.getenv(f"{_ENV_PREFIXES[provider]}_API_KEY") is None:
             profile["api_key"] = ""
         profile["model"] = profile.get("model") or PROVIDER_DEFAULTS[provider]["model"]
         profile["base_url"] = (profile.get("base_url") or PROVIDER_DEFAULTS[provider]["base_url"]).rstrip("/")
@@ -302,7 +355,12 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     }
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _SETTINGS_LOCK:
-        SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Never persist deployment-managed credentials.
+        persisted = json.loads(json.dumps(data))
+        for pid, prefix in _ENV_PREFIXES.items():
+            if os.getenv(f"{prefix}_API_KEY") is not None:
+                persisted["profiles"][pid]["api_key"] = ""
+        SETTINGS_PATH.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
     return load_settings(include_secret=False)
 
 def capability() -> TranslationCapability:
@@ -702,8 +760,11 @@ def _glossary_translation(source: str, source_code: str, target_code: str) -> st
     return None
 
 
-def _memory_key(source: str, target: str, text: str) -> str:
-    return hashlib.sha256(f"{TRANSLATION_CACHE_NAMESPACE}\0{source}\0{target}\0{text}".encode("utf-8")).hexdigest()
+def _memory_key(*args) -> str:
+    provider, model, source, target, text = (
+        args if len(args) == 5 else ("legacy", "legacy", *args)
+    )
+    return hashlib.sha256(f"{TRANSLATION_CACHE_NAMESPACE}\0{provider}\0{model}\0{source}\0{target}\0{text}".encode("utf-8")).hexdigest()
 
 
 def _memory_connect() -> sqlite3.Connection:
@@ -718,12 +779,15 @@ def _memory_connect() -> sqlite3.Connection:
     return db
 
 
-def _memory_get_many(source: str, target: str, texts: list[str]) -> dict[str, str]:
+def _memory_get_many(*args) -> dict[str, str]:
+    provider, model, source, target, texts = (
+        args if len(args) == 5 else ("test", "test", *args)
+    )
     if not texts:
         return {}
-    result = _hot_memory_get_many(source, target, texts)
+    result = _hot_memory_get_many(provider, model, source, target, texts)
     remaining = [text for text in texts if text not in result]
-    keys = {_memory_key(source, target, text): text for text in remaining}
+    keys = {_memory_key(provider, model, source, target, text): text for text in remaining}
     if not keys:
         return result
     # Reads are concurrent under SQLite WAL. Do not hold the process-wide cache
@@ -739,19 +803,22 @@ def _memory_get_many(source: str, target: str, texts: list[str]) -> dict[str, st
             rows=db.execute(f"SELECT cache_key, translated_text FROM translation_memory WHERE cache_key IN ({marks})", chunk).fetchall()
             for key,value in rows:
                 result[keys[key]]=value
-    _hot_memory_put_many(source, target, result)
+    _hot_memory_put_many(provider, model, source, target, result)
     return result
 
 
 
 
-def _memory_delete_many(source: str, target: str, texts: list[str]) -> None:
+def _memory_delete_many(*args) -> None:
+    provider, model, source, target, texts = (
+        args if len(args) == 5 else ("test", "test", *args)
+    )
     """Delete poisoned or invalid persistent translations for the given texts."""
     if not texts:
         return
     unique = list(dict.fromkeys(texts))
-    _hot_memory_delete_many(source, target, unique)
-    keys=[_memory_key(source,target,text) for text in unique]
+    _hot_memory_delete_many(provider, model, source, target, unique)
+    keys=[_memory_key(provider,model,source,target,text) for text in unique]
     with _CACHE_LOCK, _memory_connect() as db:
         for start in range(0,len(keys),500):
             chunk=keys[start:start+500]
@@ -761,20 +828,31 @@ def _memory_delete_many(source: str, target: str, texts: list[str]) -> None:
 def _memory_put_many(source: str, target: str, rows: dict[str, str], provider: str, model: str) -> None:
     if not rows:
         return
-    _hot_memory_put_many(source, target, rows)
+    _hot_memory_put_many(provider, model, source, target, rows)
     with _CACHE_LOCK, _memory_connect() as db:
         db.executemany("""INSERT INTO translation_memory
             (cache_key, source_language, target_language, source_text, translated_text, provider, model, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(cache_key) DO UPDATE SET translated_text=excluded.translated_text, provider=excluded.provider,
             model=excluded.model, updated_at=CURRENT_TIMESTAMP""", [
-                (_memory_key(source,target,text), source,target,text,value,provider,model) for text,value in rows.items()
+                (_memory_key(provider,model,source,target,text), source,target,text,value,provider,model) for text,value in rows.items()
             ])
 
 
 class TranslationClient:
-    def __init__(self, source_language: str = "auto", target_language: str = "en", custom_source: str = "", custom_target: str = "") -> None:
+    def __init__(
+        self, source_language: str = "auto", target_language: str = "en",
+        custom_source: str = "", custom_target: str = "", provider: str | None = None,
+        entitlement: dict[str, Any] | None = None, bypass_cache: bool = False,
+    ) -> None:
         self.settings = load_settings(include_secret=True)
+        selected_provider = str(provider or self.settings.get("provider") or "none").strip().lower()
+        if selected_provider not in PROVIDER_DEFAULTS:
+            raise RuntimeError("Unsupported translation provider.")
+        self.settings.update((self.settings.get("profiles") or {}).get(selected_provider) or {})
+        self.settings["provider"] = selected_provider
+        self.entitlement = dict(entitlement or {})
+        self.bypass_cache = bool(bypass_cache)
         self.source_language_code = str(source_language or "auto").strip().lower()
         self.target_language_code = str(target_language or "en").strip().lower()
         self.source_language = custom_source.strip() or LANGUAGE_NAMES.get(self.source_language_code, source_language)
@@ -787,9 +865,13 @@ class TranslationClient:
         self.input_tokens = 0
         self.output_tokens = 0
         self.elapsed_ms = 0
-        cap = capability()
-        if not cap.configured:
-            raise RuntimeError(cap.message)
+        self.provider_attempts: list[dict[str, Any]] = []
+        self.budget_limit_reached = False
+        self.max_input_tokens = max(1, int(os.getenv("OPENAI_MAX_INPUT_TOKENS_PER_TASK", "50000")))
+        self.max_output_tokens = max(1, int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS_PER_TASK", "20000")))
+        self.max_requests = max(1, int(os.getenv("OPENAI_MAX_REQUESTS_PER_TASK", "50")))
+        if not (self.settings.get("api_key") and self.settings.get("base_url") and self.settings.get("model")):
+            raise RuntimeError(f"{selected_provider.title()} is not configured.")
 
     def translate(self, text: str) -> str:
         text = _canonicalize_technical_placeholders(text)
@@ -802,8 +884,8 @@ class TranslationClient:
                 self.cache_hits += 1
                 return cached
             self.cache.pop(text, None)
-            _memory_delete_many(self.source_language_code, self.target_language_code, [text])
-        persisted = _memory_get_many(self.source_language_code, self.target_language_code, [text])
+            _memory_delete_many(self.settings["provider"], self.settings["model"], self.source_language_code, self.target_language_code, [text])
+        persisted = {} if self.bypass_cache else _memory_get_many(self.settings["provider"], self.settings["model"], self.source_language_code, self.target_language_code, [text])
         if text in persisted:
             cached = _repair_and_validate_cached_translation(text, persisted[text], self.target_language_code)
             if cached is not None:
@@ -815,7 +897,7 @@ class TranslationClient:
                         {text: cached}, "self-heal", "v32.2.0"
                     )
                 return cached
-            _memory_delete_many(self.source_language_code, self.target_language_code, [text])
+            _memory_delete_many(self.settings["provider"], self.settings["model"], self.source_language_code, self.target_language_code, [text])
         glossary = _glossary_translation(text, self.source_language_code, self.target_language_code)
         if glossary is not None:
             translated = glossary
@@ -824,7 +906,8 @@ class TranslationClient:
             translated = _restore_protected_tokens(self._request(masked), token_map)
         self._validate_translation(translated, source=text)
         self.cache[text] = translated
-        _memory_put_many(self.source_language_code, self.target_language_code, {text: translated}, self.settings["provider"], self.settings["model"])
+        if not self.bypass_cache:
+            _memory_put_many(self.source_language_code, self.target_language_code, {text: translated}, self.settings["provider"], self.settings["model"])
         return translated
 
     @staticmethod
@@ -853,7 +936,7 @@ class TranslationClient:
         unique=list(dict.fromkeys(str(text) for text in texts if str(text).strip()))
         for text in unique:
             self.cache.pop(text, None)
-        _memory_delete_many(self.source_language_code, self.target_language_code, unique)
+        _memory_delete_many(self.settings["provider"], self.settings["model"], self.source_language_code, self.target_language_code, unique)
 
     def _translate_by_protected_segments(self, source: str) -> str:
         """Translate only prose segments and reinsert every source token exactly.
@@ -924,7 +1007,7 @@ class TranslationClient:
         canonical_texts = [_canonicalize_technical_placeholders(text) for text in texts]
         results = list(canonical_texts)
         unique = list(dict.fromkeys(text for text in canonical_texts if _should_translate(text)))
-        persisted = _memory_get_many(self.source_language_code, self.target_language_code, unique)
+        persisted = {} if self.bypass_cache else _memory_get_many(self.settings["provider"], self.settings["model"], self.source_language_code, self.target_language_code, unique)
         if persisted:
             safe_persisted: dict[str, str] = {}
             repaired_rows: dict[str, str] = {}
@@ -938,7 +1021,7 @@ class TranslationClient:
                 if repaired != value:
                     repaired_rows[source] = repaired
             if invalid_sources:
-                _memory_delete_many(self.source_language_code, self.target_language_code, invalid_sources)
+                _memory_delete_many(self.settings["provider"], self.settings["model"], self.source_language_code, self.target_language_code, invalid_sources)
                 for source in invalid_sources:
                     self.cache.pop(source, None)
             if repaired_rows:
@@ -1065,7 +1148,7 @@ class TranslationClient:
 
             for source, value in translated_rows.items():
                 self._validate_translation(value, source=source)
-            if translated_rows:
+            if translated_rows and not self.bypass_cache:
                 self.cache.update(translated_rows)
                 _memory_put_many(
                     self.source_language_code, self.target_language_code,
@@ -1151,7 +1234,32 @@ class TranslationClient:
         # causing recursive retries and very long 70% stalls. Keep one global
         # bounded provider lane while preserving parallel parsing and workbook I/O.
         with _PROVIDER_LIMIT:
-            return self._request_unlocked(text, batch_mode=batch_mode)
+            try:
+                return self._request_unlocked(text, batch_mode=batch_mode)
+            except Exception as exc:
+                category = _safe_error_category(exc)
+                allowed = {"rate_limited", "provider_5xx", "timeout", "invalid_provider_response"}
+                can_failover = (
+                    self.settings["provider"] == "deepseek"
+                    and category in allowed
+                    and bool(self.entitlement.get("openai_allowed"))
+                    and _env_bool("DUAL_PROVIDER_ENABLED")
+                    and _env_bool("OPENAI_FAILOVER_ENABLED")
+                    and min(1, max(0, int(os.getenv("OPENAI_MAX_FAILOVERS_PER_BATCH", "1")))) == 1
+                )
+                self.provider_attempts.append({
+                    "provider": self.settings["provider"], "model": self.settings["model"],
+                    "success": False, "error_category": category,
+                })
+                if not can_failover:
+                    raise
+                openai = (load_settings(include_secret=True).get("profiles") or {}).get("openai") or {}
+                if not (openai.get("api_key") and openai.get("model") and openai.get("base_url")):
+                    raise RuntimeError("OpenAI failover is not configured.") from None
+                self.settings.update(openai)
+                self.settings["provider"] = "openai"
+                self.entitlement["failover_authorized"] = True
+                return self._request_unlocked(text, batch_mode=batch_mode)
 
     def _request_unlocked(self, text: str, batch_mode: bool = False) -> str:
         provider = self.settings["provider"]
@@ -1197,6 +1305,19 @@ class TranslationClient:
         headers.update({"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "DocumentAutomationAI/40.0.0"})
         selected_model = _normalize_provider_model(provider, self.settings.get("model", ""), self.settings.get("base_url", ""))
         self.settings["model"] = selected_model
+        estimated_input = max(1, (len(system) + len(text) + 3) // 4)
+        if provider == "openai":
+            if not (self.entitlement.get("admin_provider_test") or self.entitlement.get("failover_authorized")) and not (
+                _env_bool("DUAL_PROVIDER_ENABLED") and _env_bool("OPENAI_QUALITY_ENABLED")
+            ):
+                raise RuntimeError("OpenAI quality routing is disabled.")
+            if (
+                self.request_count >= self.max_requests
+                or self.input_tokens + estimated_input > self.max_input_tokens
+                or self.output_tokens >= self.max_output_tokens
+            ):
+                self.budget_limit_reached = True
+                raise RuntimeError("OpenAI task budget exceeded before request.")
         model_fallback_used = False
         last_error: Exception | None = None
         for attempt in range(self.settings["max_retries"] + 1):
@@ -1228,13 +1349,23 @@ class TranslationClient:
                     raise RuntimeError("The AI provider returned an empty translation.")
                 with self._stats_lock:
                     self.request_count += 1
-                    self.input_tokens += input_tokens
-                    self.output_tokens += output_tokens
-                    self.elapsed_ms += round((time.perf_counter() - started) * 1000)
+                    actual_input = input_tokens or estimated_input
+                    actual_output = output_tokens or max(1, (len(translated) + 3) // 4)
+                    elapsed = round((time.perf_counter() - started) * 1000)
+                    self.input_tokens += actual_input
+                    self.output_tokens += actual_output
+                    self.elapsed_ms += elapsed
+                    self.provider_attempts.append({
+                        "provider": provider, "model": selected_model, "success": True,
+                        "input_tokens": actual_input, "output_tokens": actual_output,
+                        "elapsed_ms": elapsed,
+                    })
+                    if provider == "openai" and self.output_tokens >= self.max_output_tokens:
+                        self.budget_limit_reached = True
                 return translated
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:1200]
-                last_error = RuntimeError(f"{provider} API error {exc.code}: {detail}")
+                last_error = RuntimeError(f"{provider} API error {exc.code}")
                 if provider == "deepseek" and exc.code == 400 and not model_fallback_used:
                     supported = _extract_supported_models(detail)
                     preferred = next((name for name in supported if name.endswith("-flash")), None)
@@ -1272,12 +1403,21 @@ class TranslationClient:
             "session_cache_hits": self.cache_hits,
             "elapsed_ms": self.elapsed_ms,
             "estimated_cost_usd": round(estimated_cost, 6),
+            "provider_attempts": list(self.provider_attempts),
+            "budget_limit_reached": self.budget_limit_reached,
         }
 
 
-def test_connection(text: str = "测试自动翻译", target_language: str = "en") -> dict[str, Any]:
+def test_connection(
+    text: str = "Test document translation", target_language: str = "zh",
+    provider: str | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
-    client = TranslationClient(source_language="auto", target_language=target_language)
+    client = TranslationClient(
+        source_language="auto", target_language=target_language,
+        provider=provider, bypass_cache=True,
+        entitlement={"admin_provider_test": True},
+    )
     translated = client.translate(text)
     return {
         "success": True,
