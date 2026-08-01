@@ -3681,54 +3681,7 @@ function EnterpriseSidebar({
     }));
     setPage('login');
   };
-  useEffect(() => {
-    const homeLabels = new Set(['返回首页', '返回官网', 'Back to home', 'Home', 'Về trang chủ']);
-    const hideDuplicateHeaderHome = () => {
-      document.querySelectorAll('.ew-top-actions button, .settings-header-actions-v381 button').forEach(button => {
-        const label = String(button.textContent || '').replace(/\s+/g, ' ').trim();
-        if (homeLabels.has(label)) {
-          button.hidden = true;
-          button.setAttribute('aria-hidden', 'true');
-          button.dataset.sidebarHomeDuplicate = 'true';
-        }
-      });
-    };
-    hideDuplicateHeaderHome();
-    const observer = new MutationObserver(hideDuplicateHeaderHome);
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-    return () => observer.disconnect();
-  }, []);
-  const homeButtonStyle = {
-    width: 'calc(100% - 40px)',
-    minHeight: '46px',
-    margin: '8px 20px 18px',
-    padding: '0 16px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-    border: '1px solid rgba(148, 177, 224, 0.32)',
-    borderRadius: '12px',
-    background: 'rgba(255, 255, 255, 0.055)',
-    color: '#dce8ff',
-    fontSize: '15px',
-    fontWeight: 700,
-    cursor: 'pointer',
-    transition: 'background .2s ease, border-color .2s ease, color .2s ease, transform .2s ease'
-  };
-  return <aside className="ew-sidebar unified-enterprise-sidebar v44-sidebar"><button className="ew-brand ew-brand-button" onClick={() => setPage('home')}><span>DA</span><div><b>Document Automation AI</b><small>{L('AI 文档工作空间', 'AI Document Workspace', 'Không gian tài liệu AI')}</small></div></button><button type="button" className="sidebar-home-top-link" style={homeButtonStyle} onClick={() => setPage('home')} onMouseEnter={event => {
-      event.currentTarget.style.background = 'rgba(58, 101, 255, 0.2)';
-      event.currentTarget.style.borderColor = 'rgba(102, 145, 255, 0.72)';
-      event.currentTarget.style.color = '#ffffff';
-      event.currentTarget.style.transform = 'translateY(-1px)';
-    }} onMouseLeave={event => {
-      event.currentTarget.style.background = 'rgba(255, 255, 255, 0.055)';
-      event.currentTarget.style.borderColor = 'rgba(148, 177, 224, 0.32)';
-      event.currentTarget.style.color = '#dce8ff';
-      event.currentTarget.style.transform = 'translateY(0)';
-    }}><House size={19} /><span>{L('返回首页', 'Back to home', 'Về trang chủ')}</span></button><nav>{groups.map(group => <section key={group.label}><small>{group.label}</small>{group.items.map(([id, label, Icon]) => <button key={id} className={id === active ? 'active' : ''} onClick={() => setPage(id)}><Icon /><span>{label}</span></button>)}</section>)}</nav><section className="unified-sidebar-account"><div><span>{name.slice(0, 1).toUpperCase()}</span><p><b>{name}</b>{email && <small>{email}</small>}</p></div><footer><button type="button" className="sidebar-signout-only" onClick={logout}><ArrowLeft />{L('退出登录', 'Sign out', 'Đăng xuất')}</button></footer></section></aside>;
+  return <aside className="ew-sidebar unified-enterprise-sidebar v44-sidebar"><button className="ew-brand ew-brand-button" onClick={() => setPage('home')}><span>DA</span><div><b>Document Automation AI</b><small>{L('AI 文档工作空间', 'AI Document Workspace', 'Không gian tài liệu AI')}</small></div></button><nav>{groups.map(group => <section key={group.label}><small>{group.label}</small>{group.items.map(([id, label, Icon]) => <button key={id} className={id === active ? 'active' : ''} onClick={() => setPage(id)}><Icon /><span>{label}</span></button>)}</section>)}</nav><section className="unified-sidebar-account"><div><span>{name.slice(0, 1).toUpperCase()}</span><p><b>{name}</b>{email && <small>{email}</small>}</p></div><footer><button type="button" className="sidebar-signout-only" onClick={logout}><ArrowLeft />{L('退出登录', 'Sign out', 'Đăng xuất')}</button></footer></section></aside>;
 }
 function TemplateCenter({
   setPage
