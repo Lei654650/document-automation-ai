@@ -211,15 +211,20 @@ def _empty_profiles() -> dict[str, dict[str, str]]:
 def _env_settings() -> dict[str, Any]:
     provider = os.getenv("TRANSLATION_PROVIDER", "none").strip().lower()
     profiles = _empty_profiles()
-    env_prefix = {
+    env_prefixes = {
         "openai": "OPENAI", "deepseek": "DEEPSEEK", "gemini": "GEMINI",
         "claude": "CLAUDE", "azure": "AZURE_OPENAI", "openrouter": "OPENROUTER",
-    }.get(provider)
-    if env_prefix and provider in PROVIDER_DEFAULTS:
-        profiles[provider] = {
+    }
+    # Load every provider profile independently. This lets OpenAI and DeepSeek
+    # both be prepared in the deployment environment while TRANSLATION_PROVIDER
+    # selects only the active one.
+    for provider_id, env_prefix in env_prefixes.items():
+        if provider_id not in PROVIDER_DEFAULTS:
+            continue
+        profiles[provider_id] = {
             "api_key": os.getenv(f"{env_prefix}_API_KEY", ""),
-            "model": os.getenv(f"{env_prefix}_MODEL", PROVIDER_DEFAULTS[provider]["model"]),
-            "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider]["base_url"]),
+            "model": os.getenv(f"{env_prefix}_MODEL", PROVIDER_DEFAULTS[provider_id]["model"]),
+            "base_url": os.getenv(f"{env_prefix}_BASE_URL", PROVIDER_DEFAULTS[provider_id]["base_url"]),
         }
     return {
         "provider": provider,
@@ -268,10 +273,9 @@ def load_settings(include_secret: bool = True) -> dict[str, Any]:
                 "model": profile.get("model", ""),
                 "base_url": profile.get("base_url", ""),
                 "configured": bool(key),
-                "api_key_masked": f"{key[:4]}...{key[-4:]}" if len(key) >= 10 else ("configured" if key else ""),
             }
         settings["profiles"] = public_profiles
-        settings["api_key_masked"] = public_profiles.get(provider, {}).get("api_key_masked", "")
+        settings["api_key_configured"] = public_profiles.get(provider, {}).get("configured", False)
         settings.pop("api_key", None)
     return settings
 

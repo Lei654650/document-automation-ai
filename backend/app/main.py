@@ -104,8 +104,10 @@ logger = logging.getLogger("document_automation_ai")
 APP_VERSION = "45.0.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
-OWNER_EMAIL = os.getenv("OWNER_EMAIL", "654650727@qq.com").strip().lower()
+APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
+LOCAL_DEVELOPMENT = APP_ENV == "development" and not CLOUD_MODE
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+OWNER_EMAIL = os.getenv("OWNER_EMAIL", "").strip().lower()
 ADMIN_ROLES = {"owner", "admin"}
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
 if IS_VERCEL:
@@ -133,6 +135,17 @@ PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
+if PAYPAL_MODE not in {"sandbox", "live"}:
+    PAYPAL_MODE = "sandbox"
+PAYPAL_LIVE_ENABLED = os.getenv("PAYPAL_LIVE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+if PAYPAL_MODE == "live" and not PAYPAL_LIVE_ENABLED:
+    logger.warning("PAYPAL_MODE=live was ignored because PAYPAL_LIVE_ENABLED is not true; using sandbox.")
+    PAYPAL_MODE = "sandbox"
+PAYPAL_LIVE_REQUIRED = os.getenv("PAYPAL_LIVE_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+try:
+    PAYPAL_TEST_PRICE_CENTS = max(0, int(os.getenv("PAYPAL_TEST_PRICE_CENTS", "0") or "0"))
+except ValueError:
+    PAYPAL_TEST_PRICE_CENTS = 0
 PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
 PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
 PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()
@@ -158,6 +171,7 @@ SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes",
 SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Document Automation AI").strip() or "Document Automation AI"
 PASSWORD_RESET_DEV_CODE_ENABLED = os.getenv("PASSWORD_RESET_DEV_CODE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+EMAIL_VERIFICATION_DEV_CODE_ENABLED = os.getenv("EMAIL_VERIFICATION_DEV_CODE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 PASSWORD_RESET_COOLDOWN_SECONDS = max(30, int(os.getenv("PASSWORD_RESET_COOLDOWN_SECONDS", "60")))
 PASSWORD_RESET_WINDOW_SECONDS = max(300, int(os.getenv("PASSWORD_RESET_WINDOW_SECONDS", "900")))
 PASSWORD_RESET_MAX_SUCCESSFUL_SENDS = max(1, int(os.getenv("PASSWORD_RESET_MAX_SUCCESSFUL_SENDS", "5")))
@@ -404,6 +418,17 @@ PAYMENT_PLANS = {
     "credits_20000": {"name": "20,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 19900, "currency": "usd", "credits": 20000, "valid_days": 730, "features": []},
 }
 
+# Optional server-side PayPal Live acceptance price from e592291. It is off by
+# default so the normal catalogue price remains authoritative. When enabled,
+# the same amount is returned to the UI, stored with the order and sent to
+# PayPal, avoiding a client/server price mismatch during acceptance.
+if PAYPAL_TEST_PRICE_CENTS > 0:
+    PAYMENT_PLANS["professional_monthly"] = {
+        **PAYMENT_PLANS["professional_monthly"],
+        "amount_cents": PAYPAL_TEST_PRICE_CENTS,
+        "payment_test_price": True,
+    }
+
 
 def payment_provider() -> str:
     # Paddle is the preferred Merchant of Record provider for the commercial release.
@@ -611,7 +636,7 @@ def require_admin(
         if str(user.get("role") or "user").lower() in ADMIN_ROLES:
             return user
         raise HTTPException(status_code=403, detail="Administrator permission is required.")
-    if x_admin_key and secrets.compare_digest(x_admin_key, ADMIN_PASSWORD):
+    if ADMIN_PASSWORD and x_admin_key and secrets.compare_digest(x_admin_key, ADMIN_PASSWORD):
         return {"id": 0, "name": "Legacy administrator", "email": "", "role": "admin", "status": "active"}
     raise HTTPException(status_code=401, detail="Please sign in with an administrator account.")
 
@@ -1151,6 +1176,27 @@ def _send_verification_email(email: str, code: str) -> dict:
     return {"delivery": "email"}
 
 
+def _send_or_local_verification_delivery(email: str, code: str) -> dict:
+    """Deliver a registration code, with an explicit local-development fallback.
+
+    Production and cloud environments always require SMTP delivery. The fallback
+    merely exposes the one-time code to a local developer so the normal
+    verification-confirmation endpoint can still be exercised without a mail
+    account; it never marks an account as verified automatically.
+    """
+    try:
+        return _send_verification_email(email, code)
+    except EmailDeliveryError as exc:
+        if EMAIL_VERIFICATION_DEV_CODE_ENABLED and LOCAL_DEVELOPMENT:
+            logger.warning(
+                "Local development email verification fallback enabled recipient=%s reason=%s",
+                email,
+                exc.code,
+            )
+            return {"delivery": "local", "detail": exc.code, "development_code": code}
+        raise
+
+
 def _send_password_reset_email(email: str, code: str) -> dict:
     """Send first; only the caller may persist the code after confirmed delivery."""
     config = _smtp_configuration_summary()
@@ -1329,6 +1375,7 @@ def register_user(payload: UserRegister, request: Request) -> dict:
     code = f"{secrets.randbelow(1000000):06d}"
     code_hash = hashlib.sha256(code.encode()).hexdigest()
     expires_at = int(time.time()) + EMAIL_VERIFICATION_TTL_SECONDS
+    delivery: dict = {}
 
     def operation(db):
         existing = db.execute("SELECT id,email_verified FROM users WHERE email=?", (email,)).fetchone()
@@ -1347,9 +1394,17 @@ def register_user(payload: UserRegister, request: Request) -> dict:
         db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now,user_id))
         db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
                    (user_id,code_hash,expires_at,now,ip))
-        _send_verification_email(email, code)
+        delivery.update(_send_or_local_verification_delivery(email, code))
     run_db_write(operation)
-    return {"verification_required": True, "email": email, "delivery": "email", "cooldown_seconds": EMAIL_VERIFICATION_COOLDOWN_SECONDS}
+    response = {
+        "verification_required": True,
+        "email": email,
+        "delivery": delivery.get("delivery", "email"),
+        "cooldown_seconds": 0 if delivery.get("delivery") == "local" else EMAIL_VERIFICATION_COOLDOWN_SECONDS,
+    }
+    if delivery.get("delivery") == "local":
+        response["development_code"] = delivery["development_code"]
+    return response
 
 
 @app.post("/api/auth/email-verification/resend")
@@ -1370,13 +1425,21 @@ def resend_email_verification(payload: EmailVerificationResend, request: Request
         except ValueError:
             pass
     code=f"{secrets.randbelow(1000000):06d}"; now=utc_now(); code_hash=hashlib.sha256(code.encode()).hexdigest()
+    delivery: dict = {}
     def operation(db):
         db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''",(now,user["id"]))
         db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
                    (user["id"],code_hash,int(time.time())+EMAIL_VERIFICATION_TTL_SECONDS,now,_client_ip(request)))
-        _send_verification_email(email,code)
+        delivery.update(_send_or_local_verification_delivery(email, code))
     run_db_write(operation)
-    return {"success":True,"delivery":"email","cooldown_seconds":EMAIL_VERIFICATION_COOLDOWN_SECONDS}
+    response = {
+        "success": True,
+        "delivery": delivery.get("delivery", "email"),
+        "cooldown_seconds": 0 if delivery.get("delivery") == "local" else EMAIL_VERIFICATION_COOLDOWN_SECONDS,
+    }
+    if delivery.get("delivery") == "local":
+        response["development_code"] = delivery["development_code"]
+    return response
 
 
 @app.post("/api/auth/email-verification/confirm")
@@ -1503,7 +1566,7 @@ def request_password_reset(payload: PasswordResetRequest, request: Request) -> d
         delivery = _send_password_reset_email(email, code)
     except EmailDeliveryError as exc:
         logger.error("Password reset delivery rejected recipient=%s code=%s detail=%s", email, exc.code, exc.detail)
-        if PASSWORD_RESET_DEV_CODE_ENABLED and not CLOUD_MODE:
+        if PASSWORD_RESET_DEV_CODE_ENABLED and LOCAL_DEVELOPMENT:
             delivery = {"channel": "local", "detail": exc.code, "sent_at": utc_now()}
         else:
             raise HTTPException(status_code=503, detail=exc.detail) from exc
@@ -1667,6 +1730,22 @@ def public_config() -> dict:
         "recommended_chunk_size_bytes": 2 * 1024 * 1024,
         "registration_enabled": True,
         "real_payments_configured": payment_provider() in {"paddle","paypal","stripe"},
+        "authentication": {
+            "smtp_configured": bool(SMTP_HOST and SMTP_FROM_EMAIL),
+            "google_configured": bool(GOOGLE_CLIENT_ID),
+            "local_verification_code_enabled": bool(LOCAL_DEVELOPMENT and EMAIL_VERIFICATION_DEV_CODE_ENABLED),
+            "local_password_reset_code_enabled": bool(LOCAL_DEVELOPMENT and PASSWORD_RESET_DEV_CODE_ENABLED),
+        },
+        "ai_providers": {
+            "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            "deepseek_configured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
+        },
+        "payments": {
+            "provider": payment_provider(),
+            "paypal_mode": PAYPAL_MODE,
+            "paypal_live_enabled": PAYPAL_LIVE_ENABLED,
+            "test_mode": PAYMENT_TEST_MODE,
+        },
     }
 
 
@@ -3106,7 +3185,7 @@ def payment_center_admin() -> dict:
     return {
         "title": "Payment Center",
         "provider": provider,
-        "paypal": {"configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET), "mode": PAYPAL_MODE, "client_id_masked": (PAYPAL_CLIENT_ID[:6] + "***") if PAYPAL_CLIENT_ID else "", "webhook_configured": bool(PAYPAL_WEBHOOK_ID)},
+        "paypal": {"configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET), "mode": PAYPAL_MODE, "live_enabled": PAYPAL_LIVE_ENABLED, "webhook_configured": bool(PAYPAL_WEBHOOK_ID)},
         "stripe": {"configured": bool(STRIPE_SECRET_KEY)},
         "paddle": {"configured": bool(PADDLE_API_KEY and PADDLE_PRICE_MAP), "mode": PADDLE_ENV},
         "checkout_available": provider in {"paypal", "stripe", "paddle"} or PAYMENT_TEST_MODE,
@@ -3123,8 +3202,6 @@ def paypal_public_diagnostics(user: dict = Depends(require_user)) -> dict:
         "configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET),
         "mode": PAYPAL_MODE,
         "api_base": paypal_api_base(),
-        "client_id_length": len(PAYPAL_CLIENT_ID),
-        "secret_length": len(PAYPAL_CLIENT_SECRET),
         "version": APP_VERSION,
     }
     try:
@@ -3132,7 +3209,8 @@ def paypal_public_diagnostics(user: dict = Depends(require_user)) -> dict:
         token = paypal_access_token()
         result.update({"success": bool(token), "latency_ms": round((time.perf_counter() - started) * 1000)})
     except Exception as exc:
-        result.update({"success": False, "error": str(exc)})
+        logger.warning("PayPal diagnostic failed error_type=%s", type(exc).__name__)
+        result.update({"success": False, "error": "paypal_connection_failed", "error_type": type(exc).__name__})
     return result
 
 
@@ -3757,7 +3835,13 @@ def payment_config() -> dict:
         "provider_label": "Paddle" if provider == "paddle" else ("PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo")),
         "provider_mode": PADDLE_ENV if provider == "paddle" else (PAYPAL_MODE if provider == "paypal" else ""),
         "paypal_mode": PAYPAL_MODE if provider == "paypal" else "",
+        "live_checkout": provider == "paypal" and PAYPAL_MODE == "live" and not PAYMENT_TEST_MODE,
+        "paypal_live_enabled": PAYPAL_LIVE_ENABLED,
         "test_mode": PAYMENT_TEST_MODE,
+        "webhook_configured": bool(PAYPAL_WEBHOOK_ID) if provider == "paypal" else True,
+        "live_required": PAYPAL_LIVE_REQUIRED if provider == "paypal" else False,
+        "acceptance_price_active": bool(PAYPAL_TEST_PRICE_CENTS > 0),
+        "acceptance_price_cents": PAYPAL_TEST_PRICE_CENTS,
         "currency": "USD",
         "version": APP_VERSION,
         "plans": [{"id": key, **value} for key, value in PAYMENT_PLANS.items()],
@@ -4522,7 +4606,7 @@ def cloud_status() -> dict:
         "uploads_path": str(UPLOAD_DIR),
         "outputs_path": str(OUTPUT_DIR),
         "disk_free_bytes": disk.free,
-        "admin_password_is_default": ADMIN_PASSWORD == "admin123456",
+        "legacy_admin_key_configured": bool(ADMIN_PASSWORD),
         "frontend_bundled": (FRONTEND_DIST / "index.html").exists(),
     }
 

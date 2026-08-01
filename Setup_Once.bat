@@ -15,7 +15,7 @@ if not exist "%RUNTIME%" mkdir "%RUNTIME%"
 >"%LOG%" echo ===== Document Automation AI setup started %date% %time% =====
 
 echo ============================================================
-echo Document Automation AI V23.0 Enterprise - Automatic Setup
+echo Document Automation AI V45.0.0 Recovered - Automatic Setup
 echo ============================================================
 echo This setup is launched automatically whenever required runtime files are missing.
 echo.
@@ -52,6 +52,11 @@ if not defined PYTHON_EXE (
   python.exe -c "import sys" >nul 2>&1
   if not errorlevel 1 set "PYTHON_EXE=python.exe"
 )
+if not defined PYTHON_EXE if exist "%LocalAppData%\Python\pythoncore-3.14-64\python.exe" set "PYTHON_EXE=%LocalAppData%\Python\pythoncore-3.14-64\python.exe"
+if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python314\python.exe" set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python314\python.exe"
+if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python313\python.exe"
+if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python312\python.exe"
+if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python311\python.exe" set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python311\python.exe"
 if not defined PYTHON_EXE (
   echo [ERROR] Python 3.11 or newer was not found.
   echo ERROR: Python was not found.>>"%LOG%"
@@ -81,7 +86,12 @@ echo npm runtime check: OK
 echo npm runtime check: OK>>"%LOG%"
 
 echo [1/4] Creating a clean Python virtual environment...
-if not exist "%BACKEND%\.venv\Scripts\python.exe" (
+set "VENV_OK=0"
+if exist "%BACKEND%\.venv\Scripts\python.exe" (
+  "%BACKEND%\.venv\Scripts\python.exe" -c "import sys; assert sys.version_info >= (3, 11)" >nul 2>&1
+  if not errorlevel 1 set "VENV_OK=1"
+)
+if "%VENV_OK%"=="0" (
   if exist "%BACKEND%\.venv" rmdir /s /q "%BACKEND%\.venv"
   "%PYTHON_EXE%" %PYTHON_ARGS% -m venv "%BACKEND%\.venv" >>"%LOG%" 2>&1
 )
@@ -118,18 +128,25 @@ if errorlevel 1 (
 
 echo [3/4] Installing frontend dependencies...
 cd /d "%FRONTEND%"
-rem A ZIP may contain node_modules created on Linux. Remove it so npm installs Windows launchers and native packages.
-if exist node_modules rmdir /s /q node_modules >>"%LOG%" 2>&1
-if exist package-lock.json (
-  call "%NPM_RUN%" ci --no-audit --no-fund >>"%LOG%" 2>&1
+set "FRONTEND_RUNTIME_OK=0"
+if exist "node_modules\.bin\vite.cmd" if exist "node_modules\react\package.json" set "FRONTEND_RUNTIME_OK=1"
+if "%FRONTEND_RUNTIME_OK%"=="0" (
+  rem A ZIP may contain node_modules created on Linux. Remove it so npm installs Windows launchers and native packages.
+  if exist node_modules rmdir /s /q node_modules >>"%LOG%" 2>&1
+  if exist package-lock.json (
+    call "%NPM_RUN%" ci --no-audit --no-fund >>"%LOG%" 2>&1
+  ) else (
+    call "%NPM_RUN%" install --no-audit --no-fund >>"%LOG%" 2>&1
+  )
+  if errorlevel 1 (
+    echo [ERROR] Frontend dependency installation failed.
+    echo ERROR: npm dependency installation failed.>>"%LOG%"
+    pause
+    exit /b 1
+  )
 ) else (
-  call "%NPM_RUN%" install --no-audit --no-fund >>"%LOG%" 2>&1
-)
-if errorlevel 1 (
-  echo [ERROR] Frontend dependency installation failed.
-  echo ERROR: npm dependency installation failed.>>"%LOG%"
-  pause
-  exit /b 1
+  echo Existing frontend runtime is healthy. Reusing it.
+  echo Existing frontend runtime reused.>>"%LOG%"
 )
 
 echo [4/4] Verifying frontend build...

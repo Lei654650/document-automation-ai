@@ -2434,3 +2434,17 @@ html{scrollbar-gutter:stable}
 .billing-wallet-live{min-height:300px;margin-top:20px}.billing-wallet-live>div{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
 .billing-wallet-live>div span{padding:10px 13px;border-radius:9px;background:#f2f5fa;color:#40506b;font-size:12px;font-weight:750}
 @media(max-width:900px){.billing-credit-grid{grid-template-columns:1fr}.billing-live-summary{align-items:flex-start;flex-direction:column}}
+
+
+/* V45 payment + workspace navigation acceptance patch */
+.workspace-return-nav{position:fixed;top:18px;right:22px;z-index:1200;display:inline-flex;align-items:center;gap:8px;min-height:42px;padding:0 16px;border:1px solid #d9e2f2;border-radius:12px;background:#fff;color:#17315d;font-weight:850;box-shadow:0 10px 28px rgba(31,54,99,.12);cursor:pointer}
+.workspace-return-nav svg{width:17px;height:17px}
+.workspace-return-nav:hover{border-color:#3157ff;color:#3157ff;transform:translateY(-1px)}
+.billing-preview-plans-v44{display:flex;flex-wrap:wrap;justify-content:center;align-items:stretch;gap:14px}
+.billing-preview-plans-v44>article{flex:1 1 210px;max-width:270px;min-width:210px}
+.payment-page .commercial-plan-grid{grid-template-columns:repeat(5,minmax(190px,1fr));align-items:stretch}
+.payment-page .commercial-plan{display:flex;flex-direction:column;min-height:430px}
+.payment-page .commercial-plan>button{margin-top:auto}
+@media(max-width:1320px){.payment-page .commercial-plan-grid{grid-template-columns:repeat(3,minmax(220px,1fr))}}
+@media(max-width:900px){.workspace-return-nav{position:sticky;top:10px;float:right;margin:10px 14px 0 0}.payment-page .commercial-plan-grid{grid-template-columns:repeat(2,minmax(220px,1fr))}}
+@media(max-width:620px){.workspace-return-nav{float:none;margin:10px 14px}.payment-page .commercial-plan-grid{grid-template-columns:1fr}.billing-preview-plans-v44>article{max-width:none;min-width:100%}}

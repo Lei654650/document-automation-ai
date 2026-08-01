@@ -9,14 +9,14 @@ set "LOGDIR=%ROOT%logs"
 set "STARTLOG=%LOGDIR%\startup.log"
 set "VENV_PY=%BACKEND%\.venv\Scripts\python.exe"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
-set "APP_VERSION=40.5.0"
+set "APP_VERSION=45.0.0"
 cd /d "%ROOT%"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 if not exist "%RUNTIME%" mkdir "%RUNTIME%"
-title Document Automation AI V40.5.0
+title Document Automation AI V45.0.0
 
 echo ============================================================
-echo Document Automation AI V40.5.0 - One Click Start
+echo Document Automation AI V45.0.0 - One Click Start
 echo ============================================================
 echo Project root: %ROOT%
 echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
@@ -38,6 +38,7 @@ if "%NEED_SETUP%"=="1" (
   echo.
   if exist "%RUNTIME%\setup.ready" del /q "%RUNTIME%\setup.ready" >nul 2>&1
   call "%ROOT%Setup_Once.bat" --automatic
+  @echo off
   if errorlevel 1 (
     echo [ERROR] Automatic setup did not complete.
     echo Please send logs\setup.log for inspection.
@@ -64,7 +65,7 @@ call :STOP_PORT 8000 Backend
 call :STOP_PORT 5173 Frontend
 
 echo Starting backend...
-start "Document Automation AI Backend V40.5.0" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
+start "Document Automation AI Backend V45.0.0" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
 
 echo Waiting for backend health check and version identity...
 set /a COUNT=0
@@ -78,13 +79,13 @@ if !COUNT! GEQ 180 (
   pause
   exit /b 1
 )
-timeout /t 1 /nobreak >nul
+powershell -NoProfile -Command "Start-Sleep -Seconds 1" >nul
 goto WAIT_BACKEND
 
 :BACKEND_READY
 echo Backend V%APP_VERSION% is healthy.
 echo Starting frontend...
-start "Document Automation AI Frontend V40.5.0" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
+start "Document Automation AI Frontend V45.0.0" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
 
 echo Waiting for frontend...
 set /a COUNT=0
@@ -98,7 +99,7 @@ if !COUNT! GEQ 180 (
   pause
   exit /b 1
 )
-timeout /t 1 /nobreak >nul
+powershell -NoProfile -Command "Start-Sleep -Seconds 1" >nul
 goto WAIT_FRONTEND
 
 :FRONTEND_READY
@@ -122,5 +123,5 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"')
   echo Stopping stale %LABEL% PID %%P on port %PORT%>>"%STARTLOG%"
   taskkill /PID %%P /T /F >nul 2>&1
 )
-if "!FOUND!"=="1" timeout /t 2 /nobreak >nul
+if "!FOUND!"=="1" powershell -NoProfile -Command "Start-Sleep -Seconds 2" >nul
 exit /b 0

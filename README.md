@@ -1,4 +1,4 @@
-# Document Automation AI — Version 25.1.4
+# Document Automation AI — Version 45.0.0 Recovered
 
 完整企业级 AI 文档自动化工程。
 
@@ -17,7 +17,7 @@
 
 ## 版本
 
-Version 25.1.4
+Version 45.0.0 Recovered
 
 ## OCR setup on Windows
 

@@ -5,16 +5,29 @@ services:
       - "8080:8080"
     environment:
       CLOUD_MODE: "true"
+      APP_ENV: production
       APP_DATA_DIR: /data
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-this-password}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in the host environment}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      OWNER_EMAIL: ${OWNER_EMAIL:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
+      EMAIL_VERIFICATION_DEV_CODE_ENABLED: "false"
+      PASSWORD_RESET_DEV_CODE_ENABLED: "false"
       TRANSLATION_PROVIDER: ${TRANSLATION_PROVIDER:-none}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      PAYPAL_MODE: sandbox
+      PAYPAL_LIVE_ENABLED: "false"
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      PAYMENT_TEST_MODE: "false"
     volumes:
       - document_data:/data
     restart: unless-stopped

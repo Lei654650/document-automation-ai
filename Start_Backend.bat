@@ -4,12 +4,30 @@ chcp 65001 >nul
 set "ROOT=%~dp0"
 set "PY=%ROOT%backend\.venv\Scripts\python.exe"
 set "LOGDIR=%ROOT%logs"
+set "APP_DATA_DIR=%ROOT%.runtime"
+
+rem Local desktop defaults only. Explicit environment variables always win,
+rem and cloud/container deployments do not use this Windows launcher.
+if not defined APP_ENV set "APP_ENV=development"
+if not defined CLOUD_MODE set "CLOUD_MODE=false"
+if not defined EMAIL_VERIFICATION_DEV_CODE_ENABLED set "EMAIL_VERIFICATION_DEV_CODE_ENABLED=true"
+if not defined PASSWORD_RESET_DEV_CODE_ENABLED set "PASSWORD_RESET_DEV_CODE_ENABLED=true"
+if not defined PAYPAL_MODE set "PAYPAL_MODE=sandbox"
+if not defined PAYPAL_LIVE_ENABLED set "PAYPAL_LIVE_ENABLED=false"
+
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+if not exist "%APP_DATA_DIR%" mkdir "%APP_DATA_DIR%"
 cd /d "%ROOT%backend"
-title Document Automation AI Backend V40.5.0
-if not exist "%PY%" (
+title Document Automation AI Backend V45.0.0
+set "BACKEND_RUNTIME_OK=0"
+if exist "%PY%" (
+  "%PY%" -c "import sys" >nul 2>&1
+  if not errorlevel 1 set "BACKEND_RUNTIME_OK=1"
+)
+if "%BACKEND_RUNTIME_OK%"=="0" (
   echo Backend runtime is missing. Starting automatic repair...
   call "%ROOT%Setup_Once.bat" --automatic
+  @echo off
   if errorlevel 1 exit /b 1
 )
 if not exist "%PY%" (
@@ -38,7 +56,7 @@ if errorlevel 1 (
 )
 
 >"%LOGDIR%\backend.log" echo ===== Backend start %date% %time% =====
->>"%LOGDIR%\backend.log" echo Version: V40.5.0
+>>"%LOGDIR%\backend.log" echo Version: V45.0.0
 >>"%LOGDIR%\backend.log" echo Project root: %ROOT%
 >>"%LOGDIR%\backend.log" echo Python: %PY%
 for /d /r "%ROOT%backend" %%D in (__pycache__) do @if exist "%%D" rd /s /q "%%D" >nul 2>&1

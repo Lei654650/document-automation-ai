@@ -7,10 +7,11 @@ set "LOGDIR=%ROOT%logs"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 cd /d "%FRONTEND%"
-title Document Automation AI V40.4.0 Frontend
+title Document Automation AI V45.0.0 Frontend
 if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (
   echo Frontend runtime is missing. Starting automatic repair...
   call "%ROOT%Setup_Once.bat" --automatic
+  @echo off
   if errorlevel 1 exit /b 1
 )
 if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" (

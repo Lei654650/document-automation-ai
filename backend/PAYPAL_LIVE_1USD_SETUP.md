@@ -1,34 +1,13 @@
-# PayPal Live 1 USD 验收配置
+# PayPal Live 验收说明（归档）
 
-本版本已把 `professional_monthly` 的真实支付验收价统一设为 **1.00 USD**。价格由后端控制，并同时用于页面显示、PayPal 下单、数据库订单和回调金额校验。
-
-在 Railway 后端服务的 Variables 中配置：
+当前 V45.0.0 交付阶段禁止真实扣款。请保持：
 
 ```env
-PAYMENT_TEST_MODE=false
-PAYPAL_MODE=live
-PAYPAL_LIVE_REQUIRED=true
-PAYPAL_TEST_PRICE_CENTS=100
-PAYPAL_CLIENT_ID=<PayPal Live Client ID>
-PAYPAL_CLIENT_SECRET=<PayPal Live Secret>
-PAYPAL_WEBHOOK_ID=<创建 Webhook 后得到的 Webhook ID>
-PUBLIC_BASE_URL=https://你的后端域名
-PAYMENT_SUCCESS_URL=https://你的前端域名/?payment=paypal-return
-PAYMENT_CANCEL_URL=https://你的前端域名/?payment=cancelled
+PAYPAL_MODE=sandbox
+PAYPAL_LIVE_ENABLED=false
+PAYPAL_TEST_PRICE_CENTS=0
 ```
 
-PayPal Developer 中 Webhook URL：
+本阶段只允许使用 PayPal Sandbox 买家和商家测试账户完成 Checkout、Capture、Webhook、订单、钱包和 Credits 验收。
 
-```text
-https://你的后端域名/api/payments/paypal/webhook
-```
-
-至少订阅事件：
-
-```text
-PAYMENT.CAPTURE.COMPLETED
-```
-
-验收成功后，将 `PAYPAL_TEST_PRICE_CENTS` 改为 `0` 或删除，再重新部署，即恢复代码中的正式 Professional 月付价格。
-
-不要把 `PAYPAL_CLIENT_SECRET` 写进前端、截图或提交到公开仓库。
+未来如需 Live 验收，必须先获得单独书面批准，再使用 PayPal Live 应用凭据，并同时显式设置 `PAYPAL_MODE=live` 与 `PAYPAL_LIVE_ENABLED=true`。不得将任何凭据写入代码、文档、日志、截图或版本库。
