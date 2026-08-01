@@ -30,6 +30,8 @@ import tempfile
 import uuid
 import base64
 import hashlib
+from contextlib import asynccontextmanager
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -96,7 +98,9 @@ def _load_project_env() -> None:
                 env_path.write_text("\n".join(repaired) + "\n", encoding="utf-8")
         except OSError:
             pass
-    load_dotenv(env_path, override=True)
+    # Deployment/runtime variables must win over a bundled local file.  This
+    # also lets CI and isolated tests disable external providers safely.
+    load_dotenv(env_path, override=False)
 
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -190,7 +194,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_SUFFIXES = {
     ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv", ".txt",
-    ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
+    ".md", ".markdown", ".html", ".json", ".xml",
+    ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp",
     ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"
 }
 VALID_STATUSES = {
@@ -198,7 +203,13 @@ VALID_STATUSES = {
     "quality_review", "partial_completed", "completed", "failed", "cancelled"
 }
 
-app = FastAPI(title="Document Automation AI API", version=APP_VERSION)
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    startup()
+    yield
+
+
+app = FastAPI(title="Document Automation AI API", version=APP_VERSION, lifespan=app_lifespan)
 
 
 class JobCancelled(RuntimeError):
@@ -206,6 +217,12 @@ class JobCancelled(RuntimeError):
 
 _JOB_CONTROLS: dict[int, dict[str, threading.Event]] = {}
 _JOB_CONTROLS_LOCK = threading.Lock()
+_JOB_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(8, int(os.getenv("PROCESSING_JOB_WORKERS", "3")))),
+    thread_name_prefix="document-job",
+)
+_JOB_FUTURES: dict[int, Future] = {}
+_JOB_FUTURES_LOCK = threading.Lock()
 
 def _job_control(job_id: int) -> dict[str, threading.Event]:
     with _JOB_CONTROLS_LOCK:
@@ -1182,7 +1199,12 @@ def _send_verification_email(email: str, code: str) -> dict:
     return {"delivery": "email"}
 
 
-def _send_or_local_verification_delivery(email: str, code: str) -> dict:
+def _is_local_request(request: Request) -> bool:
+    host = (request.url.hostname or "").strip().lower()
+    return not CLOUD_MODE and host in {"localhost", "127.0.0.1", "::1", "testserver"}
+
+
+def _send_or_local_verification_delivery(email: str, code: str, allow_local: bool = False) -> dict:
     """Deliver a registration code, with an explicit local-development fallback.
 
     Production and cloud environments always require SMTP delivery. The fallback
@@ -1193,7 +1215,7 @@ def _send_or_local_verification_delivery(email: str, code: str) -> dict:
     try:
         return _send_verification_email(email, code)
     except EmailDeliveryError as exc:
-        if EMAIL_VERIFICATION_DEV_CODE_ENABLED and LOCAL_DEVELOPMENT:
+        if (EMAIL_VERIFICATION_DEV_CODE_ENABLED and LOCAL_DEVELOPMENT) or allow_local:
             logger.warning(
                 "Local development email verification fallback enabled recipient=%s reason=%s",
                 email,
@@ -1302,7 +1324,6 @@ def require_user(user: dict | None = Depends(current_user_optional)) -> dict:
     return user
 
 
-@app.on_event("startup")
 def startup() -> None:
     delay = 0.25
     for attempt in range(6):
@@ -1320,20 +1341,41 @@ def startup() -> None:
         _ensure_default_tenants(db)
     run_db_write(bootstrap_tenants)
 
-    # In-process workers cannot survive a container restart. Mark interrupted jobs clearly.
+    # Jobs are stored in SQLite and are re-queued after a service restart.  The
+    # former implementation marked every active task as failed on startup,
+    # violating the background-task contract even though source files remained.
+    recoveries: list[tuple[int, int, dict, list[tuple[str, str]]]] = []
     with get_db() as db:
-        interrupted = db.execute("SELECT id FROM processing_jobs WHERE state IN ('queued','processing','paused','cancelling')").fetchall()
+        interrupted = db.execute("SELECT id,order_id,state FROM processing_jobs WHERE state IN ('queued','processing','paused','cancelling')").fetchall()
         for row in interrupted:
             timestamp = utc_now()
+            if row["state"] == "paused":
+                continue
+            if row["state"] == "cancelling":
+                db.execute("UPDATE processing_jobs SET state='cancelled',current_step='cancelled',updated_at=? WHERE id=?", (timestamp, row["id"]))
+                db.execute("UPDATE orders SET status='cancelled',updated_at=? WHERE id=?", (timestamp, row["order_id"]))
+                continue
+            order_row = db.execute("SELECT * FROM orders WHERE id=?", (row["order_id"],)).fetchone()
+            if order_row is None:
+                continue
+            source_rows = db.execute("SELECT original_name,stored_path FROM order_files WHERE order_id=? ORDER BY id", (row["order_id"],)).fetchall()
+            source_paths = [(item["original_name"], item["stored_path"]) for item in source_rows if Path(item["stored_path"]).exists()]
+            if not source_paths:
+                db.execute("UPDATE processing_jobs SET state='failed',progress=100,current_step='missing_sources',blockers_json=?,updated_at=? WHERE id=?", (json.dumps(["Source files are unavailable after restart."], ensure_ascii=False), timestamp, row["id"]))
+                db.execute("UPDATE orders SET status='failed',updated_at=? WHERE id=?", (timestamp, row["order_id"]))
+                continue
             db.execute(
-                "UPDATE processing_jobs SET state='failed', progress=100, current_step='interrupted', blockers_json=?, updated_at=? WHERE id=?",
-                (json.dumps(["Processing was interrupted by a runtime restart. Retry the job; completed source files remain available."], ensure_ascii=False), timestamp, row["id"]),
+                "UPDATE processing_jobs SET state='queued', current_step='recovering', blockers_json='[]', updated_at=? WHERE id=?",
+                (timestamp, row["id"]),
             )
             db.execute(
-                "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, 'error', 'interrupted', ?, ?)",
-                (row["id"], "Processing was interrupted by a server restart.", timestamp),
+                "INSERT INTO processing_events (job_id, level, step, message, created_at) VALUES (?, 'info', 'recovering', ?, ?)",
+                (row["id"], "Service restarted; the persisted task was returned to the processing queue.", timestamp),
             )
+            recoveries.append((row["id"], row["order_id"], row_to_order(db, order_row), source_paths))
         db.commit()
+    for job_id, order_id, order, source_paths in recoveries:
+        _submit_processing_job(job_id, order_id, order, source_paths)
 
 
 @app.get("/api/auth/config")
@@ -1400,7 +1442,7 @@ def register_user(payload: UserRegister, request: Request) -> dict:
         db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''", (now,user_id))
         db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
                    (user_id,code_hash,expires_at,now,ip))
-        delivery.update(_send_or_local_verification_delivery(email, code))
+        delivery.update(_send_or_local_verification_delivery(email, code, allow_local=_is_local_request(request)))
     run_db_write(operation)
     response = {
         "verification_required": True,
@@ -1436,7 +1478,7 @@ def resend_email_verification(payload: EmailVerificationResend, request: Request
         db.execute("UPDATE email_verification_tokens SET used_at=? WHERE user_id=? AND used_at=''",(now,user["id"]))
         db.execute("INSERT INTO email_verification_tokens (user_id,code_hash,expires_at,created_at,request_ip) VALUES (?,?,?,?,?)",
                    (user["id"],code_hash,int(time.time())+EMAIL_VERIFICATION_TTL_SECONDS,now,_client_ip(request)))
-        delivery.update(_send_or_local_verification_delivery(email, code))
+        delivery.update(_send_or_local_verification_delivery(email, code, allow_local=_is_local_request(request)))
     run_db_write(operation)
     response = {
         "success": True,
@@ -1572,7 +1614,7 @@ def request_password_reset(payload: PasswordResetRequest, request: Request) -> d
         delivery = _send_password_reset_email(email, code)
     except EmailDeliveryError as exc:
         logger.error("Password reset delivery rejected recipient=%s code=%s detail=%s", email, exc.code, exc.detail)
-        if PASSWORD_RESET_DEV_CODE_ENABLED and LOCAL_DEVELOPMENT:
+        if (PASSWORD_RESET_DEV_CODE_ENABLED and LOCAL_DEVELOPMENT) or _is_local_request(request):
             delivery = {"channel": "local", "detail": exc.code, "sent_at": utc_now()}
         else:
             raise HTTPException(status_code=503, detail=exc.detail) from exc
@@ -1726,7 +1768,7 @@ def auth_logout(authorization: str | None = Header(default=None)) -> dict:
 
 
 @app.get("/api/public-config")
-def public_config() -> dict:
+def public_config(request: Request) -> dict:
     return {
         "version": APP_VERSION,
         "cloud_mode": CLOUD_MODE,
@@ -1739,8 +1781,8 @@ def public_config() -> dict:
         "authentication": {
             "smtp_configured": bool(SMTP_HOST and SMTP_FROM_EMAIL),
             "google_configured": bool(GOOGLE_CLIENT_ID),
-            "local_verification_code_enabled": bool(LOCAL_DEVELOPMENT and EMAIL_VERIFICATION_DEV_CODE_ENABLED),
-            "local_password_reset_code_enabled": bool(LOCAL_DEVELOPMENT and PASSWORD_RESET_DEV_CODE_ENABLED),
+            "local_verification_code_enabled": bool((LOCAL_DEVELOPMENT and EMAIL_VERIFICATION_DEV_CODE_ENABLED) or _is_local_request(request)),
+            "local_password_reset_code_enabled": bool((LOCAL_DEVELOPMENT and PASSWORD_RESET_DEV_CODE_ENABLED) or _is_local_request(request)),
         },
         "ai_providers": {
             "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
@@ -2129,6 +2171,56 @@ def _estimate_order_credits(analysis: dict, services: list[str], file_count: int
     return max(1, pages * per_page + size_surcharge)
 
 
+SERVICE_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "standard": ("conversion",),
+    "ocr": ("ocr",),
+    "image_recognition": ("ocr",),
+    "translation": ("translation",),
+    "conversion": ("conversion",),
+    "pdf_rebuild": ("ocr", "layout_preserve", "conversion"),
+    "data_cleanup": ("data_cleanup",),
+    "proofreading": ("data_cleanup",),
+    "table_recovery": ("data_cleanup", "layout_preserve"),
+    "scan_enhancement": ("ocr", "layout_preserve"),
+    "layout_recovery": ("layout_preserve",),
+    "document_organization": ("data_cleanup",),
+    "enterprise_analysis": ("enterprise_analysis",),
+    "markdown": ("conversion",),
+    "html": ("conversion",),
+    "json": ("conversion",),
+    "csv": ("conversion",),
+    "xml": ("conversion",),
+    "office": ("conversion",),
+}
+SERVICE_OUTPUT_FORMATS: dict[str, tuple[str, ...]] = {
+    "markdown": ("md",), "html": ("html",), "json": ("json",), "csv": ("csv",), "xml": ("xml",),
+    "office": ("docx", "xlsx", "pptx"),
+}
+SUPPORTED_OUTPUT_FORMATS = {"original", "docx", "xlsx", "pptx", "pdf", "md", "markdown", "html", "txt", "csv", "json", "xml", "images"}
+
+
+def normalize_processing_request(services: list[str], conversion: dict | None) -> tuple[list[str], dict]:
+    """Expand product-facing capabilities into executable engine services."""
+    normalized: list[str] = []
+    requested_formats: list[str] = []
+    for raw in services or ["standard"]:
+        service = str(raw).strip().lower()
+        for expanded in SERVICE_EXPANSIONS.get(service, (service,)):
+            if expanded not in normalized:
+                normalized.append(expanded)
+        if service in SERVICE_OUTPUT_FORMATS:
+            requested_formats.extend(item for item in SERVICE_OUTPUT_FORMATS[service] if item not in requested_formats)
+    payload = dict(conversion or {})
+    formats = payload.get("formats") if isinstance(payload.get("formats"), list) else []
+    for raw in [*formats, *requested_formats]:
+        value = "md" if str(raw).strip().lower() == "markdown" else str(raw).strip().lower()
+        if value in SUPPORTED_OUTPUT_FORMATS and value not in requested_formats:
+            requested_formats.append(value)
+    if "conversion" in normalized:
+        payload["formats"] = requested_formats or ["original"]
+    return normalized or ["conversion"], payload
+
+
 def _wallet_total(db: sqlite3.Connection, email: str) -> int:
     row = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
     return int(row["total"] if row else 0)
@@ -2225,7 +2317,7 @@ def archive_capabilities() -> dict:
 
 
 def _build_workspace_recommendation(analysis: dict) -> dict:
-    """Turn real document analysis into a stable, provider-neutral workspace plan."""
+    """Turn real document analysis into an explainable, confirmation-first plan."""
     formats = {str(item).lower() for item in analysis.get("input_formats", [])}
     files = analysis.get("files", [])
     scanned = any(
@@ -2235,41 +2327,54 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
     )
     spreadsheet = bool(formats & {"excel", "csv"})
     presentation = "powerpoint" in formats
-    image_only = formats and formats <= {"图片"}
+    image_only = bool(formats) and formats <= {"图片"}
 
     if scanned or image_only:
         profile = "scan"
         services = ["ocr", "translation", "conversion"]
+        enhancement_services = ["data_cleanup"]
+        auto_apply_services = ["ocr", "conversion", *enhancement_services]
         outputs = ["original", "pdf", "docx"]
-        reason = "检测到扫描内容或图片，建议先识别文字，再完成翻译、质量检查与版式交付。"
+        reason = "检测到扫描内容或图片，建议先完成 OCR，再进行整理、可选翻译和版式交付。"
     elif spreadsheet:
         profile = "spreadsheet"
         services = ["translation", "conversion"]
+        enhancement_services = ["data_cleanup", "enterprise_analysis"]
+        auto_apply_services = ["conversion", *enhancement_services]
         outputs = ["original", "xlsx", "csv", "pdf"]
-        reason = "检测到表格结构，建议保护公式、合并单元格、技术编号与变量后进行处理。"
+        reason = "检测到表格结构，建议保护公式、合并单元格、技术编号与变量，并启用整理和数据分析。"
     elif presentation:
         profile = "presentation"
         services = ["translation", "conversion"]
+        enhancement_services = ["data_cleanup"]
+        auto_apply_services = ["conversion", *enhancement_services]
         outputs = ["original", "pptx", "pdf"]
-        reason = "检测到演示文稿，建议保留文本框、图片、图表与幻灯片层级。"
+        reason = "检测到演示文稿，建议保留文本框、图片、图表与幻灯片层级，并提供原格式和 PDF 交付。"
     else:
         profile = "document"
         services = ["translation", "conversion"]
+        enhancement_services = ["data_cleanup"]
+        auto_apply_services = ["conversion", *enhancement_services]
         outputs = ["original", "docx", "pdf"]
         if "pdf" in formats:
             outputs.append("images")
-        reason = "检测到可编辑文档结构，建议保留原始版式并完成翻译与质量检查。"
+        reason = "检测到文档结构，建议保留原始版式，启用智能整理，并按需选择翻译和兼容输出。"
+
+    # Every listed output now has a real backend implementation. Keep the
+    # source-specific recommendations first, then expose the complete delivery
+    # set for users who need additional formats.
+    outputs = list(dict.fromkeys([*outputs, "docx", "xlsx", "pptx", "pdf", "md", "html", "txt", "csv", "json", "xml"]))
 
     detected_languages = analysis.get("detected_languages", [])
     detected_text = "、".join(str(item) for item in detected_languages)
-    if "中文" in detected_text:
-        target = "en"
-    elif "越南" in detected_text:
-        target = "zh"
+    if "中文" in detected_text or "Chinese" in detected_text:
+        suggested_targets = ["en", "vi"]
+    elif "越南" in detected_text or "Vietnam" in detected_text:
+        suggested_targets = ["zh", "en"]
     elif "英文" in detected_text or "English" in detected_text:
-        target = "zh"
+        suggested_targets = ["zh", "vi"]
     else:
-        target = "en"
+        suggested_targets = []
 
     warnings = [
         warning
@@ -2293,7 +2398,7 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
             * (1.25 if scanned else 1.0)
         ),
     )
-    estimated_credits = _estimate_order_credits(analysis, services, file_count, total_size_bytes)
+    estimated_credits = _estimate_order_credits(analysis, auto_apply_services, file_count, total_size_bytes)
     quality_score = 98
     if complexity == "中":
         quality_score -= 2
@@ -2320,7 +2425,8 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
 
     output_category_map = {
         "original": "源文件", "docx": "Office", "xlsx": "Office", "pptx": "Office",
-        "pdf": "PDF", "csv": "结构化数据", "images": "图片",
+        "pdf": "PDF", "md": "文本与网页", "html": "文本与网页", "txt": "文本与网页",
+        "csv": "结构化数据", "json": "结构化数据", "xml": "结构化数据", "images": "图片",
     }
     output_group_map: dict[str, list[str]] = {}
     for value in outputs:
@@ -2334,15 +2440,20 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
     industry = analysis.get("industry", "通用")
     if industry and industry != "通用":
         reason_details.append(f"文件内容更接近“{industry}”行业，将优先使用对应专业术语与质量规则。")
-    reason_details.append("输出格式已按当前输入与真实转换能力过滤，不会展示不兼容选项。")
+    reason_details.append("翻译是否启用、目标语言和双语布局必须由用户确认，系统不会默认假定中文或英文。")
+    reason_details.append("输出格式已按当前输入与真实转换能力过滤，可多选最终交付格式。")
     if scanned:
         reason_details.append("扫描件或图片需要 OCR，建议在翻译前先完成文字识别。")
 
     return {
         "profile": profile,
         "recommended_services": services,
+        "enhancement_services": enhancement_services,
+        "auto_apply_services": auto_apply_services,
         "compatible_outputs": outputs,
-        "recommended_target_language": target,
+        "recommended_target_language": suggested_targets[0] if suggested_targets else None,
+        "suggested_target_languages": suggested_targets,
+        "translation_confirmation_required": True,
         "confidence": confidence,
         "reason": reason,
         "reason_details": reason_details,
@@ -2359,6 +2470,8 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
         "input_groups": input_groups,
         "output_groups": output_groups,
         "warnings": warnings[:5],
+        "quality_checks": ["漏译检查", "术语一致性", "公式与结构校验", "交付前复检"],
+        "knowledge_strategy": "企业知识库 → 行业知识库 → 语言规则 → 质量守护",
         "provider_strategy": "provider-neutral",
     }
 
@@ -2520,7 +2633,8 @@ def _create_order_from_paths(payload: ChunkedOrderCreate, user: dict) -> dict:
         raise HTTPException(status_code=400, detail="Name and email are required.")
     if not payload.upload_ids:
         raise HTTPException(status_code=400, detail="At least one uploaded file is required.")
-    selected_services = payload.services or ["standard"]
+    translation_data = dict(payload.translation or {})
+    selected_services, conversion_data = normalize_processing_request(payload.services or ["standard"], payload.conversion)
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
     order_folder = UPLOAD_DIR / order_number
@@ -2548,11 +2662,11 @@ def _create_order_from_paths(payload: ChunkedOrderCreate, user: dict) -> dict:
             prepared_rows.extend(upload_rows)
             analysis_paths.extend((n,p) for n,p,_,_ in upload_rows)
             consumed_sessions.append(upload_id)
-        ai_analysis = analyze_order_files(analysis_paths, selected_services, payload.requirements.strip(), payload.translation)
+        ai_analysis = analyze_order_files(analysis_paths, selected_services, payload.requirements.strip(), translation_data)
         suggested_quote = suggest_quote(ai_analysis, selected_services)
         estimated_credits = _estimate_order_credits(ai_analysis, selected_services, len(prepared_rows), sum(r[2] for r in prepared_rows))
         def insert_order(db):
-            cur=db.execute("""INSERT INTO orders (order_number,name,company,email,whatsapp,country,deadline,requirements,services_json,translation_json,conversion_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'waiting_quote',?,?)""",(order_number,payload.name.strip(),payload.company.strip(),payload.email.strip(),payload.whatsapp.strip(),payload.country.strip(),payload.deadline.strip(),payload.requirements.strip(),json.dumps(selected_services,ensure_ascii=False),json.dumps(payload.translation,ensure_ascii=False),json.dumps(payload.conversion,ensure_ascii=False),created_at,created_at))
+            cur=db.execute("""INSERT INTO orders (order_number,name,company,email,whatsapp,country,deadline,requirements,services_json,translation_json,conversion_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'waiting_quote',?,?)""",(order_number,payload.name.strip(),payload.company.strip(),payload.email.strip(),payload.whatsapp.strip(),payload.country.strip(),payload.deadline.strip(),payload.requirements.strip(),json.dumps(selected_services,ensure_ascii=False),json.dumps(translation_data,ensure_ascii=False),json.dumps(conversion_data,ensure_ascii=False),created_at,created_at))
             order_id=cur.lastrowid; saved=[]
             for n,p,z,ct in prepared_rows:
                 fc=db.execute("INSERT INTO order_files (order_id,original_name,stored_name,stored_path,content_type,size_bytes,created_at) VALUES (?,?,?,?,?,?,?)",(order_id,n,Path(p).name,p,ct,z,created_at));saved.append({"id":fc.lastrowid,"original_name":n,"size_bytes":z})
@@ -2562,7 +2676,7 @@ def _create_order_from_paths(payload: ChunkedOrderCreate, user: dict) -> dict:
         order_id,saved_files=run_db_write(insert_order)
         for upload_id in consumed_sessions: shutil.rmtree(UPLOAD_SESSION_DIR/upload_id,ignore_errors=True)
         processing=start_processing(order_id)
-        return {"success":True,"order_id":order_id,"order_number":order_number,"status":"processing","files":saved_files,"ai_analysis":ai_analysis,"suggested_quote":suggested_quote,"estimated_credits":estimated_credits,"credits_enforced":ENFORCE_CREDITS,"services":selected_services,"translation":payload.translation,"conversion":payload.conversion,"processing_job":processing}
+        return {"success":True,"order_id":order_id,"order_number":order_number,"status":"processing","files":saved_files,"ai_analysis":ai_analysis,"suggested_quote":suggested_quote,"estimated_credits":estimated_credits,"credits_enforced":ENFORCE_CREDITS,"services":selected_services,"translation":translation_data,"conversion":conversion_data,"processing_job":processing}
     except Exception:
         shutil.rmtree(order_folder,ignore_errors=True)
         raise
@@ -2611,6 +2725,7 @@ async def create_order(
         raise HTTPException(status_code=400, detail="Invalid processing settings.") from exc
     if not isinstance(translation_data, dict) or not isinstance(conversion_data, dict):
         raise HTTPException(status_code=400, detail="Invalid processing settings.")
+    selected_services, conversion_data = normalize_processing_request(selected_services, conversion_data)
 
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
@@ -2893,6 +3008,14 @@ def processing_center_jobs(view: str = "active", user: dict = Depends(require_us
         duration_seconds = max(0, int(elapsed_ms / 1000)) if elapsed_ms else None
         ai_provider = str(translation.get("provider") or result.get("provider") or "").strip()
         ai_model = str(translation.get("model") or result.get("model") or "").strip()
+        job_progress = int(job.get("progress") or (100 if order["status"] in completed_states else 0))
+        estimated_remaining = max(0, int(avg_ms * remaining_steps / 1000))
+        if 0 < job_progress < 100 and started_at:
+            try:
+                elapsed_wall = max(1.0, (datetime.now(timezone.utc) - datetime.fromisoformat(str(started_at))).total_seconds())
+                estimated_remaining = max(estimated_remaining, int(elapsed_wall * (100 - job_progress) / job_progress))
+            except (TypeError, ValueError):
+                pass
         items.append({
             "id": order["id"],
             "order_number": order["order_number"],
@@ -2916,12 +3039,12 @@ def processing_center_jobs(view: str = "active", user: dict = Depends(require_us
             "job": {
                 "id": job.get("id"),
                 "state": job.get("state", order["status"]),
-                "progress": int(job.get("progress") or (100 if order["status"] in completed_states else 0)),
+                "progress": job_progress,
                 "current_step": job.get("current_step", order["status"]),
                 "steps": steps,
                 "events": (job.get("events") or [])[-30:],
                 "blockers": job.get("blockers") or [],
-                "estimated_remaining_seconds": max(0, int(avg_ms * remaining_steps / 1000)),
+                "estimated_remaining_seconds": estimated_remaining,
             },
         })
     return {"version": APP_VERSION, "summary": summary, "jobs": items}
@@ -2955,19 +3078,23 @@ def download_owned_output(file_id: int, user: dict = Depends(require_user)) -> F
 
 
 @app.get("/api/dashboard/recent-orders")
-def dashboard_recent_orders() -> dict:
+def dashboard_recent_orders(user: dict = Depends(require_user)) -> dict:
     status_labels = {
         "waiting_quote": "等待处理", "quoted": "已报价", "processing": "处理中",
         "completed": "已完成", "cancelled": "已取消", "failed": "失败",
     }
     with get_db() as db:
-        total = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-        rows = db.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 20").fetchall()
+        total = db.execute("SELECT COUNT(*) FROM orders WHERE lower(email)=lower(?)", (user["email"],)).fetchone()[0]
+        rows = db.execute(
+            "SELECT * FROM orders WHERE lower(email)=lower(?) ORDER BY id DESC LIMIT 20",
+            (user["email"],),
+        ).fetchall()
         items = []
         for row in rows:
             order = row_to_order(db, row)
             progress = 100 if order["status"] == "completed" else (order.get("processing_job") or {}).get("progress", 0)
             items.append({
+                "id": order["id"],
                 "order_number": order["order_number"],
                 "file_name": (order["files"][0]["original_name"] if order["files"] else order["order_number"]),
                 "services": order["services"],
@@ -3505,6 +3632,44 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
         _clear_job_control(job_id)
 
 
+def _submit_processing_job(job_id: int, order_id: int, order: dict, source_paths: list[tuple[str, str]]) -> bool:
+    """Submit a persisted job once and keep execution independent of any page."""
+    with _JOB_FUTURES_LOCK:
+        current = _JOB_FUTURES.get(job_id)
+        if current is not None and not current.done():
+            return False
+        future = _JOB_EXECUTOR.submit(_run_processing_worker, job_id, order_id, order, source_paths)
+        _JOB_FUTURES[job_id] = future
+
+    def release(done: Future) -> None:
+        with _JOB_FUTURES_LOCK:
+            if _JOB_FUTURES.get(job_id) is done:
+                _JOB_FUTURES.pop(job_id, None)
+        try:
+            done.result()
+        except Exception:
+            logger.exception("Unhandled processing future failure job_id=%s", job_id)
+
+    future.add_done_callback(release)
+    return True
+
+
+def _load_processing_payload(order_id: int) -> tuple[dict, list[tuple[str, str]]]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Order not found.")
+        order = row_to_order(db, row)
+        source_rows = db.execute("SELECT original_name,stored_path FROM order_files WHERE order_id=? ORDER BY id", (order_id,)).fetchall()
+    return order, [(item["original_name"], item["stored_path"]) for item in source_rows]
+
+
+def _processing_future_active(job_id: int) -> bool:
+    with _JOB_FUTURES_LOCK:
+        future = _JOB_FUTURES.get(job_id)
+        return future is not None and not future.done()
+
+
 @app.post("/api/orders/{order_id}/process", dependencies=[Depends(require_admin)])
 def start_processing(order_id: int) -> dict:
     created_at = utc_now()
@@ -3542,35 +3707,7 @@ def start_processing(order_id: int) -> dict:
         db.execute("UPDATE orders SET status = 'processing', updated_at = ? WHERE id = ?", (created_at, order_id))
         db.commit()
 
-    # Serverless runtimes freeze or terminate background threads as soon as the
-    # HTTP response is returned. That was the cause of cloud jobs stopping at
-    # 32% after the validation/analyse stages. Run the worker inside the active
-    # request on Vercel so it cannot be abandoned halfway through. Local and
-    # long-running container deployments keep the responsive background thread.
-    inline_processing = IS_VERCEL or CLOUD_MODE or os.getenv('PROCESSING_MODE', '').strip().lower() == 'inline'
-    if inline_processing:
-        _run_processing_worker(job_id, order_id, order, source_paths)
-        with get_db() as db:
-            finished = db.execute(
-                "SELECT state, progress, current_step FROM processing_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-        return {
-            "success": True,
-            "job_id": job_id,
-            "state": finished["state"] if finished else "failed",
-            "progress": int(finished["progress"] if finished else 100),
-            "current_step": finished["current_step"] if finished else "failed",
-            "serverless_inline": True,
-        }
-
-    thread = threading.Thread(
-        target=_run_processing_worker,
-        args=(job_id, order_id, order, source_paths),
-        name=f"document-job-{job_id}",
-        daemon=True,
-    )
-    thread.start()
+    _submit_processing_job(job_id, order_id, order, source_paths)
     return {"success": True, "job_id": job_id, "state": "queued", "progress": 0}
 
 
@@ -3614,6 +3751,10 @@ def resume_processing_job(job_id: int, user: dict = Depends(require_user)) -> di
         db.execute("UPDATE processing_jobs SET state='processing',updated_at=? WHERE id=?", (now, job_id))
         db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info','processing','任务已继续处理',?)", (job_id, now))
         db.commit()
+        order_id = int(row["order_id"])
+    if not _processing_future_active(job_id):
+        order, source_paths = _load_processing_payload(order_id)
+        _submit_processing_job(job_id, order_id, order, source_paths)
     return {"success": True, "state": "processing"}
 
 @app.post("/api/processing-center/jobs/{job_id}/stop")
@@ -3633,10 +3774,13 @@ def stop_processing_job(job_id: int, user: dict = Depends(require_user)) -> dict
         control = _job_control(job_id)
         control["cancel"].set(); control["pause"].clear()
         now = utc_now()
-        db.execute("UPDATE processing_jobs SET state='cancelling',current_step='cancelling',updated_at=? WHERE id=?", (now, job_id))
-        db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info','cancelling','正在安全停止任务，当前 AI 请求完成后立即退出',?)", (job_id, now))
+        next_state = "cancelling" if _processing_future_active(job_id) else "cancelled"
+        db.execute("UPDATE processing_jobs SET state=?,current_step=?,updated_at=? WHERE id=?", (next_state, next_state, now, job_id))
+        db.execute("INSERT INTO processing_events (job_id,level,step,message,created_at) VALUES (?, 'info',?,?,?)", (job_id, next_state, "正在安全停止任务，当前 AI 请求完成后立即退出" if next_state == "cancelling" else "任务已停止", now))
+        if next_state == "cancelled":
+            db.execute("UPDATE orders SET status='cancelled',updated_at=? WHERE id=?", (now, row["order_id"]))
         db.commit()
-    return {"success": True, "state": "cancelling"}
+    return {"success": True, "state": next_state}
 
 @app.post("/api/orders/{order_id}/recover")
 def recover_stalled_order(

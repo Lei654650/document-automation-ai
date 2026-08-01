@@ -3,6 +3,7 @@ import {
   ArrowRight,
   BrainCircuit,
   Check,
+  CircleCheck,
   Clock3,
   Coins,
   FileText,
@@ -28,19 +29,19 @@ const OUTPUT_LABELS = {
 };
 
 const SERVICE_LABELS = {
-  ocr: ['OCR', 'OCR'],
-  translation: ['文档翻译', 'Translation'],
-  conversion: ['格式转换', 'Conversion'],
-  data_cleanup: ['智能整理', 'Smart cleanup'],
+  ocr: ['OCR 与图片识别', 'OCR & image recognition'],
+  translation: ['文档翻译（待用户确认）', 'Document translation (confirm required)'],
+  conversion: ['格式转换', 'Format conversion'],
+  data_cleanup: ['智能整理与校对', 'Smart cleanup & proofing'],
   enterprise_analysis: ['企业数据分析', 'Enterprise analysis'],
 };
 
-function formatBytes(bytes, isZh) {
+function formatBytes(bytes) {
   const value = Number(bytes || 0);
   if (!value) return '—';
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`;
-  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB${isZh ? '' : ''}`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 function displayCount(value, complete = true) {
@@ -56,10 +57,11 @@ export default function AIAnalysisPanel({
   analyzing,
   error,
   fileCount,
+  applied,
   onApply,
 }) {
   const confidence = Math.round(Number(recommendation?.confidence || 0) * 100);
-  const services = recommendation?.recommended_services || [];
+  const services = [...new Set([...(recommendation?.recommended_services || []), ...(recommendation?.enhancement_services || [])])];
   const formats = analysis?.input_formats || [];
   const languages = recommendation?.detected_languages || analysis?.detected_languages || [];
   const ocrLanguages = recommendation?.ocr_languages || analysis?.ocr_languages || [];
@@ -71,7 +73,7 @@ export default function AIAnalysisPanel({
           <span><Sparkles /></span>
           <div>
             <b>{isZh ? 'AI 正在分析真实文件' : 'AI is analyzing the actual files'}</b>
-            <small>{isZh ? '正在读取文件结构、语言、行业、图片、表格和 OCR 需求，不会启动处理任务。' : 'Reading structure, language, industry, images, tables and OCR needs. Processing has not started.'}</small>
+            <small>{isZh ? '正在读取文件结构、语言、行业、图片、表格和 OCR 需求；此时不会创建任务。' : 'Reading structure, language, industry, images, tables and OCR needs. No task is created yet.'}</small>
           </div>
         </header>
         <div className="ai-analysis-skeleton-v44"><i /><i /><i /><i /></div>
@@ -86,10 +88,14 @@ export default function AIAnalysisPanel({
           <span><AlertTriangle /></span>
           <div>
             <b>{isZh ? '真实文件分析暂时不可用' : 'File analysis is temporarily unavailable'}</b>
-            <small>{isZh ? '不会展示虚假的 AI 结论。您可以使用安全默认方案，或检查后端后重新上传。' : 'No fabricated AI result is shown. Use the safe fallback plan or retry after checking the backend.'}</small>
+            <small>{isZh ? '系统不会展示虚假的 AI 结论。可进入安全默认方案继续配置，或检查后端后重新上传。' : 'No fabricated AI result is shown. Continue with a safe fallback plan or retry after checking the backend.'}</small>
           </div>
         </header>
         <div className="analysis-fallback-note-v44"><ShieldCheck />{error}</div>
+        <footer>
+          <span><ShieldCheck />{isZh ? '处理尚未开始' : 'Processing has not started'}</span>
+          <button type="button" onClick={onApply}>{isZh ? '进入安全方案确认' : 'Review safe fallback'}<ArrowRight /></button>
+        </footer>
       </section>
     );
   }
@@ -100,8 +106,8 @@ export default function AIAnalysisPanel({
         <header>
           <span><BrainCircuit /></span>
           <div>
-            <b>{isZh ? '上传后自动生成 AI Analysis Report' : 'AI Analysis Report is generated after upload'}</b>
-            <small>{isZh ? 'AI 先理解文档，再推荐能力、输出格式、布局和处理方案。' : 'AI understands the documents before recommending capabilities, formats, layout and workflow.'}</small>
+            <b>{isZh ? '上传后自动生成 AI 分析报告' : 'AI Analysis Report is generated after upload'}</b>
+            <small>{isZh ? 'AI 先理解文档，再推荐处理能力、输出格式和布局。' : 'AI understands the documents before recommending capabilities, formats and layout.'}</small>
           </div>
         </header>
       </section>
@@ -112,16 +118,16 @@ export default function AIAnalysisPanel({
   const imageCount = displayCount(analysis.total_images, analysis.image_count_complete !== false);
   const tableCount = displayCount(analysis.total_tables, analysis.table_count_complete !== false);
   const ocrText = recommendation.ocr_required
-    ? ocrLanguages.length ? ocrLanguages.join(' / ') : (isZh ? '待 OCR 识别' : 'Detect during OCR')
+    ? ocrLanguages.length ? ocrLanguages.join(' / ') : (isZh ? '处理时自动识别' : 'Detect during processing')
     : (isZh ? '无需 OCR' : 'OCR not required');
   const quality = Number(recommendation.quality_score || 0);
   const facts = [
     [isZh ? '文件数量' : 'Files', analysis.file_count || fileCount, Files],
-    [isZh ? '文件大小' : 'File size', formatBytes(analysis.total_size_bytes, isZh), HardDrive],
+    [isZh ? '文件大小' : 'File size', formatBytes(analysis.total_size_bytes), HardDrive],
     [isZh ? '页数 / 幻灯片' : 'Pages / slides', pageCount, FileText],
     [isZh ? '图片数量' : 'Images', imageCount, ImageIcon],
     [isZh ? '表格数量' : 'Tables', tableCount, Table2],
-    [isZh ? 'OCR 语言' : 'OCR language', ocrText, ScanText],
+    [isZh ? 'OCR 判断' : 'OCR decision', ocrText, ScanText],
     [isZh ? '文档语言' : 'Document language', languages.join(' / ') || '—', Languages],
     [isZh ? '行业识别' : 'Industry', recommendation.industry || analysis.industry || (isZh ? '通用' : 'General'), BrainCircuit],
     [isZh ? '复杂度' : 'Complexity', recommendation.complexity || analysis.complexity || '—', Gauge],
@@ -135,13 +141,13 @@ export default function AIAnalysisPanel({
   const reasons = recommendation.reason_details?.length ? recommendation.reason_details : [recommendation.reason].filter(Boolean);
 
   return (
-    <section className="ai-analysis-panel-v44 is-ready" aria-live="polite">
+    <section className={`ai-analysis-panel-v44 is-ready ${applied ? 'is-applied' : ''}`} aria-live="polite">
       <header>
-        <span><Sparkles /></span>
+        <span>{applied ? <CircleCheck /> : <Sparkles />}</span>
         <div>
           <small>AI ANALYSIS REPORT</small>
-          <b>{isZh ? '真实文件分析完成' : 'Actual file analysis complete'}</b>
-          <p>{isZh ? '以下结果来自已上传文件的内容与结构，不是静态演示数据。' : 'These results come from the uploaded content and structure — not static demo data.'}</p>
+          <b>{applied ? (isZh ? '推荐方案已应用，下一步请确认' : 'Recommendation applied — confirm the plan') : (isZh ? '真实文件分析完成' : 'Actual file analysis complete')}</b>
+          <p>{isZh ? '分析结果来自已上传文件。是否翻译和目标语言必须由您确认，不会自动假定。' : 'Results come from the uploaded files. Translation and target languages require your confirmation.'}</p>
         </div>
         <em>{confidence}% {isZh ? '可信度' : 'confidence'}</em>
       </header>
@@ -185,7 +191,7 @@ export default function AIAnalysisPanel({
           {reasons.map(reason => <p key={reason}><Check />{reason}</p>)}
         </section>
         <section>
-          <b>{isZh ? '推荐能力' : 'Recommended capabilities'}</b>
+          <b>{isZh ? '可用能力' : 'Available capabilities'}</b>
           <div>{services.length
             ? services.map(service => <i key={service}><Check />{SERVICE_LABELS[service]?.[isZh ? 0 : 1] || service}</i>)
             : '—'}
@@ -199,7 +205,11 @@ export default function AIAnalysisPanel({
 
       <footer>
         <span><ShieldCheck />{isZh ? `分析耗时 ${analysis.analysis_duration_ms || 0} ms · 处理尚未开始` : `Analyzed in ${analysis.analysis_duration_ms || 0} ms · processing has not started`}</span>
-        <button type="button" onClick={onApply}>{isZh ? '一键应用推荐方案' : 'Apply recommendation'}<ArrowRight /></button>
+        <button type="button" className={applied ? 'applied' : ''} onClick={onApply}>
+          {applied ? <CircleCheck /> : null}
+          {applied ? (isZh ? '已应用，前往用户确认' : 'Applied — review confirmation') : (isZh ? '应用推荐方案并继续' : 'Apply recommendation and continue')}
+          <ArrowRight />
+        </button>
       </footer>
     </section>
   );

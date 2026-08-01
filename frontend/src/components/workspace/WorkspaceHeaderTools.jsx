@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Bell,
@@ -7,7 +7,13 @@ import {
   FileQuestion,
   Headphones,
   History,
+  House,
+  LayoutDashboard,
+  LogOut,
   PlayCircle,
+  CreditCard,
+  Settings2,
+  ShieldCheck,
   Sparkles,
   TicketCheck,
   UserRound,
@@ -20,10 +26,16 @@ export default function WorkspaceHeaderTools({
   locale,
   setPage,
   user,
+  authToken,
+  setAuthToken,
+  setCurrentUser,
   primaryAction,
 }) {
   const [target, setTarget] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const accountTimer = useRef(null);
   const isZh = String(locale).startsWith('zh');
   const isVi = String(locale).startsWith('vi');
   const L = (zh, en, vi) => isZh ? zh : isVi ? vi : en;
@@ -45,9 +57,39 @@ export default function WorkspaceHeaderTools({
     : accountName.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
 
   const openNotifications = () => {
-    localStorage.setItem('da_settings_section', 'notifications');
-    window.dispatchEvent(new CustomEvent('da-settings-section', { detail: 'notifications' }));
-    setPage('settings');
+    setAccountOpen(false);
+    setNotificationsOpen(value => !value);
+  };
+  const openAccount = () => {
+    if (accountTimer.current) window.clearTimeout(accountTimer.current);
+    setAccountOpen(true);
+  };
+  const closeAccount = () => {
+    if (accountTimer.current) window.clearTimeout(accountTimer.current);
+    accountTimer.current = window.setTimeout(() => setAccountOpen(false), 180);
+  };
+  const go = page => {
+    setAccountOpen(false);
+    setPage(page);
+  };
+  const signOut = async () => {
+    try {
+      if (authToken) {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+      }
+    } catch {
+      // Local state is still cleared if the network is unavailable.
+    }
+    localStorage.removeItem('da_auth_token');
+    localStorage.removeItem('da_current_user');
+    localStorage.removeItem('da_user_profile');
+    setAuthToken?.('');
+    setCurrentUser?.(null);
+    window.dispatchEvent(new CustomEvent('da-current-user', { detail: null }));
+    go('login');
   };
 
   const helpItems = [
@@ -63,6 +105,10 @@ export default function WorkspaceHeaderTools({
 
   return createPortal((
     <div className="workspace-header-tools-v45">
+      <button type="button" className="workspace-header-home-v45" onClick={() => go('home')} title={L('返回首页', 'Back to home', 'Về trang chủ')}>
+        <House />
+        <span>{L('返回首页', 'Home', 'Trang chủ')}</span>
+      </button>
       {primaryAction && (
         <button type="button" className="workspace-header-primary-v45" onClick={primaryAction.onClick}>
           <Sparkles />
@@ -73,16 +119,33 @@ export default function WorkspaceHeaderTools({
         <CircleHelp />
         <span>{L('帮助中心', 'Help center', 'Trung tâm trợ giúp')}</span>
       </button>
-      <button type="button" className="workspace-header-icon-v45" title={L('通知', 'Notifications', 'Thông báo')} onClick={openNotifications}>
-        <Bell />
-      </button>
-      <button type="button" className="workspace-header-account-v45" onClick={() => setPage('account')}>
-        <i>{initials || <UserRound />}</i>
-        <span>
-          <b>{accountName}</b>
-          <small>{user?.email || L('我的账户', 'My account', 'Tài khoản')}</small>
-        </span>
-      </button>
+      <div className="workspace-notification-wrap-v45">
+        <button type="button" className={`workspace-header-icon-v45 ${notificationsOpen ? 'active' : ''}`} title={L('通知', 'Notifications', 'Thông báo')} onClick={openNotifications} aria-expanded={notificationsOpen}>
+          <Bell />
+          <i className="workspace-notification-dot-v45" />
+        </button>
+        {notificationsOpen && <section className="workspace-notification-panel-v45">
+          <header><div><b>{L('通知中心', 'Notifications', 'Thông báo')}</b><small>{L('任务和系统消息会显示在这里', 'Task and system updates appear here', 'Cập nhật tác vụ hiển thị tại đây')}</small></div><button type="button" onClick={() => setNotificationsOpen(false)}><X /></button></header>
+          <div className="workspace-notification-empty-v45"><Bell /><b>{L('暂无新通知', 'No new notifications', 'Không có thông báo mới')}</b><p>{L('任务完成、失败和额度提醒将自动显示。', 'Completed, failed and credit alerts will appear automatically.', 'Thông báo tác vụ sẽ tự động xuất hiện.')}</p></div>
+          <footer><button type="button" onClick={() => { setNotificationsOpen(false); go('processing'); }}>{L('查看任务队列', 'View task queue', 'Xem hàng đợi')}</button><button type="button" onClick={() => { setNotificationsOpen(false); localStorage.setItem('da_settings_section', 'notifications'); window.dispatchEvent(new CustomEvent('da-settings-section', { detail: 'notifications' })); go('settings'); }}>{L('通知设置', 'Notification settings', 'Cài đặt thông báo')}</button></footer>
+        </section>}
+      </div>
+      <div className="workspace-account-hover-v45" onMouseEnter={openAccount} onMouseLeave={closeAccount}>
+        <button type="button" className="workspace-header-account-v45" aria-haspopup="menu" aria-expanded={accountOpen} onFocus={openAccount}>
+          <i>{initials || <UserRound />}</i>
+          <span>
+            <b>{accountName}</b>
+            <small>{user?.email || L('我的账户', 'My account', 'Tài khoản')}</small>
+          </span>
+        </button>
+        {accountOpen && <div className="workspace-account-menu-v45" role="menu" onMouseEnter={openAccount} onMouseLeave={closeAccount}>
+          <button type="button" role="menuitem" onClick={() => go('dashboard')}><LayoutDashboard />{L('工作台', 'Workspace', 'Không gian làm việc')}</button>
+          {['owner', 'admin'].includes(String(user?.role || '').toLowerCase()) && <button type="button" role="menuitem" onClick={() => go('admin')}><ShieldCheck />{L('管理后台', 'Admin console', 'Quản trị')}</button>}
+          <button type="button" role="menuitem" onClick={() => go('settings')}><Settings2 />{L('设置', 'Settings', 'Cài đặt')}</button>
+          <button type="button" role="menuitem" onClick={() => go('billing')}><CreditCard />{L('套餐', 'Plans', 'Gói')}</button>
+          <button type="button" role="menuitem" className="danger" onClick={signOut}><LogOut />{L('退出登录', 'Sign out', 'Đăng xuất')}</button>
+        </div>}
+      </div>
       {helpOpen && createPortal(
         <div className="workspace-help-backdrop-v45" onClick={() => setHelpOpen(false)}>
           <section className="workspace-help-center-v45" onClick={event => event.stopPropagation()}>

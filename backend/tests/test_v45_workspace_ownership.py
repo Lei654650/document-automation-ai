@@ -77,13 +77,14 @@ class WorkspaceOwnershipTests(unittest.TestCase):
             self.assertEqual(paused["state"], "paused")
             self.assertEqual(db.execute("SELECT state FROM processing_jobs WHERE id=11").fetchone()["state"], "paused")
 
-            resumed = main.resume_processing_job(11, {"email": "owner@example.test"})
+            with patch.object(main, "_load_processing_payload", return_value=({}, [])), patch.object(main, "_submit_processing_job", return_value=True):
+                resumed = main.resume_processing_job(11, {"email": "owner@example.test"})
             self.assertEqual(resumed["state"], "processing")
             self.assertEqual(db.execute("SELECT state FROM processing_jobs WHERE id=11").fetchone()["state"], "processing")
 
             stopped = main.stop_processing_job(11, {"email": "owner@example.test"})
-            self.assertEqual(stopped["state"], "cancelling")
-            self.assertEqual(db.execute("SELECT state FROM processing_jobs WHERE id=11").fetchone()["state"], "cancelling")
+            self.assertEqual(stopped["state"], "cancelled")
+            self.assertEqual(db.execute("SELECT state FROM processing_jobs WHERE id=11").fetchone()["state"], "cancelled")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,8 @@ def test_health_capabilities_proxy_and_unconfigured_states(client: TestClient):
     assert google.status_code == 503
 
     vite_config = (Path(__file__).resolve().parents[2] / "frontend" / "vite.config.js").read_text(encoding="utf-8")
-    assert "'/api': 'http://127.0.0.1:8000'" in vite_config
+    assert "'/api': devApiProxy" in vite_config
+    assert "VITE_DEV_API_PROXY" in vite_config
 
 
 def test_registration_login_logout_and_password_reset_local_code(client: TestClient):
@@ -298,3 +300,52 @@ def test_file_upload_task_status_and_authenticated_download(client: TestClient, 
     download = client.get(f"/api/processing-center/outputs/{output_id}/download", headers=headers)
     assert download.status_code == 200, download.text
     assert download.content == b"accepted output"
+
+
+def test_real_background_task_queue_and_download_flow(client: TestClient, monkeypatch):
+    """Exercise the real executor instead of mocking task creation."""
+    monkeypatch.setattr(main_module, "REGISTRATION_IP_MAX_ACCOUNTS", 1000)
+    email = f"background-{time.time_ns()}@example.test"
+    token = _register_and_verify(client, email)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    started = time.monotonic()
+    response = client.post(
+        "/api/orders",
+        headers=headers,
+        files={"files": ("background-source.txt", b"Background processing must survive page navigation.", "text/plain")},
+        data={
+            "name": "Background Acceptance",
+            "email": email,
+            "services": json.dumps(["conversion", "markdown", "json", "xml"]),
+            "translation_json": "{}",
+            "conversion_json": json.dumps({"formats": ["docx", "md", "json", "xml"]}),
+        },
+    )
+    assert response.status_code == 200, response.text
+    created = response.json()
+    assert time.monotonic() - started < 3.0
+    assert created["processing_job"]["state"] == "queued"
+
+    current = None
+    for _ in range(100):
+        queue_response = client.get("/api/processing-center/jobs", params={"view": "all"}, headers=headers)
+        assert queue_response.status_code == 200, queue_response.text
+        current = next(item for item in queue_response.json()["jobs"] if item["id"] == created["order_id"])
+        if current["job"]["state"] in {"completed", "partial_completed", "failed"}:
+            break
+        time.sleep(0.05)
+
+    assert current is not None
+    assert current["job"]["state"] == "completed", current
+    assert current["job"]["progress"] == 100
+    assert {Path(item["original_name"]).suffix for item in current["output_files"]} >= {".docx", ".md", ".json", ".xml"}
+
+    output = current["output_files"][0]
+    download = client.get(output["download_url"], headers=headers)
+    assert download.status_code == 200, download.text
+    assert download.content
+
+    dashboard = client.get("/api/dashboard/recent-orders", headers=headers)
+    assert dashboard.status_code == 200
+    assert any(item["id"] == created["order_id"] for item in dashboard.json()["orders"])

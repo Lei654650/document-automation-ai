@@ -5,6 +5,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from app.engines.job_engine import (
     _apply_excel_multiline_layout,
     _repair_xlsx_placeholder_corruption,
@@ -12,7 +14,10 @@ from app.engines.job_engine import (
 
 
 def _fixture() -> Path:
-    return Path(__file__).resolve().parents[2] / "Enterprise_Test_Suite" / "02_Excel" / "01_Complex_BOM_MultiSheet.xlsx"
+    fixture = Path(__file__).resolve().parents[2] / "Enterprise_Test_Suite" / "02_Excel" / "01_Complex_BOM_MultiSheet.xlsx"
+    if not fixture.exists():
+        pytest.skip("Enterprise Excel fixture suite is not included in this source package.")
+    return fixture
 
 
 def test_normal_workbook_skips_placeholder_rebuild() -> None:

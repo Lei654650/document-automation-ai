@@ -8,7 +8,7 @@ export default function TaskStyleOptions({ isZh, outputOptions, setOutputOptions
   const [target, setTarget] = useState(null);
 
   useEffect(() => {
-    const syncTarget = () => setTarget(document.querySelector('.advanced-panel-v3052'));
+    const syncTarget = () => setTarget(document.querySelector('.plan-advanced-content-v44'));
     syncTarget();
     const observer = new MutationObserver(syncTarget);
     observer.observe(document.body, { childList: true, subtree: true });

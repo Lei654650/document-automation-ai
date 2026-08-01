@@ -605,7 +605,18 @@ const I18N = {
     smartZip: 'ZIP sẽ được giải nén, phân loại, xử lý và đóng gói lại'
   }
 };
-const LANGUAGE_OPTIONS = [['zh', '🇨🇳', '简体中文', 'zh-CN'], ['en', '🇺🇸', 'English', 'en-US'], ['vi', '🇻🇳', 'Tiếng Việt', 'vi-VN']];
+const LANGUAGE_OPTIONS = [
+  ['zh', '🇨🇳', '简体中文', 'zh-CN'],
+  ['zh-TW', '🇭🇰', '繁體中文', 'zh-TW'],
+  ['en', '🇺🇸', 'English', 'en-US'],
+  ['vi', '🇻🇳', 'Tiếng Việt', 'vi-VN'],
+  ['ja', '🇯🇵', '日本語', 'ja-JP'],
+  ['ko', '🇰🇷', '한국어', 'ko-KR'],
+  ['es', '🇪🇸', 'Español', 'es-ES'],
+  ['fr', '🇫🇷', 'Français', 'fr-FR'],
+  ['de', '🇩🇪', 'Deutsch', 'de-DE'],
+  ['pt', '🇵🇹', 'Português', 'pt-PT'],
+];
 const EXTRA_LOCALES = {
   'zh-TW': {
     lang: '繁體中文',
@@ -842,7 +853,20 @@ const serviceIcons = {
   translation: Languages,
   conversion: Workflow,
   data_cleanup: Sparkles,
-  enterprise_analysis: Code2
+  enterprise_analysis: Code2,
+  image_recognition: Camera,
+  pdf_rebuild: FileText,
+  proofreading: Bot,
+  table_recovery: Grid3X3,
+  scan_enhancement: ScanText,
+  layout_recovery: LayoutDashboard,
+  document_organization: FolderOpen,
+  markdown: FileText,
+  html: Code2,
+  json: Code2,
+  csv: Grid3X3,
+  xml: Code2,
+  office: FolderOpen
 };
 const serviceKeys = {
   ocr: 'serviceOcr',
@@ -866,7 +890,16 @@ const formatKeys = {
   pdf: 'PDF',
   pptx: 'PPT',
   csv: 'CSV',
+  md: 'Markdown',
+  html: 'HTML',
+  txt: 'TXT',
+  json: 'JSON',
+  xml: 'XML',
   images: 'fmtImages'
+};
+const serviceFormatCapabilities = {
+  markdown: ['md'], html: ['html'], json: ['json'], csv: ['csv'], xml: ['xml'],
+  office: ['docx', 'xlsx', 'pptx']
 };
 const EVENT_ZH = {
   validate: '检查',
@@ -977,6 +1010,7 @@ function App() {
     [outputFormats, setOutputFormats] = useState([]);
   const [outputOptions, setOutputOptions] = useState({
     profile: 'auto',
+    language_mode: 'single',
     preserve_layout: true,
     preserve_formulas: true,
     preserve_images: true,
@@ -1263,6 +1297,7 @@ function App() {
       setOutputFormats([]);
       setOutputOptions({
         profile: 'auto',
+        language_mode: 'single',
         preserve_layout: true,
         preserve_formulas: true,
         preserve_images: true,
@@ -1331,6 +1366,7 @@ function App() {
       source_language: 'auto',
       target_language: translationTargets[0] || 'en',
       targets: translationTargets,
+      language_mode: outputOptions.language_mode || (translationTargets.length > 1 ? 'multiple' : 'single'),
       bilingual_layout: outputOptions.bilingual_layout || 'auto'
     };
     const conversion = {
@@ -1511,7 +1547,6 @@ function App() {
             setLanguageOpen(false);
           }}><span><i className="language-flag">{flag}</i>{label}</span>{locale === id && <Check size={16} />}</button>)}</div>}</div>
       <button className="menu" onClick={() => setMobile(!mobile)}>{mobile ? <X /> : <Menu />}</button></header>}
-    {isWorkspacePage && page !== 'dashboard' && <button type="button" className="workspace-return-nav" onClick={() => setPage('dashboard')}><ArrowLeft />{uiL('返回工作台', 'Back to workspace', 'Về không gian làm việc')}</button>}
     {page === 'order' && <TaskStyleOptions isZh={locale.startsWith('zh')} outputOptions={outputOptions} setOutputOptions={setOutputOptions} />}
     {page === 'home' && <Home t={t} setPage={setPage} locale={locale} authToken={authToken} currentUser={currentUser} />} {page === 'order' && <PageErrorBoundary locale={locale} onBack={() => setPage('home')}><OrderCenter {...{
         t,
@@ -1532,6 +1567,7 @@ function App() {
         submitOrder,
         submitting,
         error,
+        setError,
         setPage,
         smartPlan,
         preferences,
@@ -2209,7 +2245,7 @@ function SettingsPage({
   <EnterpriseSidebar setPage={setPage} active="settings" />
   <DefaultProcessingTemplates active={!providerOnly && activeSection === 'processing'} prefs={prefs} update={update} L={L} />
   <GeneralSettingsPanel active={!providerOnly && activeSection === 'general'} locale={locale} setLocale={setLocale} changeProfile={changeProfile} L={L} />
-  <WorkspaceHeaderTools targetSelector=".settings-v333-top .settings-header-actions-v381" locale={locale} setPage={setPage} user={profile} />
+  <WorkspaceHeaderTools targetSelector=".settings-v333-top .settings-header-actions-v381" locale={locale} setPage={setPage} user={profile} authToken={authToken} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} />
   <section className="settings-v333-content"><header className="settings-v333-top"><div><h1>{providerOnly ? L('AI 服务商', 'AI Providers', 'Nhà cung cấp AI') : L('设置中心', 'Settings Center', 'Trung tâm cài đặt')}</h1><p>{providerOnly ? L('集中管理模型服务、API 密钥、连接状态与默认路由', 'Manage model services, API keys, connection health and default routing', 'Quản lý dịch vụ mô hình, API Key và định tuyến') : L('管理您的账户、工作区和 AI 偏好设置', 'Manage your account, workspace and AI preferences', 'Quản lý tài khoản, không gian làm việc và AI')}</p></div><div className="settings-header-actions-v381"><button className="settings-icon-btn" onClick={() => setHeaderMenu(headerMenu === 'help' ? '' : 'help')}><HelpCircle />{L('帮助', 'Help', 'Trợ giúp')}</button><button className="settings-icon-only" onClick={() => setHeaderMenu(headerMenu === 'notifications' ? '' : 'notifications')}><Bell /></button><button className="settings-user-menu-v341" onClick={() => setHeaderMenu(headerMenu === 'user' ? '' : 'user')}><span>{initial}</span><ChevronDown /></button>{headerMenu && <div className="settings-header-popover-v381">{headerMenu === 'help' && <><b>{L('设置中心帮助', 'Settings help', 'Trợ giúp cài đặt')}</b><p>{L('修改设置后点击“保存更改”。需要配置 API 时，请进入 AI 服务商中心。', 'Change a setting and click Save changes. Configure API providers in the AI Provider Center.', 'Thay đổi cài đặt rồi nhấn Lưu thay đổi.')}</p><button onClick={() => {
                 setHeaderMenu('');
                 setPage('aiProviders');
@@ -2288,6 +2324,7 @@ function OrderCenter({
   submitOrder,
   submitting,
   error,
+  setError,
   setPage,
   smartPlan,
   preferences,
@@ -2304,6 +2341,13 @@ function OrderCenter({
   aiInsightError
 }) {
   const toggle = (v, l, s) => s(l.includes(v) ? l.filter(x => x !== v) : [...l, v]);
+  const toggleServiceCapability = id => {
+    const active = services.includes(id);
+    let next = active ? services.filter(item => item !== id) : [...services, id];
+    if (!active && (serviceFormatCapabilities[id] || id === 'pdf_rebuild') && !next.includes('conversion')) next = [...next, 'conversion'];
+    setServices([...new Set(next)]);
+    if (!active && serviceFormatCapabilities[id]) setOutputFormats(current => [...new Set([...current, ...serviceFormatCapabilities[id]])]);
+  };
   const isZh = document.documentElement.lang.startsWith('zh');
   const [advanced, setAdvanced] = useState(false);
   const [advancedSections, setAdvancedSections] = useState({
@@ -2318,6 +2362,7 @@ function OrderCenter({
   });
   const [showMoreCapabilities, setShowMoreCapabilities] = useState(false);
   const [planConfirmed, setPlanConfirmed] = useState(false);
+  const [recommendationApplied, setRecommendationApplied] = useState(false);
   const profiles = [['auto', isZh ? 'AI 自动推荐' : 'AI recommended'], ['excel_automation', isZh ? 'Excel（自动化）' : 'Excel (Automation)'], ['word_contract', isZh ? 'Word（合同）' : 'Word (Contract)'], ['word_manual', isZh ? 'Word（说明书）' : 'Word (Manual)'], ['pdf_scan', isZh ? 'PDF（扫描件）' : 'PDF (Scanned)'], ['ppt_training', isZh ? 'PPT（培训资料）' : 'PPT (Training)'], ['finance', isZh ? '财务报表' : 'Financial report'], ['legal', isZh ? '法律文档' : 'Legal document'], ['medical', isZh ? '医疗文档' : 'Medical document'], ['custom', isZh ? '自定义' : 'Custom']];
   const applyProfile = id => {
     const excel = id === 'excel_automation';
@@ -2396,11 +2441,22 @@ function OrderCenter({
   const estimatedCredits = Number(recommendation?.estimated_credits || Math.max(1, Math.ceil(workspaceCount * 2 + workspaceTotalSize / 1024 / 1024)));
   const estimatedQuality = Number(recommendation?.quality_score || (services.includes('translation') ? 96 : 98));
   const analysisReady = !!recommendation || !!aiInsightError;
-  const fallbackFormats = hasSpreadsheetFiles ? ['xlsx', 'csv', 'pdf'] : workspaceFiles.some(f => /\.(pptx?|odp)$/i.test(f.name || '')) ? ['pptx', 'pdf'] : workspaceFiles.some(f => /\.(png|jpe?g|bmp|tiff?)$/i.test(f.name || '')) ? ['pdf', 'docx', 'images'] : ['docx', 'pdf'];
+  const universalFormats = ['docx', 'xlsx', 'pptx', 'pdf', 'md', 'html', 'txt', 'csv', 'json', 'xml'];
+  const naturalFormats = hasSpreadsheetFiles
+    ? ['xlsx', 'csv', 'pdf']
+    : workspaceFiles.some(f => /\.(pptx?|odp)$/i.test(f.name || ''))
+      ? ['pptx', 'pdf']
+      : workspaceFiles.some(f => /\.(png|jpe?g|bmp|tiff?|webp)$/i.test(f.name || ''))
+        ? ['pdf', 'docx', 'images']
+        : ['docx', 'pdf'];
+  const fallbackFormats = Array.from(new Set([...naturalFormats, ...universalFormats]));
   const compatibleFormats = (recommendation?.compatible_outputs || fallbackFormats).filter(id => Object.prototype.hasOwnProperty.call(formatKeys, id));
   useEffect(() => {
     setPlanConfirmed(false);
   }, [files.length, services.join('|'), translationTargets.join('|'), outputFormats.join('|'), recommendation?.profile]);
+  useEffect(() => {
+    setRecommendationApplied(false);
+  }, [files.length, recommendation?.profile]);
   useEffect(() => {
     if (!recommendation || !(recommendation.recommended_services || []).includes('conversion') || !compatibleFormats.length) return;
     setOutputFormats(current => {
@@ -2409,48 +2465,76 @@ function OrderCenter({
     });
   }, [recommendation?.profile, compatibleFormats.join('|')]);
   const applyRealRecommendation = () => {
-    if (!recommendation) return;
-    setServices(recommendation.recommended_services || []);
-    if (recommendation.recommended_target_language) setTranslationTargets([recommendation.recommended_target_language]);
-    setOutputOptions(current => ({
-      ...current,
-      profile: recommendation.profile || current.profile
-    }));
-    if ((recommendation.recommended_services || []).includes('conversion')) setOutputFormats(compatibleFormats.slice(0, 1));
+    if (recommendation) {
+      const automaticServices = recommendation.auto_apply_services
+        || (recommendation.recommended_services || []).filter(service => service !== 'translation');
+      setServices(automaticServices);
+      setTranslationTargets([]);
+      setOutputOptions(current => ({
+        ...current,
+        profile: recommendation.profile || current.profile,
+        preserve_layout: true,
+        preserve_images: true,
+        preserve_links: true
+      }));
+      if (automaticServices.includes('conversion')) setOutputFormats(compatibleFormats.slice(0, Math.min(2, compatibleFormats.length)));
+      else setOutputFormats([]);
+    } else {
+      const fallbackServices = smartPlan.ocrAuto
+        ? ['ocr', 'conversion', 'data_cleanup']
+        : ['conversion', 'data_cleanup'];
+      setServices(fallbackServices);
+      setTranslationTargets([]);
+      setOutputFormats(compatibleFormats.length ? compatibleFormats.slice(0, Math.min(2, compatibleFormats.length)) : ['original']);
+      setOutputOptions(current => ({
+        ...current,
+        profile: 'auto',
+        preserve_layout: true,
+        preserve_images: true,
+        preserve_links: true
+      }));
+    }
+    setPlanConfirmed(false);
+    setRecommendationApplied(true);
+    setError('');
+    window.setTimeout(() => {
+      document.getElementById('processing-plan-confirmation')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 80);
   };
-  return <main className={`page-wrap order-center-v3014 ${uploaded ? 'workspace-ready' : 'workspace-empty'}`}><button className="back-link" onClick={() => setPage('home')}><ArrowLeft />{t.backHome}</button><div className="page-title"><span>{t.processingCenterLabel}</span><h1>{t.center}</h1><p>{t.centerDesc}</p></div><ProcessingJourney isZh={isZh} uploaded={uploaded} analyzing={aiAnalyzing} analysisReady={analysisReady} confirmed={planConfirmed} /><form className="order-layout" onSubmit={submitOrder}><section className="upload-panel">{uploaded && <div className="workspace-upload-summary"><div><CircleCheck /><span><b>{isZh ? `已识别 ${workspaceCount} 个文件` : `${workspaceCount} files detected`}</b><small>{(workspaceTotalSize / 1024 / 1024).toFixed(2)} MB · {archiveInspecting ? isZh ? '正在解压识别…' : 'Inspecting archive…' : hasArchiveErrors ? isZh ? '部分压缩包解压失败，请检查提示' : 'Some archives could not be extracted' : isZh ? '已自动解压并进入 AI 工作台' : 'Automatically extracted · AI workspace ready'}</small></span></div><label className="continue-upload"><input type="file" multiple accept=".pdf,.xlsx,.xls,.docx,.doc,.csv,.txt,.pptx,.ppt,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.zip,.rar,.7z,.tar,.gz,.tgz,.tar.gz" onChange={e => addFiles(e.target.files)} /><CloudUpload />{isZh ? '继续上传' : 'Add files'}</label></div>}<label className={`dropzone ${dragging ? 'dragging' : ''} ${uploaded ? 'compact' : ''}`} onDragEnter={() => setDragging(true)} onDragLeave={() => setDragging(false)} onDragOver={e => e.preventDefault()} onDrop={e => {
+  return <main className={`page-wrap order-center-v3014 ${uploaded ? 'workspace-ready' : 'workspace-empty'}`}><div className="page-title"><span>{t.processingCenterLabel}</span><h1>{t.center}</h1><p>{t.centerDesc}</p></div><ProcessingJourney isZh={isZh} uploaded={uploaded} analyzing={aiAnalyzing} analysisReady={analysisReady} recommendationApplied={recommendationApplied} confirmed={planConfirmed} /><form className="order-layout" onSubmit={submitOrder}><section className="upload-panel">{uploaded && <div className="workspace-upload-summary"><div><CircleCheck /><span><b>{isZh ? `已识别 ${workspaceCount} 个文件` : `${workspaceCount} files detected`}</b><small>{(workspaceTotalSize / 1024 / 1024).toFixed(2)} MB · {archiveInspecting ? isZh ? '正在解压识别…' : 'Inspecting archive…' : hasArchiveErrors ? isZh ? '部分压缩包解压失败，请检查提示' : 'Some archives could not be extracted' : isZh ? '已自动解压并进入 AI 工作台' : 'Automatically extracted · AI workspace ready'}</small></span></div><label className="continue-upload"><input type="file" multiple accept=".pdf,.xlsx,.xls,.docx,.doc,.csv,.txt,.md,.markdown,.html,.json,.xml,.pptx,.ppt,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp,.zip,.rar,.7z,.tar,.gz,.tgz,.tar.gz" onChange={e => addFiles(e.target.files)} /><CloudUpload />{isZh ? '继续上传' : 'Add files'}</label></div>}<label className={`dropzone ${dragging ? 'dragging' : ''} ${uploaded ? 'compact' : ''}`} onDragEnter={() => setDragging(true)} onDragLeave={() => setDragging(false)} onDragOver={e => e.preventDefault()} onDrop={e => {
           e.preventDefault();
           setDragging(false);
           addFiles(e.dataTransfer.files);
-        }}><input type="file" multiple accept=".pdf,.xlsx,.xls,.docx,.doc,.csv,.txt,.pptx,.ppt,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.zip,.rar,.7z,.tar,.gz,.tgz,.tar.gz" onChange={e => addFiles(e.target.files)} /><CloudUpload /><h3>{dragging ? isZh ? '松开即可添加文件' : 'Drop to add files' : uploaded ? isZh ? '拖拽更多文件到这里' : 'Drop more files here' : t.drop}</h3><p>{uploaded ? isZh ? '支持继续批量添加，现有文件不会被覆盖。' : 'Add more files without replacing the current queue.' : t.support}</p>{!uploaded && <span className="dropzone-action">{isZh ? '选择文件' : 'Choose files'} <ArrowRight /></span>}</label>{uploaded ? <div className="queue workspace-file-list"><div className="queue-head"><div><b>{isZh ? '文件工作区' : 'File workspace'} · {workspaceCount}</b><small>{(workspaceTotalSize / 1024 / 1024).toFixed(2)} MB</small></div><button type="button" onClick={() => {
+        }}><input type="file" multiple accept=".pdf,.xlsx,.xls,.docx,.doc,.csv,.txt,.md,.markdown,.html,.json,.xml,.pptx,.ppt,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp,.zip,.rar,.7z,.tar,.gz,.tgz,.tar.gz" onChange={e => addFiles(e.target.files)} /><CloudUpload /><h3>{dragging ? isZh ? '松开即可添加文件' : 'Drop to add files' : uploaded ? isZh ? '拖拽更多文件到这里' : 'Drop more files here' : t.drop}</h3><p>{uploaded ? isZh ? '支持继续批量添加，现有文件不会被覆盖。' : 'Add more files without replacing the current queue.' : t.support}</p>{!uploaded && <span className="dropzone-action">{isZh ? '选择文件' : 'Choose files'} <ArrowRight /></span>}</label>{uploaded ? <div className="queue workspace-file-list"><div className="queue-head"><div><b>{isZh ? '文件工作区' : 'File workspace'} · {workspaceCount}</b><small>{(workspaceTotalSize / 1024 / 1024).toFixed(2)} MB</small></div><button type="button" onClick={() => {
               setFiles([]);
               setArchiveManifests({});
             }}>{t.clear}</button></div><div className="workspace-file-scroll">{files.map((f, i) => {
               const manifest = archiveManifests[fileKey(f)];
+              if (manifest?.error) return <div className="queue-file workspace-file-row archive-error-row-v45" key={fileKey(f)}><AlertTriangle /><span><b>{f.name}</b><small>{isZh ? `解压失败：${manifest.error}` : `Extraction failed: ${manifest.error}`}</small></span><i>{isZh ? '需要处理' : 'Action required'}</i><div className="file-row-actions"><button type="button" className="delete-file" title={isZh ? '移除后重新上传' : 'Remove and upload again'} onClick={() => removeFile(i)}><Trash2 /></button></div></div>;
               if (manifest?.entries?.length) return <div className="archive-workspace-group" key={fileKey(f)}><div className="queue-file workspace-file-row archive-source-row"><Archive /><span><b>{f.name}</b><small>{isZh ? `已自动解压 · ${manifest.file_count} 个可处理文件` : `Automatically extracted · ${manifest.file_count} supported files`}</small></span><i>{isZh ? '已解压' : 'Extracted'}</i><div className="file-row-actions"><button type="button" className="delete-file" title={isZh ? '移除整个压缩包' : 'Remove archive'} onClick={() => removeFile(i)}><Trash2 /></button></div></div>{manifest.entries.map((entry, index) => <div className="queue-file workspace-file-row archive-entry-row" key={`${fileKey(f)}-${index}`}><FileText /><span><b>{entry.name}</b><small>{(entry.size_bytes / 1024 / 1024).toFixed(2)} MB · {isZh ? `来自 ${f.name}` : `From ${f.name}`}</small></span><i>{isZh ? '待处理' : 'Ready'}</i></div>)}</div>;
               return <div className="queue-file workspace-file-row" key={`${f.name}-${i}`}><FileText /><span><b>{f.name}</b><small>{(f.size / 1024 / 1024).toFixed(2)} MB · {isZh ? '已上传，等待处理' : 'Uploaded · ready'}</small></span><i>{isZh ? '待处理' : 'Ready'}</i><div className="file-row-actions"><button type="button" title={isZh ? '查看文件' : 'Preview file'} onClick={() => previewFile(f)}><Eye /></button><label title={isZh ? '替换文件' : 'Replace file'}><input type="file" onChange={e => replaceFile(i, e.target.files)} /><RotateCcw /></label><button type="button" className="delete-file" title={isZh ? '删除文件' : 'Delete file'} onClick={() => removeFile(i)}><Trash2 /></button></div></div>;
             })}</div>{workspaceCount > 8 && <div className="workspace-file-count-note">{isZh ? `列表内滚动查看全部 ${workspaceCount} 个文件` : `Scroll inside the list to view all ${workspaceCount} files`}</div>}</div> : <div className="empty-file-state"><div className="empty-file-icon"><FileText /></div><b>{isZh ? '暂无上传文件' : 'No files uploaded'}</b><p>{isZh ? '请选择或拖拽文件。上传成功后，这里会切换为可查看、替换和删除的文件工作区。' : 'Choose or drop files. After upload, this area becomes a file workspace with preview, replace and delete actions.'}</p></div>}{uploaded && <div className="workspace-insight-v312"><div><b>{workspaceCount}</b><small>{isZh ? '文件数量' : 'Files'}</small></div><div><b>{fileTypes.slice(0, 3).join(' / ') || '-'}</b><small>{isZh ? '文件类型' : 'Types'}</small></div><div><b>{(workspaceTotalSize / 1024 / 1024).toFixed(2)} MB</b><small>{isZh ? '解压后大小' : 'Extracted size'}</small></div><div><b>≈ {estimatedSeconds}s</b><small>{isZh ? '预计处理' : 'Estimate'}</small></div></div>}</section><aside className="order-card"><div className="order-card-title"><div><h2>{t.settings}</h2><p>{isZh ? '选择常用能力，高级参数可按需展开。' : 'Choose common capabilities; expand advanced options only when needed.'}</p></div><button type="button" className="preferences-link" onClick={() => setPage('settings')}>{isZh ? '偏好中心' : 'Preferences'}<ArrowRight /></button></div>{currentUser && <div className="signed-account"><span>{(currentUser.name || currentUser.email || 'U').slice(0, 1).toUpperCase()}</span><div><b>{currentUser.name || currentUser.email}</b><small>{currentUser.email} · {isZh ? '当前登录账户' : 'Signed-in account'}</small></div></div>}
-<AIAnalysisPanel isZh={isZh} analysis={realAnalysis} recommendation={recommendation} analyzing={aiAnalyzing} error={aiInsightError} fileCount={workspaceCount} onApply={applyRealRecommendation} />
-{analysisReady && <ProcessingPlanPanel isZh={isZh} t={t} files={files} services={services} setServices={setServices} translationTargets={translationTargets} setTranslationTargets={setTranslationTargets} outputFormats={outputFormats} setOutputFormats={setOutputFormats} compatibleFormats={compatibleFormats} outputOptions={outputOptions} setOutputOptions={setOutputOptions} form={form} setForm={setForm} recommendation={recommendation} analysisReady={analysisReady} aiAnalyzing={aiAnalyzing} hasArchiveErrors={hasArchiveErrors} planConfirmed={planConfirmed} setPlanConfirmed={setPlanConfirmed} estimatedSeconds={estimatedSeconds} estimatedCredits={estimatedCredits} estimatedQuality={estimatedQuality} submitting={submitting} error={error} />}
+<AIAnalysisPanel isZh={isZh} analysis={realAnalysis} recommendation={recommendation} analyzing={aiAnalyzing} error={aiInsightError} fileCount={workspaceCount} applied={recommendationApplied} onApply={applyRealRecommendation} />
+{analysisReady && recommendationApplied && <ProcessingPlanPanel isZh={isZh} t={t} files={files} services={services} setServices={setServices} translationTargets={translationTargets} setTranslationTargets={setTranslationTargets} outputFormats={outputFormats} setOutputFormats={setOutputFormats} compatibleFormats={compatibleFormats} outputOptions={outputOptions} setOutputOptions={setOutputOptions} form={form} setForm={setForm} recommendation={recommendation} analysisReady={analysisReady} aiAnalyzing={aiAnalyzing} hasArchiveErrors={hasArchiveErrors} planConfirmed={planConfirmed} setPlanConfirmed={setPlanConfirmed} estimatedSeconds={estimatedSeconds} estimatedCredits={estimatedCredits} estimatedQuality={estimatedQuality} submitting={submitting} error={error} />}
 <div className="profile-section-v306 legacy-processing-plan-v44"><b>{isZh ? '手动选择处理预设' : 'Choose a profile manually'}</b><HoverSelect value={outputOptions.profile || 'auto'} onChange={e => applyProfile(e.target.value)}>{profiles.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</HoverSelect><small>{isZh ? 'AI 推荐已自动应用；只有需要覆盖推荐时才使用这里。' : 'The AI recommendation is applied automatically. Use this only to override it.'}</small></div>
 <div className="capability-center-v31"><div className="capability-center-head"><div><span>AI WORKFLOW</span><b>{isZh ? '处理工作流' : 'Processing workflow'}</b><small>{isZh ? '系统已经根据文件选择核心步骤；可以按业务目标进行调整。' : 'Core steps are selected from the files and remain adjustable.'}</small></div><strong>{t.selected} {services.length} {t.capabilities}</strong></div><div className="capability-groups-v31">{[{
               key: 'document',
               icon: FileText,
               title: isZh ? '文档处理' : 'Document processing',
               desc: isZh ? '识别、翻译、转换与文档交付' : 'Recognition, translation, conversion and delivery',
-              items: [['ocr', isZh ? '图片/PDF识别' : 'Image & PDF OCR'], ['translation', isZh ? '文档翻译' : 'Document translation'], ['conversion', isZh ? '格式转换' : 'Format conversion']]
+              items: [['ocr', 'OCR'], ['translation', isZh ? 'AI 翻译' : 'AI translation'], ['conversion', isZh ? '格式转换' : 'Format conversion'], ['image_recognition', isZh ? '图片识别' : 'Image recognition'], ['pdf_rebuild', isZh ? 'PDF 重建' : 'PDF reconstruction'], ['scan_enhancement', isZh ? '扫描增强' : 'Scan enhancement'], ['layout_recovery', isZh ? '版式恢复' : 'Layout recovery']]
             }, {
               key: 'content',
               icon: Sparkles,
               title: isZh ? 'AI 内容处理' : 'AI content',
               desc: isZh ? '整理、校对与双语排版' : 'Cleanup, proofing and bilingual layout',
-              items: [['data_cleanup', isZh ? '智能整理与校对' : 'Smart cleanup & proofing']]
+              items: [['data_cleanup', isZh ? '数据整理' : 'Data cleanup'], ['proofreading', isZh ? 'AI 校对' : 'AI proofreading'], ['document_organization', isZh ? '文档整理' : 'Document organization']]
             }, {
               key: 'data',
               icon: BarChart3,
               title: isZh ? '数据智能' : 'Data intelligence',
               desc: isZh ? 'Excel 清洗、分析与企业报告' : 'Excel cleanup, analysis and enterprise reporting',
-              items: [['enterprise_analysis', isZh ? '企业数据分析' : 'Enterprise analysis']]
+              items: [['table_recovery', isZh ? '表格恢复' : 'Table recovery'], ['enterprise_analysis', isZh ? '企业数据分析' : 'Enterprise analysis'], ['markdown', 'Markdown'], ['html', 'HTML'], ['json', 'JSON'], ['csv', 'CSV'], ['xml', 'XML'], ['office', 'Office']]
             }].map(group => {
               const G = group.icon;
               const open = !!expandedCapabilities[group.key];
@@ -2460,7 +2544,7 @@ function OrderCenter({
                 }))}><G /><div><b>{group.title}</b><small>{group.desc}</small></div><ChevronDown /></button>{open && <div className="capability-items-v312">{group.items.map(([id, label]) => {
                     const Icon = serviceIcons[id];
                     const active = services.includes(id);
-                    return <button type="button" className={active ? 'active' : ''} key={id} onClick={() => setServices(active ? services.filter(x => x !== id) : [...services, id])}><Icon /><span>{label}</span>{active ? <Check /> : null}</button>;
+                    return <button type="button" className={active ? 'active' : ''} key={id} onClick={() => toggleServiceCapability(id)}><Icon /><span>{label}</span>{active ? <Check /> : null}</button>;
                   })}</div>}</section>;
             })}</div>
 <div className="capability-recommend-v31"><Sparkles /><div><b>{recommendation ? isZh ? '真实分析方案已应用' : 'Analyzed plan applied' : isZh ? '本地推荐方案已应用' : 'File-aware plan applied'}</b><small>{recommendation ? `${recommendation.category || ''} · ${(recommendation.detected_languages || []).join(' / ') || '—'} · ${isZh ? '预计' : 'Est.'} ${estimatedSeconds}s · ${isZh ? '质量目标' : 'Quality target'} ${estimatedQuality}%` : isZh ? `已识别 ${fileTypes.slice(0, 2).join(' / ') || '文档'}，预计 ${estimatedSeconds} 秒。` : `Detected ${fileTypes.slice(0, 2).join(' / ') || 'documents'} · ${estimatedSeconds}s estimated.`}</small></div><button type="button" onClick={recommendation ? applyRealRecommendation : restoreRecommended}>{isZh ? '恢复推荐' : 'Restore'}</button></div></div>
@@ -3597,7 +3681,54 @@ function EnterpriseSidebar({
     }));
     setPage('login');
   };
-  return <aside className="ew-sidebar unified-enterprise-sidebar v44-sidebar"><button className="ew-brand ew-brand-button" onClick={() => setPage('home')}><span>DA</span><div><b>Document Automation AI</b><small>{L('AI 文档工作空间', 'AI Document Workspace', 'Không gian tài liệu AI')}</small></div></button><nav>{groups.map(group => <section key={group.label}><small>{group.label}</small>{group.items.map(([id, label, Icon]) => <button key={id} className={id === active ? 'active' : ''} onClick={() => setPage(id)}><Icon /><span>{label}</span></button>)}</section>)}</nav><section className="unified-sidebar-account"><div><span>{name.slice(0, 1).toUpperCase()}</span><p><b>{name}</b>{email && <small>{email}</small>}</p></div><footer><button type="button" className="sidebar-signout-only" onClick={logout}><ArrowLeft />{L('退出登录', 'Sign out', 'Đăng xuất')}</button></footer></section></aside>;
+  useEffect(() => {
+    const homeLabels = new Set(['返回首页', '返回官网', 'Back to home', 'Home', 'Về trang chủ']);
+    const hideDuplicateHeaderHome = () => {
+      document.querySelectorAll('.ew-top-actions button, .settings-header-actions-v381 button').forEach(button => {
+        const label = String(button.textContent || '').replace(/\s+/g, ' ').trim();
+        if (homeLabels.has(label)) {
+          button.hidden = true;
+          button.setAttribute('aria-hidden', 'true');
+          button.dataset.sidebarHomeDuplicate = 'true';
+        }
+      });
+    };
+    hideDuplicateHeaderHome();
+    const observer = new MutationObserver(hideDuplicateHeaderHome);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    return () => observer.disconnect();
+  }, []);
+  const homeButtonStyle = {
+    width: 'calc(100% - 40px)',
+    minHeight: '46px',
+    margin: '8px 20px 18px',
+    padding: '0 16px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    border: '1px solid rgba(148, 177, 224, 0.32)',
+    borderRadius: '12px',
+    background: 'rgba(255, 255, 255, 0.055)',
+    color: '#dce8ff',
+    fontSize: '15px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    transition: 'background .2s ease, border-color .2s ease, color .2s ease, transform .2s ease'
+  };
+  return <aside className="ew-sidebar unified-enterprise-sidebar v44-sidebar"><button className="ew-brand ew-brand-button" onClick={() => setPage('home')}><span>DA</span><div><b>Document Automation AI</b><small>{L('AI 文档工作空间', 'AI Document Workspace', 'Không gian tài liệu AI')}</small></div></button><button type="button" className="sidebar-home-top-link" style={homeButtonStyle} onClick={() => setPage('home')} onMouseEnter={event => {
+      event.currentTarget.style.background = 'rgba(58, 101, 255, 0.2)';
+      event.currentTarget.style.borderColor = 'rgba(102, 145, 255, 0.72)';
+      event.currentTarget.style.color = '#ffffff';
+      event.currentTarget.style.transform = 'translateY(-1px)';
+    }} onMouseLeave={event => {
+      event.currentTarget.style.background = 'rgba(255, 255, 255, 0.055)';
+      event.currentTarget.style.borderColor = 'rgba(148, 177, 224, 0.32)';
+      event.currentTarget.style.color = '#dce8ff';
+      event.currentTarget.style.transform = 'translateY(0)';
+    }}><House size={19} /><span>{L('返回首页', 'Back to home', 'Về trang chủ')}</span></button><nav>{groups.map(group => <section key={group.label}><small>{group.label}</small>{group.items.map(([id, label, Icon]) => <button key={id} className={id === active ? 'active' : ''} onClick={() => setPage(id)}><Icon /><span>{label}</span></button>)}</section>)}</nav><section className="unified-sidebar-account"><div><span>{name.slice(0, 1).toUpperCase()}</span><p><b>{name}</b>{email && <small>{email}</small>}</p></div><footer><button type="button" className="sidebar-signout-only" onClick={logout}><ArrowLeft />{L('退出登录', 'Sign out', 'Đăng xuất')}</button></footer></section></aside>;
 }
 function TemplateCenter({
   setPage
@@ -4274,7 +4405,11 @@ function ProcessingCenter({
     }),
     [loading, setLoading] = useState(true),
     [error, setError] = useState(''),
-    [expanded, setExpanded] = useState(null),
+    [expanded, setExpanded] = useState(() => {
+      const value = Number(localStorage.getItem('da_open_processing_order') || 0);
+      localStorage.removeItem('da_open_processing_order');
+      return value || null;
+    }),
     [filter, setFilter] = useState('active'),
     [checked, setChecked] = useState([]),
     [confirm, setConfirm] = useState(null),
@@ -4936,23 +5071,27 @@ function Dashboard({
     }
   };
   const navActions = [() => setPage('home'), () => {}, () => setPage('processing'), () => setPage('projects'), () => setPage('knowledge'), () => setPage('templates'), () => setPage('team'), () => setPage('billing'), () => setPage('settings')];
+  const openProcessingTask = id => {
+    if (id) localStorage.setItem('da_open_processing_order', String(id));
+    setPage('processing');
+  };
   const metricData = [[copy.processing, active.length, failed.length ? `${failed.length} ${isZh ? '项需要处理' : 'need attention'}` : isZh ? '当前运行状态' : 'Currently active', RefreshCw, 'green'], [copy.completed, completedToday, isZh ? '今天完成的任务' : 'Finished today', CircleCheck, 'purple'], [isZh ? '需要关注' : 'Needs attention', failed.length, failed.length ? isZh ? '打开任务队列处理' : 'Open the task queue' : isZh ? '当前没有失败任务' : 'No failed tasks', AlertTriangle, 'orange']];
   return <main className="enterprise-workspace-v33 ew-dashboard-v50">
   <EnterpriseSidebar setPage={setPage} active="dashboard" />
-  <WorkspaceHeaderTools targetSelector=".ew-top-v51 .ew-top-actions" locale={document.documentElement.lang} setPage={setPage} user={currentUser} primaryAction={{
+  <WorkspaceHeaderTools targetSelector=".ew-top-v51 .ew-top-actions" locale={document.documentElement.lang} setPage={setPage} user={currentUser} authToken={authToken} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} primaryAction={{
     label: isZh ? '新建任务' : 'New task',
     onClick: () => setPage('order')
   }} />
-  <section className="ew-content"><header className="ew-top ew-top-v51"><div><h1>{copy.greeting}</h1><p>{copy.sub}</p></div><div className="ew-top-actions"><button className="ew-home-return" onClick={() => setPage('home')}><House /><span>{isZh ? '返回首页' : 'Home'}</span></button><button className="ew-primary" onClick={() => setPage('order')}><Sparkles />{copy.newTask}</button><button className="ew-icon ew-header-tool" title={isZh ? '帮助' : 'Help'}><HelpCircle /></button><button className="ew-icon ew-header-tool ew-language-tool" title={isZh ? '语言' : 'Language'}><Globe2 /><small>{isZh ? 'ZH' : 'EN'}</small></button><button className="ew-icon ew-header-tool" title={isZh ? '通知' : 'Notifications'}><Bell /></button><button className="ew-avatar">{(currentUser?.name || currentUser?.email || 'U').slice(0, 1).toUpperCase()}</button></div></header>
+  <section className="ew-content"><header className="ew-top ew-top-v51"><div><h1>{copy.greeting}</h1><p>{copy.sub}</p></div><div className="ew-top-actions"><button className="ew-primary" onClick={() => setPage('order')}><Sparkles />{copy.newTask}</button><button className="ew-icon ew-header-tool" title={isZh ? '帮助' : 'Help'}><HelpCircle /></button><button className="ew-icon ew-header-tool ew-language-tool" title={isZh ? '语言' : 'Language'}><Globe2 /><small>{isZh ? 'ZH' : 'EN'}</small></button><button className="ew-icon ew-header-tool" title={isZh ? '通知' : 'Notifications'}><Bell /></button><button className="ew-avatar">{(currentUser?.name || currentUser?.email || 'U').slice(0, 1).toUpperCase()}</button></div></header>
   {error && <div className="ew-error"><AlertTriangle /><span>{error}</span><button onClick={load}>{copy.retry}</button></div>}
   <section className="ew-metrics">{metricData.map(([label, value, note, Icon, color]) => <article key={label}><span className={color}><Icon /></span><div><small>{label}</small><b>{value}</b><em>{note}</em></div></article>)}</section>
   <section className="ew-grid ew-main-grid"><article className="ew-card ew-recent"><header><div><h2>{copy.recent}</h2><p>{isZh ? '优先展示需要关注的真实处理记录' : 'Real processing records that need attention first'}</p></div><button onClick={() => setPage('processing')}>{copy.viewAll}</button></header>{loading ? <div className="ew-skeleton">Loading…</div> : orders.length ? <div className="ew-table"><div className="ew-tr ew-th"><span>{isZh ? '文件名称' : 'File'}</span><span>{isZh ? '处理能力' : 'Capability'}</span><span>{copy.progress}</span><span>{isZh ? '状态' : 'Status'}</span><span>{copy.updated}</span><span>{copy.action}</span></div>{orders.slice(0, 6).map(o => {
               const k = kind(o);
               return <div className="ew-tr" key={o.id}><span className="ew-file"><FileText /><b title={o.file_name}>{o.file_name}</b></span><span>{serviceText(o.services)}</span><span className="ew-progress"><i><em style={{
                       width: `${o.progress}%`
-                    }} /></i><b>{o.progress}%</b></span><span><i className={`ew-status ${k}`}>{statusText(k)}</i></span><span>{o.created_at ? new Date(o.created_at).toLocaleString() : '—'}</span><span><button title={isZh ? '查看任务' : 'Open task'} onClick={() => setPage('processing')}><Eye /></button>{k === 'done' && <button title={isZh ? '下载' : 'Download'}><Download /></button>}</span></div>;
+                    }} /></i><b>{o.progress}%</b></span><span><i className={`ew-status ${k}`}>{statusText(k)}</i></span><span>{o.created_at ? new Date(o.created_at).toLocaleString() : '—'}</span><span><button title={isZh ? '查看任务' : 'Open task'} onClick={() => openProcessingTask(o.id)}><Eye /></button>{k === 'done' && <button title={isZh ? '下载' : 'Download'}><Download /></button>}</span></div>;
             })}</div> : <div className="ew-empty"><FileText /><b>{copy.noData}</b><button onClick={() => setPage('order')}>{copy.newTask}</button></div>}</article>
-  <article className="ew-card ew-live"><header><div><h2>{isZh ? '当前工作流' : 'Active workflow'}</h2><p>{isZh ? '从分析到交付的真实处理阶段' : 'Real processing stages from analysis to delivery'}</p></div><button onClick={() => setPage('processing')}>{copy.viewAll}</button></header>{live ? <><div className="ew-live-file"><FileText /><div><b>{live.file_name}</b><small>{live.order_number}</small></div><strong>{live.progress}%</strong></div><div className="ew-live-bar"><i style={{
+  <article className={`ew-card ew-live ${live ? 'clickable-live-task-v45' : ''}`} role={live ? 'button' : undefined} tabIndex={live ? 0 : undefined} onClick={() => live && openProcessingTask(live.id)} onKeyDown={event => { if (live && ['Enter', ' '].includes(event.key)) openProcessingTask(live.id); }}><header><div><h2>{isZh ? '当前工作流' : 'Active workflow'}</h2><p>{isZh ? '从分析到交付的真实处理阶段' : 'Real processing stages from analysis to delivery'}</p></div><button onClick={event => { event.stopPropagation(); setPage('processing'); }}>{copy.viewAll}</button></header>{live ? <><div className="ew-live-file"><FileText /><div><b>{live.file_name}</b><small>{live.order_number}</small></div><strong>{live.progress}%</strong></div><div className="ew-live-bar"><i style={{
                 width: `${live.progress}%`
               }} /></div><ol>{steps.map((s, i) => {
                 const threshold = (i + 1) * 16.7;

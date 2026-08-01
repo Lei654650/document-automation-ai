@@ -24,6 +24,67 @@
   color: #294063;
 }
 
+.workspace-account-hover-v45 {
+  position: relative;
+}
+
+.workspace-account-menu-v45 {
+  position: absolute;
+  z-index: 2400;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: 210px;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #dce4f0;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 20px 55px rgba(12, 27, 57, .2);
+  animation: workspaceAccountIn .16s ease-out;
+}
+
+.workspace-account-menu-v45 > button {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #294063;
+  font-size: 12px;
+  font-weight: 750;
+  text-align: left;
+}
+
+.workspace-account-menu-v45 > button svg {
+  width: 17px;
+}
+
+.workspace-account-menu-v45 > button:hover,
+.workspace-account-menu-v45 > button:focus-visible {
+  background: #3157ff;
+  color: #fff;
+  outline: none;
+}
+
+.workspace-account-menu-v45 > button.danger {
+  border-top: 1px solid #edf0f5;
+  color: #c33d4f;
+}
+
+.workspace-account-menu-v45 > button.danger:hover {
+  background: #c33d4f;
+  color: #fff;
+}
+
+@keyframes workspaceAccountIn {
+  from { opacity: 0; transform: translateY(-5px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
 .workspace-header-primary-v45,
 .workspace-header-help-v45 {
   display: inline-flex;
@@ -231,3 +292,27 @@
     grid-template-columns: 1fr;
   }
 }
+
+.workspace-notification-wrap-v45{position:relative}
+.workspace-header-icon-v45.active{border-color:#3157ff;background:#edf3ff;color:#3157d8;box-shadow:0 0 0 3px rgba(49,87,255,.1),0 8px 24px rgba(49,87,255,.16)}
+.workspace-notification-dot-v45{position:absolute;top:8px;right:8px;width:7px;height:7px;border:2px solid #fff;border-radius:50%;background:#ff5b6b}
+.workspace-notification-panel-v45{position:absolute;z-index:2450;top:calc(100% + 10px);right:0;width:340px;overflow:hidden;border:1px solid #dce4f0;border-radius:16px;background:#fff;box-shadow:0 24px 70px rgba(12,27,57,.22);animation:workspaceAccountIn .16s ease-out}
+.workspace-notification-panel-v45>header{display:flex;align-items:flex-start;justify-content:space-between;padding:16px 17px;border-bottom:1px solid #edf1f6}
+.workspace-notification-panel-v45>header>div{display:flex;flex-direction:column;gap:4px}
+.workspace-notification-panel-v45>header b{font-size:15px;color:#172d51}
+.workspace-notification-panel-v45>header small{font-size:10px;color:#7c899c}
+.workspace-notification-panel-v45>header button{display:grid;width:30px;height:30px;padding:0;place-items:center;border:0;border-radius:8px;background:#f4f7fb;color:#60708a}
+.workspace-notification-panel-v45>header button svg{width:15px}
+.workspace-notification-empty-v45{display:flex;min-height:190px;align-items:center;justify-content:center;flex-direction:column;padding:28px;text-align:center}
+.workspace-notification-empty-v45>svg{width:42px;height:42px;padding:11px;border-radius:14px;background:#edf3ff;color:#3157d8}
+.workspace-notification-empty-v45 b{margin-top:13px;font-size:14px;color:#203858}
+.workspace-notification-empty-v45 p{max-width:250px;margin:7px 0 0;color:#7b8799;font-size:11px;line-height:1.65}
+.workspace-notification-panel-v45>footer{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px;border-top:1px solid #edf1f6;background:#fafcff}
+.workspace-notification-panel-v45>footer button{min-height:38px;border:1px solid #dce4f0;border-radius:10px;background:#fff;color:#294063;font-size:11px;font-weight:800}
+.workspace-notification-panel-v45>footer button:first-child{border-color:#3157ff;background:#3157ff;color:#fff}
+@media(max-width:620px){.workspace-notification-panel-v45{position:fixed;top:70px;right:12px;left:12px;width:auto}}
+
+/* V45.0.2 global home entry */
+.workspace-header-home-v45{display:inline-flex;align-items:center;gap:8px;min-height:40px;padding:0 14px;border:1px solid #d8e3fb;border-radius:12px;background:linear-gradient(135deg,#fff,#f5f8ff);color:#24406f;font-weight:850;box-shadow:0 8px 22px rgba(38,82,180,.08);transition:.2s ease}
+.workspace-header-home-v45 svg{width:17px;height:17px;color:#3157ff}
+.workspace-header-home-v45:hover{border-color:#8cabff;background:linear-gradient(135deg,#f0f5ff,#e7efff);color:#1d43bf;transform:translateY(-1px);box-shadow:0 12px 28px rgba(49,87,255,.17)}

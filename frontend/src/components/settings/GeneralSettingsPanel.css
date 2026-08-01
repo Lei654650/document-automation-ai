@@ -1,147 +1,48 @@
-.general-settings-v45 {
-  display: grid;
-  gap: 22px;
-}
-
-.general-settings-v45 > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.general-settings-v45 > header span {
-  color: #3157d8;
-  font-size: 9px;
-  font-weight: 900;
-  letter-spacing: .13em;
-}
-
-.general-settings-v45 > header h2 {
-  margin: 7px 0 6px;
-  font-size: 22px;
-}
-
-.general-settings-v45 > header p {
-  margin: 0;
-  color: #748096;
-  font-size: 11px;
-}
-
-.general-settings-v45 > header > svg {
-  width: 42px;
-  height: 42px;
-  padding: 10px;
-  border-radius: 12px;
-  background: #edf3ff;
-  color: #3157d8;
-}
-
-.general-language-card-v45 {
-  display: grid;
-  gap: 18px;
-  padding: 20px;
-  border: 1px solid #e2e7ef;
-  border-radius: 15px;
-  background: #f9fbff;
-}
-
-.general-language-title-v45 {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-}
-
-.general-language-title-v45 > svg {
-  width: 38px;
-  height: 38px;
-  padding: 9px;
-  border-radius: 10px;
-  background: #fff;
-  color: #3157d8;
-  box-shadow: 0 5px 16px rgba(40, 72, 145, .08);
-}
-
-.general-language-title-v45 > span {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.general-language-title-v45 b {
-  font-size: 13px;
-}
-
-.general-language-title-v45 small {
-  color: #7c889a;
-  font-size: 10px;
-}
-
-.general-language-options-v45 {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.general-language-options-v45 > button {
-  display: flex;
-  min-height: 64px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 14px;
-  border: 1px solid #dfe5ee;
-  border-radius: 12px;
-  background: #fff;
-  color: #41506a;
-}
-
-.general-language-options-v45 > button.active {
-  border-color: #3157ff;
-  background: #edf3ff;
-  color: #3157d8;
-  box-shadow: 0 0 0 2px rgba(49, 87, 255, .08);
-}
-
-.general-language-options-v45 > button > span {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.general-language-options-v45 i {
-  font-size: 19px;
-  font-style: normal;
-}
-
-.general-language-options-v45 svg {
-  width: 16px;
-}
-
-.general-language-note-v45 {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 12px;
-  border-radius: 10px;
-  background: #eef3ff;
-  color: #53627c;
-}
-
-.general-language-note-v45 svg {
-  flex: 0 0 auto;
-  width: 16px;
-  color: #3157d8;
-}
-
-.general-language-note-v45 p {
-  margin: 0;
-  font-size: 10px;
-  line-height: 1.6;
-}
-
-@media (max-width: 720px) {
-  .general-language-options-v45 {
-    grid-template-columns: 1fr;
-  }
-}
+.general-settings-v45{display:grid;gap:22px}
+.general-settings-v45>header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.general-settings-v45>header span{color:#3157d8;font-size:10px;font-weight:900;letter-spacing:.13em}
+.general-settings-v45>header h2{margin:7px 0 6px;font-size:26px}
+.general-settings-v45>header p{margin:0;color:#748096;font-size:13px;line-height:1.6}
+.general-settings-v45>header>svg{width:46px;height:46px;padding:11px;border-radius:14px;background:linear-gradient(145deg,#eaf1ff,#f5f8ff);color:#3157d8;box-shadow:0 10px 28px rgba(49,87,255,.14)}
+.general-settings-grid-v45{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.general-setting-section-v45{display:grid;align-content:start;gap:16px;padding:20px;border:1px solid #e0e7f1;border-radius:16px;background:linear-gradient(180deg,#fff,#fbfdff);box-shadow:0 8px 24px rgba(31,56,100,.045)}
+.general-language-card-v45{grid-column:1/-1}
+.general-language-title-v45,.general-section-head-v45{display:flex;align-items:center;gap:12px}
+.general-language-title-v45>svg,.general-section-head-v45>svg{width:42px;height:42px;padding:10px;border-radius:12px;background:#edf3ff;color:#3157d8;box-shadow:0 7px 20px rgba(49,87,255,.11)}
+.general-language-title-v45>span,.general-section-head-v45>span{display:flex;min-width:0;flex-direction:column;gap:4px}
+.general-language-title-v45 b,.general-section-head-v45 b{font-size:15px;color:#1d3458}
+.general-language-title-v45 small,.general-section-head-v45 small{color:#7c889a;font-size:11px;line-height:1.5}
+.general-language-options-v45{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.general-language-options-v45>button{display:flex;min-height:72px;align-items:center;justify-content:space-between;gap:10px;padding:0 16px;border:1px solid #dfe5ee;border-radius:13px;background:#fff;color:#41506a;transition:.18s ease}
+.general-language-options-v45>button:hover{border-color:#9db2ff;transform:translateY(-1px);box-shadow:0 10px 25px rgba(49,87,255,.09)}
+.general-language-options-v45>button.active{border-color:#3157ff;background:linear-gradient(135deg,#3157ff,#5273ff);color:#fff;box-shadow:0 10px 28px rgba(49,87,255,.25)}
+.general-language-options-v45>button>span{display:flex;align-items:center;gap:10px}
+.general-language-options-v45 i{display:grid;width:34px;height:34px;place-items:center;border-radius:10px;background:#f0f4fb;color:#3157d8;font-size:11px;font-style:normal;font-weight:900}
+.general-language-options-v45>button.active i{background:rgba(255,255,255,.18);color:#fff}
+.general-language-options-v45 svg{width:17px}
+.general-fields-v45{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.general-fields-v45 label{display:flex;flex-direction:column;gap:7px;margin:0!important}
+.general-fields-v45 label>span{font-size:11px;color:#536177;font-weight:850}
+.general-fields-v45 select{min-height:45px;padding:0 12px;border:1px solid #dce4f0;border-radius:11px;background:#fff;color:#233958;font-size:12px}
+.general-segmented-v45{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.general-segmented-v45 button{min-height:43px;border:1px solid #dce4f0;border-radius:11px;background:#fff;color:#526178;font-size:11px;font-weight:800;transition:.16s ease}
+.general-segmented-v45 button:hover{border-color:#9fb2f7;background:#f5f8ff;color:#3157d8}
+.general-segmented-v45 button.active{border-color:#3157ff;background:#3157ff;color:#fff;box-shadow:0 8px 22px rgba(49,87,255,.22)}
+.general-toggle-list-v45{grid-column:1/-1}
+.general-toggle-list-v45>label{display:flex!important;align-items:center;justify-content:space-between;flex-direction:row!important;gap:18px;margin:0!important;padding:14px 0;border-top:1px solid #edf1f6}
+.general-toggle-list-v45>label>span{display:flex;flex-direction:column;gap:3px}
+.general-toggle-list-v45>label b{font-size:13px;color:#243b5d}
+.general-toggle-list-v45>label small{font-size:10px;color:#7d899a}
+.general-switch-v45{position:relative;width:46px;height:26px;flex:0 0 46px;border:0;border-radius:999px;background:#d7deea;transition:.18s ease}
+.general-switch-v45 i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 2px 7px rgba(20,35,60,.2);transition:.18s ease}
+.general-switch-v45.on{background:#3157ff;box-shadow:0 0 0 4px rgba(49,87,255,.1)}
+.general-switch-v45.on i{left:23px}
+.general-settings-actions-v45{display:flex;align-items:center;justify-content:flex-end;gap:16px;padding-top:4px}
+.general-settings-actions-v45>span{display:flex;align-items:center;gap:6px;color:#0a9368;font-size:11px;font-weight:800;opacity:0;transform:translateY(3px);transition:.18s ease}
+.general-settings-actions-v45>span.visible{opacity:1;transform:none}
+.general-settings-actions-v45>span svg{width:16px}
+.general-settings-actions-v45>button{display:inline-flex;min-height:46px;align-items:center;gap:8px;padding:0 18px;border:0;border-radius:12px;background:linear-gradient(135deg,#3157ff,#4f72ff);color:#fff;font-size:12px;font-weight:900;box-shadow:0 12px 28px rgba(49,87,255,.25)}
+.general-settings-actions-v45>button:hover{transform:translateY(-1px);box-shadow:0 16px 34px rgba(49,87,255,.32)}
+.general-settings-actions-v45>button svg{width:17px}
+@media(max-width:880px){.general-settings-grid-v45{grid-template-columns:1fr}.general-language-card-v45,.general-toggle-list-v45{grid-column:auto}}
+@media(max-width:620px){.general-language-options-v45,.general-fields-v45,.general-segmented-v45{grid-template-columns:1fr}.general-settings-v45>header h2{font-size:22px}}

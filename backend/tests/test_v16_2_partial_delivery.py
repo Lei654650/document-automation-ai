@@ -26,16 +26,16 @@ def test_pptx_headless_formats_complete(tmp_path: Path):
     assert {Path(item["path"]).suffix for item in result["outputs"]} == {".pptx", ".pdf", ".xlsx"}
 
 
-def test_unsupported_format_isolated_and_reported(tmp_path: Path):
+def test_pptx_can_export_structured_csv(tmp_path: Path):
     source = _sample_pptx(tmp_path / "input.pptx")
     result = run_local_job(
         {"order_number": "TEST-V162-PARTIAL", "services": ["conversion"], "conversion": {"formats": ["original", "csv"]}},
         [(source.name, str(source))],
         tmp_path / "output",
     )
-    assert result["state"] == "partial_completed"
-    assert result["partial_success"] is True
-    assert result["failure_count"] == 1
+    assert result["state"] == "completed"
+    assert result["partial_success"] is False
+    assert result["failure_count"] == 0
     names = {Path(item["path"]).name for item in result["outputs"]}
     assert "input.pptx" in names
-    assert "error_report.txt" not in names
+    assert "input.csv" in names

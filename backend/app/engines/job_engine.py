@@ -1,7 +1,6 @@
 from __future__ import annotations
 import copy
 import json
-import copy
 import re
 import shutil
 import os
@@ -317,7 +316,8 @@ def _translate_pptx(source: Path, destination: Path, client: TranslationClient, 
                 for paragraph in shape.text_frame.paragraphs:
                     original = "".join(run.text for run in paragraph.runs) or paragraph.text
                     if original.strip():
-                        value = client.translate(original)
+                        translated_value = client.translate(original)
+                        value = _layout_translation_value(client, original, translated_value, "pptx")
                         if paragraph.runs:
                             paragraph.runs[0].text = value
                             for run in paragraph.runs[1:]:
@@ -331,7 +331,8 @@ def _translate_pptx(source: Path, destination: Path, client: TranslationClient, 
                         for paragraph in cell.text_frame.paragraphs:
                             original = "".join(run.text for run in paragraph.runs) or paragraph.text
                             if original.strip():
-                                value = client.translate(original)
+                                translated_value = client.translate(original)
+                                value = _layout_translation_value(client, original, translated_value, "table")
                                 if paragraph.runs:
                                     paragraph.runs[0].text = value
                                     for run in paragraph.runs[1:]:
@@ -515,7 +516,8 @@ def _translate_docx(source: Path, destination: Path, client: TranslationClient, 
     skipped = 0
     for index, paragraph in enumerate(translatable, start=1):
         original = _paragraph_text(paragraph)
-        value = client.translate(original)
+        translated_value = client.translate(original)
+        value = _layout_translation_value(client, original, translated_value, "docx")
         # A provider must never be allowed to erase a visible source block.
         # Preserve the original and report it as skipped when the response is blank.
         if not str(value or '').strip():
@@ -743,6 +745,31 @@ def _resolve_bilingual_layout(layout: str | None, file_type: str = "xlsx") -> st
     if value == "auto":
         return "inline" if file_type in {"xlsx", "xls", "csv", "table"} else "vertical"
     return value if value in {"inline", "vertical", "columns", "target-only"} else "inline"
+
+
+def _layout_translation_value(client: TranslationClient, original: str, translated: str, file_type: str) -> str:
+    """Apply every advertised bilingual layout consistently across file types."""
+    options = getattr(client, "output_options", {}) or {}
+    requested_value = getattr(client, "bilingual_layout", None) or options.get("bilingual_layout")
+    # Existing API clients that never requested a bilingual layout must keep
+    # receiving translation-only output.  The UI sends an explicit layout for
+    # bilingual mode, so all advertised layouts remain fully functional.
+    if not requested_value:
+        return str(translated or original)
+    requested = str(requested_value)
+    mode = _resolve_bilingual_layout(requested, file_type)
+    if mode == "target-only":
+        return str(translated or original)
+    if mode == "vertical":
+        order = str(options.get("vertical_order") or "source-first")
+        return f"{translated}\n{original}" if order == "target-first" else f"{original}\n{translated}"
+    if mode == "columns":
+        return f"{original}\t{translated}"
+    style = str(options.get("inline_style") or "dash")
+    separator = {"slash": " / ", "parentheses": "（", "pipe": " | "}.get(style, " - ")
+    if style == "parentheses":
+        return f"{original}{separator}{translated}）"
+    return f"{original}{separator}{translated}"
 
 
 def _normalize_bilingual_value(source: str, translated: str, layout: str | None = None, options: dict[str, Any] | None = None) -> str:
@@ -1804,7 +1831,8 @@ def _translate_pdf_to_docx(source: Path, destination: Path, client: TranslationC
         if text.strip():
             document.add_heading(f"Page {index}", level=2)
             for block in [part.strip() for part in text.split("\n\n") if part.strip()]:
-                document.add_paragraph(client.translate(block))
+                translated_value = client.translate(block)
+                document.add_paragraph(_layout_translation_value(client, block, translated_value, "docx"))
                 translated += 1
         _update(callback, 35 + int(index / total * 45), "translation", f"Translated PDF page {index}/{total}")
     document.save(destination)
@@ -1825,7 +1853,7 @@ def _translated_ocr_text(text: str, client: TranslationClient | None) -> str:
             output.append("")
             continue
         translated = client.translate(line)
-        output.append(str(translated or line).strip())
+        output.append(_layout_translation_value(client, line, str(translated or line), "docx").strip())
     return "\n".join(output).strip()
 
 def _add_ocr_text(document: Document, text: str, target_code: str = "") -> int:
@@ -2408,16 +2436,20 @@ def _organize_xlsx_a4(source: Path, destination: Path, callback: ProgressCallbac
                         row_has_text = True
                         line_count = max(line_count, value.count('\n') + 1)
                         char_count = max(char_count, max((len(x) for x in value.splitlines()), default=0))
-                        cell.alignment = cell.alignment.copy(
-                            wrap_text=True,
-                            vertical='center',
-                            horizontal=cell.alignment.horizontal or 'left',
-                        )
+                        alignment = copy.copy(cell.alignment)
+                        alignment.wrap_text = True
+                        alignment.vertical = 'center'
+                        alignment.horizontal = cell.alignment.horizontal or 'left'
+                        cell.alignment = alignment
                         current_size = cell.font.sz or 11
                         if current_size < 10.5:
-                            cell.font = cell.font.copy(size=10.5)
+                            font = copy.copy(cell.font)
+                            font.sz = 10.5
+                            cell.font = font
                     elif cell.alignment.vertical is None:
-                        cell.alignment = cell.alignment.copy(vertical='center')
+                        alignment = copy.copy(cell.alignment)
+                        alignment.vertical = 'center'
+                        cell.alignment = alignment
 
                 if row_has_text:
                     required = max(20.0, 17.0 * line_count)
@@ -2429,13 +2461,26 @@ def _organize_xlsx_a4(source: Path, destination: Path, callback: ProgressCallbac
             if title_row:
                 for cell in ws[title_row][:max_col]:
                     if cell.value not in (None, ''):
-                        cell.font = cell.font.copy(bold=True, size=max(13, cell.font.sz or 11))
-                        cell.alignment = cell.alignment.copy(wrap_text=True, vertical='center')
+                        font = copy.copy(cell.font)
+                        font.bold = True
+                        font.sz = max(13, cell.font.sz or 11)
+                        cell.font = font
+                        alignment = copy.copy(cell.alignment)
+                        alignment.wrap_text = True
+                        alignment.vertical = 'center'
+                        cell.alignment = alignment
             if header_row:
                 for cell in ws[header_row][:max_col]:
                     if cell.value not in (None, ''):
-                        cell.font = cell.font.copy(bold=True, size=max(10.5, cell.font.sz or 10.5))
-                        cell.alignment = cell.alignment.copy(wrap_text=True, vertical='center', horizontal='center')
+                        font = copy.copy(cell.font)
+                        font.bold = True
+                        font.sz = max(10.5, cell.font.sz or 10.5)
+                        cell.font = font
+                        alignment = copy.copy(cell.alignment)
+                        alignment.wrap_text = True
+                        alignment.vertical = 'center'
+                        alignment.horizontal = 'center'
+                        cell.alignment = alignment
                 ws.freeze_panes = ws.freeze_panes or f'A{header_row + 1}'
                 ws.print_title_rows = f'{header_row}:{header_row}'
 
@@ -3435,7 +3480,7 @@ def _process_file(original_name: str, stored_path: str, output_dir: Path, client
     return {"name": destination.name, "path": str(destination), "translated_items": count, "mode": "translated" if count else "copied", "cleanup_stats": cleanup_stats, **details}
 
 
-def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], output_dir: Path, progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
+def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple[str, str]], output_dir: Path, progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
     """Run an order with bounded file-level concurrency.
 
     V13 keeps one translation client per worker so provider usage counters and
@@ -3514,38 +3559,34 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
 
     translation_data = order.get("translation") or {}
 
-    shared_client: TranslationClient | None = None
-
     def make_client() -> TranslationClient | None:
-        nonlocal shared_client
         if "translation" not in services:
             return None
-        # Translation orders run sequentially by default. Reuse one client across
-        # all files so repeated terms in st02-st09 are served from the same cache
-        # instead of being sent to the AI provider again for every workbook.
-        if shared_client is None:
-            shared_client = TranslationClient(
-                source_language=translation_data.get("source_language", "auto"),
-                target_language=translation_data.get("target_language", "en"),
-                custom_source=translation_data.get("custom_source_language", ""),
-                custom_target=translation_data.get("custom_target_language", ""),
-            )
-            shared_client.bilingual_layout = translation_data.get("bilingual_layout") or (conversion_data.get("options") or {}).get("bilingual_layout") or "auto"
-        return shared_client
+        # A client is isolated per file worker. TranslationClient temporarily
+        # adjusts request timeouts while a batch is running, so sharing one
+        # instance between threads caused races and multi-minute stalls.
+        client = TranslationClient(
+            source_language=translation_data.get("source_language", "auto"),
+            target_language=translation_data.get("target_language", "en"),
+            custom_source=translation_data.get("custom_source_language", ""),
+            custom_target=translation_data.get("custom_target_language", ""),
+        )
+        client.bilingual_layout = translation_data.get("bilingual_layout") or (conversion_data.get("options") or {}).get("bilingual_layout")
+        client.output_options = conversion_data.get("options") if isinstance(conversion_data.get("options"), dict) else {}
+        return client
 
     if "translation" in services:
         _update(progress_callback, 30, "translation", "AI 翻译引擎连接成功")
 
     total = len(source_paths)
-    # Translation is network-bound and providers commonly throttle concurrent
-    # requests. Running several Excel files at once can leave every worker
-    # waiting on a provider timeout. Default translation batches to one worker;
-    # conversion-only orders may still use the normal bounded concurrency.
+    # Translation is network-bound. Use bounded file-level concurrency so a
+    # six-workbook order does not run serially, while the provider semaphore in
+    # translation_engine still prevents request floods.
     worker_env = "BATCH_TRANSLATION_MAX_WORKERS" if "translation" in services else "BATCH_MAX_WORKERS"
-    worker_default = "1" if "translation" in services else "3"
+    worker_default = "3"
     max_workers = max(1, min(int(os.getenv(worker_env, worker_default)), total, 6))
     if "translation" in services:
-        max_workers = min(max_workers, max(1, int(os.getenv("TRANSLATION_FILE_WORKERS", "2"))))
+        max_workers = min(max_workers, max(1, int(os.getenv("TRANSLATION_FILE_WORKERS", "3"))))
     progress_lock = Lock()
     completed_count = 0
     file_fractions: dict[int, float] = {index: 0.0 for index in range(total)}
@@ -3749,4 +3790,89 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
         "successful_output_count": successful_output_count,
         "failure_count": failure_count,
         "completion_message": completion_message,
+    }
+
+
+def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], output_dir: Path, progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
+    """Run one real deliverable set per selected target language.
+
+    Older builds accepted a multi-select array but silently processed only its
+    first value.  This wrapper makes the API contract real while retaining the
+    well-tested single-target engine below it.
+    """
+    translation = order.get("translation") or {}
+    services = order.get("services") or []
+    raw_targets = translation.get("targets") if isinstance(translation.get("targets"), list) else []
+    targets = list(dict.fromkeys(str(item).strip() for item in raw_targets if str(item).strip()))
+    if "translation" not in services or len(targets) <= 1:
+        if targets:
+            order = copy.deepcopy(order)
+            order.setdefault("translation", {})["target_language"] = {"zh-en": "en", "zh-vi": "vi"}.get(targets[0], targets[0])
+        return _run_local_job_single_target(order, source_paths, output_dir, progress_callback)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    progress_lock = Lock()
+    target_progress = {target: 0 for target in targets}
+    results: dict[str, dict[str, Any]] = {}
+
+    def run_target(target: str) -> tuple[str, dict[str, Any]]:
+        target_code = {"zh-en": "en", "zh-vi": "vi"}.get(target, target)
+        safe_target = re.sub(r"[^A-Za-z0-9._-]+", "-", target_code).strip("-") or "target"
+        target_order = copy.deepcopy(order)
+        target_order.setdefault("translation", {})["target_language"] = target_code
+        target_order["translation"]["targets"] = [target_code]
+
+        def mapped_progress(progress: int, step: str, message: str) -> None:
+            with progress_lock:
+                target_progress[target] = max(target_progress[target], int(progress))
+                aggregate = int(sum(target_progress.values()) / len(targets))
+            if progress_callback is not None:
+                progress_callback(aggregate, step, f"[{target_code}] {message}")
+
+        result = _run_local_job_single_target(target_order, source_paths, output_dir / f"language_{safe_target}", mapped_progress)
+        return target_code, result
+
+    worker_count = max(1, min(len(targets), int(os.getenv("TRANSLATION_TARGET_WORKERS", "2")), 4))
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="doc-ai-language") as pool:
+        futures = [pool.submit(run_target, target) for target in targets]
+        for future in as_completed(futures):
+            code, result = future.result()
+            results[code] = result
+
+    outputs: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    usage_rows: list[dict[str, Any]] = []
+    for target_code, result in results.items():
+        outputs.extend({**item, "target_language": target_code} for item in result.get("outputs", []))
+        failures.extend({**item, "target_language": target_code} for item in result.get("failures", []))
+        if result.get("translation_usage"):
+            usage_rows.append(result["translation_usage"])
+    aggregate_usage = {
+        "input_tokens": sum(int(row.get("input_tokens") or 0) for row in usage_rows),
+        "output_tokens": sum(int(row.get("output_tokens") or 0) for row in usage_rows),
+        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in usage_rows),
+        "estimated_cost_usd": round(sum(float(row.get("estimated_cost_usd") or 0) for row in usage_rows), 6),
+        "languages": len(results),
+    } if usage_rows else None
+    state, completion_message = _resolve_job_outcome(len(outputs), len(failures), "manual_review" in services)
+    manifest_path = output_dir / "processing_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "order_number": order.get("order_number"),
+        "targets": targets,
+        "target_results": results,
+        "outputs": outputs,
+        "failures": failures,
+        "translation_usage": aggregate_usage,
+        "terminal_state": state,
+        "completed_at": now(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if progress_callback is not None:
+        progress_callback(100, state, completion_message)
+    return {
+        "state": state, "progress": 100, "current_step": state,
+        "plan": build_plan(order), "blockers": [], "manifest_path": str(manifest_path),
+        "outputs": outputs, "translation_usage": aggregate_usage, "failures": failures,
+        "partial_success": state == "partial_completed", "successful_output_count": len(outputs),
+        "failure_count": len(failures), "completion_message": completion_message,
+        "target_results": results,
     }

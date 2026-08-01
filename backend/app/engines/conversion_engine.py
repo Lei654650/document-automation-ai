@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+import html
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
 
@@ -274,6 +277,156 @@ def _csv_to_xlsx(source: Path, destination: Path) -> Path:
     return destination
 
 
+def _read_text_file(source: Path) -> str:
+    raw = source.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _extract_portable_content(source: Path) -> tuple[list[str], list[list[Any]]]:
+    """Extract a conservative text/table representation for portable exports."""
+    suffix = source.suffix.lower()
+    blocks: list[str] = []
+    rows: list[list[Any]] = []
+    if suffix == ".docx":
+        document = Document(source)
+        blocks.extend(p.text for p in document.paragraphs if p.text.strip())
+        for table in document.tables:
+            for row in table.rows:
+                values = [cell.text for cell in row.cells]
+                rows.append(values)
+                blocks.append(" | ".join(values))
+    elif suffix == ".xlsx":
+        workbook = load_workbook(source, data_only=False, read_only=True)
+        for sheet in workbook.worksheets:
+            blocks.append(f"[{sheet.title}]")
+            for row in sheet.iter_rows(values_only=True):
+                values = ["" if value is None else value for value in row]
+                rows.append(values)
+        workbook.close()
+    elif suffix == ".pptx":
+        presentation = Presentation(source)
+        for slide_no, slide in enumerate(presentation.slides, start=1):
+            blocks.append(f"Slide {slide_no}")
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    value = "\n".join(p.text for p in shape.text_frame.paragraphs if p.text.strip())
+                    if value:
+                        blocks.append(value)
+                if getattr(shape, "has_table", False):
+                    for row in shape.table.rows:
+                        values = [cell.text for cell in row.cells]
+                        rows.append(values)
+                        blocks.append(" | ".join(values))
+    elif suffix == ".pdf" and fitz is not None:
+        pdf = fitz.open(source)
+        for index, page in enumerate(pdf, start=1):
+            blocks.append(f"Page {index}")
+            text = page.get_text("text").strip()
+            if text:
+                blocks.append(text)
+        pdf.close()
+    elif suffix == ".csv":
+        text = _read_text_file(source)
+        rows = [list(row) for row in csv.reader(text.splitlines())]
+    elif suffix in {".txt", ".md", ".markdown", ".html", ".json", ".xml"}:
+        blocks = [_read_text_file(source)]
+    else:
+        blocks = [source.name]
+    return blocks, rows
+
+
+def _portable_export(source: Path, destination: Path, fmt: str) -> Path:
+    blocks, rows = _extract_portable_content(source)
+    normalized = "md" if fmt in {"md", "markdown"} else fmt
+    if normalized == "csv":
+        with destination.open("w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.writer(handle)
+            for row in rows or [[block] for block in blocks]:
+                writer.writerow(row)
+    elif normalized == "json":
+        destination.write_text(json.dumps({"source": source.name, "blocks": blocks, "rows": rows}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    elif normalized == "xml":
+        root = ET.Element("document", {"source": source.name})
+        for index, block in enumerate(blocks, start=1):
+            ET.SubElement(root, "block", {"index": str(index)}).text = str(block)
+        for row_index, row in enumerate(rows, start=1):
+            row_node = ET.SubElement(root, "row", {"index": str(row_index)})
+            for column_index, value in enumerate(row, start=1):
+                ET.SubElement(row_node, "cell", {"column": str(column_index)}).text = str(value)
+        ET.ElementTree(root).write(destination, encoding="utf-8", xml_declaration=True)
+    elif normalized == "html":
+        parts = ["<!doctype html><html><head><meta charset=\"utf-8\"><title>", html.escape(source.stem), "</title></head><body>"]
+        parts.extend(f"<p>{html.escape(str(block)).replace(chr(10), '<br>')}</p>" for block in blocks)
+        if rows:
+            parts.append("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">")
+            parts.extend("<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in row) + "</tr>" for row in rows)
+            parts.append("</table>")
+        parts.append("</body></html>")
+        destination.write_text("".join(parts), encoding="utf-8")
+    elif normalized == "md":
+        text = [f"# {source.stem}", ""]
+        text.extend(str(block) for block in blocks)
+        if rows:
+            text.extend(["", "## Structured data", ""])
+            text.extend(" | ".join(str(value) for value in row) for row in rows)
+        destination.write_text("\n\n".join(text), encoding="utf-8")
+    else:
+        destination.write_text("\n\n".join(str(block) for block in blocks) or "\n".join(",".join(map(str, row)) for row in rows), encoding="utf-8")
+    return destination
+
+
+def _portable_to_docx(source: Path, destination: Path) -> Path:
+    blocks, rows = _extract_portable_content(source)
+    document = Document()
+    document.add_heading(source.stem, 0)
+    for block in blocks:
+        document.add_paragraph(str(block))
+    if rows:
+        width = max(1, max(len(row) for row in rows))
+        table = document.add_table(rows=0, cols=width)
+        table.style = "Table Grid"
+        for values in rows:
+            cells = table.add_row().cells
+            for index, value in enumerate(values):
+                cells[index].text = str(value)
+    document.save(destination)
+    return destination
+
+
+def _portable_to_xlsx(source: Path, destination: Path) -> Path:
+    from openpyxl import Workbook
+    blocks, rows = _extract_portable_content(source)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Content"
+    if rows:
+        for row in rows:
+            sheet.append(list(row))
+    else:
+        for block in blocks:
+            sheet.append([str(block)])
+    workbook.save(destination)
+    return destination
+
+
+def _portable_to_pptx(source: Path, destination: Path) -> Path:
+    blocks, rows = _extract_portable_content(source)
+    content = [str(block) for block in blocks]
+    content.extend(" | ".join(str(value) for value in row) for row in rows)
+    presentation = Presentation()
+    for index in range(0, max(1, len(content)), 8):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+        slide.shapes.title.text = source.stem if index == 0 else f"{source.stem} ({index // 8 + 1})"
+        slide.placeholders[1].text = "\n".join(content[index:index + 8]) or source.name
+    presentation.save(destination)
+    return destination
+
+
 def _image_to_pdf(source: Path, destination: Path) -> Path:
     with Image.open(source) as image:
         image.convert("RGB").save(destination, "PDF", resolution=150.0)
@@ -362,11 +515,20 @@ def convert_outputs(primary: Path, requested_formats: list[str], output_dir: Pat
                         _xlsx_to_pdf_fallback(primary, target)
                 elif primary.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}:
                     target = _image_to_pdf(primary, _unique(output_dir / f"{primary.stem}.pdf"))
+                else:
+                    blocks, rows = _extract_portable_content(primary)
+                    lines = blocks + [" | ".join(str(value) for value in row) for row in rows]
+                    target = _text_lines_to_pdf(lines, _unique(output_dir / f"{primary.stem}.pdf"), primary.stem)
             elif fmt == "docx":
                 if primary.suffix.lower() == ".pptx":
                     target = _pptx_to_docx(primary, _unique(output_dir / f"{primary.stem}.docx"))
                 elif primary.suffix.lower() in {".odt", ".rtf", ".html", ".txt"}:
-                    target = _libreoffice_convert(primary, "docx", output_dir)
+                    try:
+                        target = _libreoffice_convert(primary, "docx", output_dir)
+                    except Exception:
+                        target = _portable_to_docx(primary, _unique(output_dir / f"{primary.stem}.docx"))
+                else:
+                    target = _portable_to_docx(primary, _unique(output_dir / f"{primary.stem}.docx"))
             elif fmt == "xlsx":
                 if primary.suffix.lower() == ".csv":
                     target = _csv_to_xlsx(primary, _unique(output_dir / f"{primary.stem}.xlsx"))
@@ -374,14 +536,18 @@ def convert_outputs(primary: Path, requested_formats: list[str], output_dir: Pat
                     target = _docx_to_xlsx(primary, _unique(output_dir / f"{primary.stem}.xlsx"))
                 elif primary.suffix.lower() == ".pptx":
                     target = _pptx_to_xlsx(primary, _unique(output_dir / f"{primary.stem}.xlsx"))
-            elif fmt == "csv":
-                if primary.suffix.lower() == ".xlsx":
-                    target = _xlsx_to_csv(primary, _unique(output_dir / f"{primary.stem}.csv"))
+                else:
+                    target = _portable_to_xlsx(primary, _unique(output_dir / f"{primary.stem}.xlsx"))
+            elif fmt in {"txt", "md", "markdown", "html", "json", "xml", "csv"}:
+                extension = "md" if fmt in {"md", "markdown"} else fmt
+                target = _portable_export(primary, _unique(output_dir / f"{primary.stem}.{extension}"), fmt)
             elif fmt == "pptx":
                 if primary.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}:
                     target = _image_to_pptx(primary, _unique(output_dir / f"{primary.stem}.pptx"))
                 elif primary.suffix.lower() == ".docx":
                     target = _docx_to_pptx(primary, _unique(output_dir / f"{primary.stem}.pptx"))
+                else:
+                    target = _portable_to_pptx(primary, _unique(output_dir / f"{primary.stem}.pptx"))
             elif fmt == "images":
                 if primary.suffix.lower() == ".pdf":
                     image_paths = _pdf_to_images(primary, output_dir, primary.stem)
