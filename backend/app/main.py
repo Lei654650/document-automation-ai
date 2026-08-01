@@ -227,10 +227,16 @@ def _wait_for_job_control(job_id: int) -> None:
 # Production accepts only explicitly configured origins. Development origins can
 # still be enabled deliberately through CORS_ORIGINS without weakening production.
 _configured_cors_origins = {
-    item.strip()
+    item.strip().rstrip('/')
     for item in os.getenv("CORS_ORIGINS", "").split(",")
     if item.strip()
 }
+# Official production frontends are always valid callers. Keeping these defaults
+# prevents a missing Railway variable from breaking login on the public website.
+_configured_cors_origins.update({
+    "https://docai365.com",
+    "https://www.docai365.com",
+})
 if PUBLIC_BASE_URL.startswith(("http://", "https://")):
     _configured_cors_origins.add(PUBLIC_BASE_URL)
 if not CLOUD_MODE:

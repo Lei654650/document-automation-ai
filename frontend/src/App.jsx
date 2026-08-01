@@ -16,13 +16,19 @@ import './styles/v45-shared-controls.css';
 // production VITE_API_BASE value in a local .env from sending auth requests
 // to the live site.
 const isLocalFrontend = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
-const API_BASE = isLocalFrontend
-  ? ''
-  : (
-      import.meta.env.VITE_API_BASE_URL
-      || import.meta.env.VITE_API_BASE
-      || ''
-    ).replace(/\/$/, '');
+const resolveApiBase = () => {
+  if (isLocalFrontend) return '';
+  const configured = String(
+    import.meta.env.VITE_API_BASE_URL
+    || import.meta.env.VITE_API_BASE
+    || ''
+  ).trim().replace(/\/$/, '');
+  // Ignore Vercel/example placeholders and recover safely on the official domain.
+  if (configured && !/example\.com/i.test(configured)) return configured;
+  if (/(^|\.)docai365\.com$/i.test(window.location.hostname)) return 'https://api.docai365.com';
+  return '';
+};
+const API_BASE = resolveApiBase();
 const VERSION = '45.0.0';
 const authMessage = (detail, zh, status) => {
   const value = String(detail || '').trim();
@@ -1465,7 +1471,7 @@ function App() {
                 setAccountOpen(false);
               }
             }}><span>{(currentUser.name || currentUser.email || 'U').slice(0, 1).toUpperCase()}</span><div><b>{currentUser.name || currentUser.email}</b><small>{currentUser.role === 'owner' ? uiL('所有者', 'Owner', 'Chủ sở hữu') : currentUser.role === 'admin' ? uiL('管理员', 'Administrator', 'Quản trị viên') : uiL('成员', 'Member', 'Thành viên')}</small><em>{currentUser.email || ''}</em></div><ChevronRight className="account-profile-arrow" /></header><section><small>{uiL('工作', 'WORK', 'CÔNG VIỆC')}</small><button className={page === 'dashboard' ? 'active' : ''} onClick={() => {
-                setPage('dashboard');
+                setPage('home');
                 setAccountOpen(false);
               }}><LayoutDashboard />{uiL('工作台', 'Workspace', 'Không gian làm việc')}</button>{['owner', 'admin'].includes(currentUser?.role) && <button className={page === 'admin' ? 'active' : ''} onClick={() => {
                 setPage('admin');
@@ -3102,12 +3108,19 @@ function AuthPage({
     }).then(async r => {
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || 'Configuration request failed');
-      setAuthConfig(j);
-    }).catch(() => setAuthConfig({
-      google_enabled: false,
-      google_client_id: '',
-      google_configuration: 'unavailable'
-    }));
+      setAuthConfig({
+        google_enabled: Boolean(j.google_enabled ?? j.googleEnabled),
+        google_client_id: String(j.google_client_id ?? j.googleClientId ?? '').trim(),
+        google_configuration: String(j.google_configuration ?? j.googleConfiguration ?? 'unknown')
+      });
+    }).catch(error => {
+      console.error('Unable to load auth configuration', { API_BASE, error });
+      setAuthConfig({
+        google_enabled: false,
+        google_client_id: '',
+        google_configuration: 'unavailable'
+      });
+    });
   }, []);
   useEffect(() => {
     if (countdown <= 0) return;
@@ -3218,7 +3231,9 @@ function AuthPage({
     localStorage.setItem('da_user_profile', JSON.stringify(j.user));
     setAuthToken(j.token);
     setCurrentUser(j.user);
-    setPage('dashboard');
+    // Return authenticated users to the public home page first. The workspace
+    // remains available from the main navigation instead of becoming a trap.
+    setPage('home');
   };
   useEffect(() => {
     if (!authConfig.google_enabled || !authConfig.google_client_id || !googleButtonRef.current || !['login', 'register'].includes(flow)) return;
