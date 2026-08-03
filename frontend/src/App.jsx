@@ -54,6 +54,65 @@ const readJson = async response => {
     return {};
   }
 };
+const isRecord = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const safeArray = value => Array.isArray(value) ? value : [];
+const safeRecordArray = value => safeArray(value).map(item => isRecord(item) ? item : {});
+const safeTextArray = value => safeArray(value).filter(item => ['string', 'number'].includes(typeof item)).map(String);
+const safeText = (value, fallback = '') => ['string', 'number', 'boolean'].includes(typeof value) ? String(value) : fallback;
+const safeNumber = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const normalizeTrackingPayload = (payload, fallback = {}) => {
+  const source = isRecord(payload) ? payload : {};
+  const base = isRecord(fallback) ? fallback : {};
+  const rawJob = isRecord(source.processing_job)
+    ? source.processing_job
+    : isRecord(base.processing_job)
+      ? base.processing_job
+      : {};
+  const rawAnalysis = isRecord(source.ai_analysis)
+    ? source.ai_analysis
+    : isRecord(base.ai_analysis)
+      ? base.ai_analysis
+      : {};
+  const rawResult = isRecord(rawJob.result) ? rawJob.result : {};
+  return {
+    ...base,
+    ...source,
+    order_number: String(source.order_number || base.order_number || ''),
+    email: String(source.email || base.email || ''),
+    status: String(source.status || base.status || rawJob.state || 'processing'),
+    files: safeRecordArray(source.files ?? base.files),
+    output_files: safeRecordArray(source.output_files ?? base.output_files),
+    ai_analysis: {
+      ...rawAnalysis,
+      summary: safeText(rawAnalysis.summary),
+      complexity: safeText(rawAnalysis.complexity, 'unknown'),
+      document_category: safeText(rawAnalysis.document_category),
+      industry: safeText(rawAnalysis.industry),
+      file_count: safeNumber(rawAnalysis.file_count, safeArray(rawAnalysis.files).length),
+      files: safeRecordArray(rawAnalysis.files),
+      input_formats: safeTextArray(rawAnalysis.input_formats),
+      detected_languages: safeTextArray(rawAnalysis.detected_languages),
+      recommended_workflow: safeTextArray(rawAnalysis.recommended_workflow)
+    },
+    processing_job: {
+      ...rawJob,
+      state: safeText(rawJob.state || source.status || base.status, 'processing'),
+      current_step: safeText(rawJob.current_step, 'processing'),
+      message: safeText(rawJob.message),
+      error_message: safeText(rawJob.error_message),
+      created_at: safeText(rawJob.created_at),
+      updated_at: safeText(rawJob.updated_at),
+      progress: safeNumber(rawJob.progress, 0),
+      steps: safeRecordArray(rawJob.steps),
+      events: safeRecordArray(rawJob.events),
+      blockers: safeRecordArray(rawJob.blockers),
+      result: {
+        ...rawResult,
+        failures: safeRecordArray(rawResult.failures)
+      }
+    }
+  };
+};
 const downloadAuthenticatedFile = async (url, authToken, fallbackName = 'download') => {
   const response = await fetch(url, {
     headers: {
@@ -977,12 +1036,29 @@ function App() {
     [languageOpen, setLanguageOpen] = useState(false),
     [accountOpen, setAccountOpen] = useState(false);
   const resetPageScroll = useCallback(() => {
-    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    try {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    } catch {
+      window.scrollTo(0, 0);
+    }
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
   }, []);
   const setPage = useCallback(nextPage => {
-    setPageState(nextPage);
+    const safePage = typeof nextPage === 'string' && nextPage ? nextPage : 'home';
+    if (safePage !== 'billing') {
+      try {
+        const url = new URL(window.location.href);
+        if (url.hash === '#payment-success' || url.hash === '#pricing') url.hash = '';
+        if (url.searchParams.has('payment')) {
+          ['payment', 'payment_number', 'token', 'PayerID'].forEach(key => url.searchParams.delete(key));
+        }
+        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+      } catch {
+        // URL cleanup is best effort and must never block page navigation.
+      }
+    }
+    setPageState(safePage);
     resetPageScroll();
   }, [resetPageScroll]);
   const accountCloseTimer = useRef(null),
@@ -1540,14 +1616,23 @@ function App() {
           detail: raw
         };
       }
-      if (!r.ok) throw new Error(j.detail || t.submitFailed);
-      setOrderStatus({
+      if (!r.ok) throw new Error(typeof j.detail === 'string' ? j.detail : t.submitFailed);
+      const nextOrder = normalizeTrackingPayload({
         ...j,
         email: orderForm.email,
         services: services.length ? services : ['standard'],
         translation_targets: translation.targets,
         output_formats: conversion.formats
       });
+      if (!nextOrder.order_number) {
+        throw new Error(document.documentElement.lang.startsWith('zh') ? '任务已提交，但服务器没有返回任务编号，请重试。' : 'The server did not return a task number. Please retry.');
+      }
+      try {
+        sessionStorage.setItem('da_active_order', JSON.stringify(nextOrder));
+      } catch {
+        // The live state remains available even when storage is blocked.
+      }
+      setOrderStatus(nextOrder);
       setPage('status');
     } catch (err) {
       setError(err.name === 'AbortError' ? document.documentElement.lang.startsWith('zh') ? '云端处理超过15分钟未完成，请检查文件规模、AI 配置或后端日志后重试。' : 'Cloud processing timed out after 15 minutes. Check file size, AI settings, or backend logs and retry.' : err.message || t.submitFailed);
@@ -1660,7 +1745,7 @@ function App() {
         aiInsight,
         aiAnalyzing,
         aiInsightError
-      }} /></PageErrorBoundary>} {page === 'status' && <OrderStatus t={t} data={orderStatus} setPage={setPage} />} {page === 'projects' && <ProjectCenter locale={locale} setPage={setPage} authToken={authToken} />} {page === 'dashboard' && <PageErrorBoundary locale={locale} onBack={() => setPage('home')}><Dashboard t={t} setPage={setPage} authToken={authToken} currentUser={currentUser} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} /></PageErrorBoundary>} {page === 'admin' && (['owner', 'admin'].includes(currentUser?.role) ? <PageErrorBoundary locale={locale} onBack={() => setPage('dashboard')}><AdminConsole setPage={setPage} authToken={authToken} currentUser={currentUser} /></PageErrorBoundary> : <PageErrorBoundary locale={locale} onBack={() => setPage('home')}><Dashboard t={t} setPage={setPage} authToken={authToken} currentUser={currentUser} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} /></PageErrorBoundary>)} {page === 'processing' && <ProcessingCenter t={t} setPage={setPage} authToken={authToken} />} {page === 'knowledge' && <KnowledgeCenter t={t} setPage={setPage} />} {page === 'templates' && <TemplateCenter setPage={setPage} />} {page === 'team' && <TeamPermissionsCenter setPage={setPage} currentUser={currentUser} />} {page === 'billing' && <PaymentCenter setPage={setPage} locale={locale} authToken={authToken} currentUser={currentUser} />} {page === 'acceptance' && <AcceptanceCenter setPage={setPage} />} {page === 'login' && <AuthPage mode="login" locale={locale} setPage={setPage} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} />} {page === 'register' && <AuthPage mode="register" locale={locale} setPage={setPage} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} />} {page === 'account' && <AccountPage locale={locale} user={currentUser} authToken={authToken} setPage={setPage} />} {page === 'aiProviders' && <SettingsPage locale={locale} setLocale={setLocale} user={currentUser} authToken={authToken} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} setPage={setPage} providerOnly />} {page === 'settings' && <SettingsPage locale={locale} setLocale={setLocale} user={currentUser} authToken={authToken} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} setPage={setPage} />}  
+      }} /></PageErrorBoundary>} {page === 'status' && <PageErrorBoundary locale={locale} onBack={() => setPage('order')}><OrderStatus t={t} data={orderStatus} setPage={setPage} /></PageErrorBoundary>} {page === 'projects' && <ProjectCenter locale={locale} setPage={setPage} authToken={authToken} />} {page === 'dashboard' && <PageErrorBoundary locale={locale} onBack={() => setPage('home')}><Dashboard t={t} setPage={setPage} authToken={authToken} currentUser={currentUser} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} /></PageErrorBoundary>} {page === 'admin' && (['owner', 'admin'].includes(currentUser?.role) ? <PageErrorBoundary locale={locale} onBack={() => setPage('dashboard')}><AdminConsole setPage={setPage} authToken={authToken} currentUser={currentUser} /></PageErrorBoundary> : <PageErrorBoundary locale={locale} onBack={() => setPage('home')}><Dashboard t={t} setPage={setPage} authToken={authToken} currentUser={currentUser} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} /></PageErrorBoundary>)} {page === 'processing' && <PageErrorBoundary locale={locale} onBack={() => setPage('dashboard')}><ProcessingCenter t={t} setPage={setPage} authToken={authToken} /></PageErrorBoundary>} {page === 'knowledge' && <KnowledgeCenter t={t} setPage={setPage} />} {page === 'templates' && <TemplateCenter setPage={setPage} />} {page === 'team' && <TeamPermissionsCenter setPage={setPage} currentUser={currentUser} />} {page === 'billing' && <PaymentCenter setPage={setPage} locale={locale} authToken={authToken} currentUser={currentUser} />} {page === 'acceptance' && <AcceptanceCenter setPage={setPage} />} {page === 'login' && <AuthPage mode="login" locale={locale} setPage={setPage} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} />} {page === 'register' && <AuthPage mode="register" locale={locale} setPage={setPage} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} />} {page === 'account' && <AccountPage locale={locale} user={currentUser} authToken={authToken} setPage={setPage} />} {page === 'aiProviders' && <SettingsPage locale={locale} setLocale={setLocale} user={currentUser} authToken={authToken} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} setPage={setPage} providerOnly />} {page === 'settings' && <SettingsPage locale={locale} setLocale={setLocale} user={currentUser} authToken={authToken} setAuthToken={setAuthToken} setCurrentUser={setCurrentUser} setPage={setPage} />}  
     {!isWorkspacePage && <footer className="enterprise-footer footer-v3034"><div className="footer-main"><div className="footer-brand-block"><div className="brand footer-brand"><span className="brand-mark">DA</span><span><b>Document Automation AI</b><small>{document.documentElement.lang.startsWith('zh') ? '企业 AI 文档平台' : 'Enterprise AI Document Platform'}</small></span></div><p>{t.footer}</p><div className="footer-trust"><span><ShieldCheck />{document.documentElement.lang.startsWith('zh') ? '安全' : 'Secure'}</span><span><Sparkles />{document.documentElement.lang.startsWith('zh') ? '高效' : 'Fast'}</span><span><Workflow />{document.documentElement.lang.startsWith('zh') ? '可扩展' : 'Scalable'}</span></div></div><div className="footer-links footer-links-six"><div><b>{document.documentElement.lang.startsWith('zh') ? '产品' : 'Products'}</b><span>OCR</span><span>{document.documentElement.lang.startsWith('zh') ? '文档翻译' : 'Translation'}</span><span>{document.documentElement.lang.startsWith('zh') ? '格式转换' : 'Conversion'}</span><span>{document.documentElement.lang.startsWith('zh') ? '智能自动化' : 'Automation'}</span></div><div><b>{uiL('解决方案', 'Solutions', 'Giải pháp')}</b><span>{document.documentElement.lang.startsWith('zh') ? '制造业' : 'Manufacturing'}</span><span>{document.documentElement.lang.startsWith('zh') ? '自动化' : 'Automation'}</span><span>{document.documentElement.lang.startsWith('zh') ? '财务与法律' : 'Finance & Legal'}</span></div><div><b>{uiL('资源', 'Resources', 'Tài nguyên')}</b><span>{document.documentElement.lang.startsWith('zh') ? '帮助中心' : 'Help Center'}</span><span>{document.documentElement.lang.startsWith('zh') ? '版本说明' : 'Release Notes'}</span><span>{document.documentElement.lang.startsWith('zh') ? '路线图' : 'Roadmap'}</span></div><div><b>{document.documentElement.lang.startsWith('zh') ? '公司' : 'Company'}</b><span>{document.documentElement.lang.startsWith('zh') ? '关于我们' : 'About'}</span><span>{document.documentElement.lang.startsWith('zh') ? '合作伙伴' : 'Partners'}</span><span>{document.documentElement.lang.startsWith('zh') ? '联系我们' : 'Contact'}</span></div><div><b>{document.documentElement.lang.startsWith('zh') ? '支持' : 'Support'}</b><span>{document.documentElement.lang.startsWith('zh') ? '服务状态' : 'System Status'}</span><span>API</span><span>{document.documentElement.lang.startsWith('zh') ? 'AI 知识库' : 'AI Knowledge Base'}</span></div><div><b>{document.documentElement.lang.startsWith('zh') ? '法律' : 'Legal'}</b><span>Privacy</span><span>Terms</span><span>Cookies</span><span>Security</span></div></div></div><div className="footer-bottom"><span>© 2026 Document Automation AI</span><div className="footer-languages"><span>English</span><span>中文</span><span>Tiếng Việt</span><span>日本語</span><span>한국어</span></div><small>Build {VERSION}</small></div></footer>}
   </div>;
 }
@@ -1680,6 +1765,16 @@ class PageErrorBoundary extends Component {
   }
   componentDidCatch(error, info) {
     console.error('Page render error:', error, info);
+    try {
+      sessionStorage.setItem('da_last_render_error', JSON.stringify({
+        message: String(error?.message || error || 'Unknown render error'),
+        stack: String(error?.stack || ''),
+        componentStack: String(info?.componentStack || ''),
+        at: new Date().toISOString()
+      }));
+    } catch {
+      // Do not allow diagnostics storage to trigger another render error.
+    }
   }
   render() {
     if (!this.state.hasError) return this.props.children;
@@ -2623,21 +2718,21 @@ function OrderStatus({
   data,
   setPage
 }) {
-  const [tracking, setTracking] = useState(data),
+  const [tracking, setTracking] = useState(() => normalizeTrackingPayload(data)),
     [trackError, setTrackError] = useState(''),
     [deliveryMessage, setDeliveryMessage] = useState(''),
     [downloadInfo, setDownloadInfo] = useState(null),
     [downloading, setDownloading] = useState(false),
     [downloadingFileId, setDownloadingFileId] = useState(null),
-    [deliveryPackage, setDeliveryPackage] = useState(data?.delivery_package || null),
+    [deliveryPackage, setDeliveryPackage] = useState(isRecord(data?.delivery_package) ? data.delivery_package : null),
     [analysisOpen, setAnalysisOpen] = useState(false),
     [deliveryPage, setDeliveryPage] = useState(1),
     [deliveryQuery, setDeliveryQuery] = useState(''),
     [deliveryFilter, setDeliveryFilter] = useState('success');
   const isZh = document.documentElement.lang.startsWith('zh');
   const deliveryParams = () => new URLSearchParams({
-    order_number: tracking.order_number,
-    email: tracking.email
+    order_number: String(tracking?.order_number || ''),
+    email: String(tracking?.email || '')
   });
   const responseError = async (response, fallback) => {
     const payload = await readJson(response);
@@ -2743,19 +2838,25 @@ function OrderStatus({
     }
   };
   useEffect(() => {
+    setTracking(current => normalizeTrackingPayload(data, current));
+  }, [data]);
+  useEffect(() => {
     if (!data?.order_number || !data?.email) return;
     let stop = false;
     const load = async () => {
       try {
         const r = await fetch(`${API_BASE}/api/track?order_number=${encodeURIComponent(data.order_number)}&email=${encodeURIComponent(data.email)}`);
-        const j = await r.json();
-        if (!r.ok) throw new Error(j.detail || t.submitFailed);
+        const j = await readJson(r);
+        if (!r.ok) throw new Error(typeof j.detail === 'string' ? j.detail : t.submitFailed);
         if (!stop) {
-          setTracking({
-            ...data,
-            ...j
-          });
-          if (j.delivery_package) setDeliveryPackage(j.delivery_package);
+          const nextTracking = normalizeTrackingPayload(j, data);
+          setTracking(nextTracking);
+          if (isRecord(j.delivery_package)) setDeliveryPackage(j.delivery_package);
+          try {
+            sessionStorage.setItem('da_active_order', JSON.stringify(nextTracking));
+          } catch {
+            // Ignore storage restrictions.
+          }
           setTrackError('');
         }
       } catch (e) {
@@ -2770,9 +2871,15 @@ function OrderStatus({
     };
   }, [data, t.submitFailed]);
   if (!tracking) return <main className="status-page"><div className="status-card"><h1>{t.noOrder}</h1><button onClick={() => setPage('order')}>{t.backCenter}</button></div></main>;
-  const job = tracking.processing_job || {},
-    result = job.result || {},
-    analysis = tracking.ai_analysis || data?.ai_analysis || {},
+  const job = isRecord(tracking.processing_job) ? tracking.processing_job : {},
+    result = isRecord(job.result) ? job.result : {},
+    analysis = isRecord(tracking.ai_analysis) ? tracking.ai_analysis : isRecord(data?.ai_analysis) ? data.ai_analysis : {},
+    steps = safeRecordArray(job.steps),
+    events = safeRecordArray(job.events),
+    analysisFiles = safeRecordArray(analysis.files),
+    inputFormats = safeTextArray(analysis.input_formats),
+    detectedLanguages = safeTextArray(analysis.detected_languages),
+    recommendedWorkflow = safeTextArray(analysis.recommended_workflow),
     state = job.state || tracking.status || 'processing',
     completed = state === 'completed' || state === 'quality_review',
     partial = state === 'partial_completed' || Boolean(result.partial_success),
@@ -2780,14 +2887,14 @@ function OrderStatus({
     waitingConfig = state === 'waiting_configuration' || job.current_step === 'configuration',
     terminal = completed || partial || failed || waitingConfig,
     progress = Number(job.progress || (terminal && !waitingConfig ? 100 : 0)),
-    outputs = tracking.output_files || [];
-  const durations = (job.steps || []).map(x => Number(x.duration_ms || 0)).filter(Boolean),
+    outputs = safeRecordArray(tracking.output_files);
+  const durations = steps.map(x => Number(x.duration_ms || 0)).filter(Boolean),
     stepTotalMs = durations.reduce((a, b) => a + b, 0),
     wallMs = job.created_at && job.updated_at ? Math.max(0, new Date(job.updated_at) - new Date(job.created_at)) : 0,
     totalMs = Math.max(stepTotalMs, wallMs),
-    fileTotal = tracking.files?.length || 0,
-    ocrFiles = (analysis.files || []).filter(f => f.format === '图片' || f.details?.likely_scanned).length;
-  const failures = result.failures || [],
+    fileTotal = safeArray(tracking.files).length,
+    ocrFiles = analysisFiles.filter(f => f.format === '图片' || (isRecord(f.details) && f.details.likely_scanned)).length;
+  const failures = safeRecordArray(result.failures),
     successfulOutputs = outputs.filter(file => !String(file.original_name || '').toLowerCase().includes('error_report')),
     successfulCount = Number(result.successful_output_count ?? successfulOutputs.length),
     failureCount = Number(result.failure_count ?? failures.length),
@@ -2795,11 +2902,14 @@ function OrderStatus({
     pageSize = 100,
     totalDeliveryPages = Math.max(1, Math.ceil(filteredOutputs.length / pageSize)),
     visibleOutputs = filteredOutputs.slice((deliveryPage - 1) * pageSize, deliveryPage * pageSize),
-    sourceNames = (tracking.files || []).map(file => file.original_name || file.name).filter(Boolean);
+    sourceNames = safeRecordArray(tracking.files).map(file => safeText(file.original_name || file.name)).filter(Boolean);
   return <main className="status-page"><section className="status-card wide-status"><div className={`status-icon ${failed ? 'failed' : partial ? 'partial' : ''}`}>{failed ? <X /> : terminal ? <CircleCheck /> : <Workflow />}</div><span className="status-kicker">{t.liveOrderLabel}</span><h1>{waitingConfig ? document.documentElement.lang.startsWith('zh') ? '平台 AI 服务暂不可用' : 'Platform AI service unavailable' : failed ? t.failed : partial ? document.documentElement.lang.startsWith('zh') ? '项目部分完成' : 'Project partially completed' : completed ? t.completed : t.processing}</h1><p>{waitingConfig ? document.documentElement.lang.startsWith('zh') ? '文件检查和结构分析已完成。平台 AI 服务暂时不可用，任务已安全暂停且不会扣除 Credits。管理员恢复服务后可重试任务。' : 'Validation and analysis are complete. The platform AI service is temporarily unavailable. The task is paused without charging credits and can be retried after service recovery.' : failed ? document.documentElement.lang.startsWith('zh') ? '没有生成可交付文件，请查看失败原因后重新处理。' : 'No deliverable files were generated. Review the failures and retry.' : partial ? document.documentElement.lang.startsWith('zh') ? `成功 ${successfulCount} 个，失败 ${failureCount} 个；仅成功文件可以交付。` : `${successfulCount} succeeded and ${failureCount} failed; only successful files are deliverable.` : completed ? t.completedDesc : t.processingDesc}</p><div className="order-number"><small>{t.orderNo}</small><b>{tracking.order_number}</b></div><div className="live-progress"><div><b>{document.documentElement.lang.startsWith('zh') ? EVENT_ZH[job.current_step] || job.current_step || t.statusProcessing : job.current_step || t.statusProcessing}</b><span>{progress}%</span></div><i><em style={{
             width: `${progress}%`
-          }} /></i></div>{job.steps?.length > 0 && <section className="task-engine"><div className="task-engine-head"><div><span>{t.taskEngine || 'TASK ENGINE'}</span><h2>{t.taskFlow}</h2></div><b>{progress}%</b></div><div className="task-steps">{job.steps.map((step, index) => {
-            const state = step.status || 'pending';
+          }} /></i></div>{steps.length > 0 && <section className="task-engine"><div className="task-engine-head"><div><span>{t.taskEngine || 'TASK ENGINE'}</span><h2>{t.taskFlow}</h2></div><b>{progress}%</b></div><div className="task-steps">{steps.map((step, index) => {
+            const stepKey = safeText(step.step_key, `step-${index + 1}`);
+            const stepState = safeText(step.status, 'pending');
+            const durationMs = safeNumber(step.duration_ms, 0);
+            const message = safeText(step.message);
             const label = {
               validate: t.stepValidate,
               analyze: t.stepUnderstand,
@@ -2811,17 +2921,32 @@ function OrderStatus({
               quality: t.toolQuality,
               export: t.stepDeliver,
               review: t.stepValidate
-            }[step.step_key] || step.label;
-            const stateText = state === 'completed' ? t.stepCompleted : state === 'running' ? t.stepRunning : state === 'failed' ? t.stepFailed : t.stepPending;
-            return <article className={`task-step ${state}`} key={step.step_key}><i>{state === 'completed' ? <Check /> : state === 'failed' ? <X /> : index + 1}</i><div><b>{label}</b><small>{stateText}{step.duration_ms ? ` · ${step.duration_ms < 100 ? '<0.1' : (step.duration_ms / 1000).toFixed(1)}s` : ''}</small>{step.message && <p>{localizeEventText(step.message, document.documentElement.lang.startsWith('zh') ? 'zh' : 'en')}</p>}</div></article>;
-          })}</div></section>}<div className="status-grid summary-grid"><div><small>{t.currentStatus}</small><b>{waitingConfig ? document.documentElement.lang.startsWith('zh') ? '等待配置' : 'Configuration required' : (job.state || tracking.status) === 'completed' ? t.statusCompleted : (job.state || tracking.status) === 'failed' ? t.statusFailed : t.statusProcessing}</b></div><div><small>{t.successCount || t.fileCount}</small><b>{successfulCount}{t.items}</b></div><div><small>{t.failedCount || t.statusFailed}</small><b>{failureCount}{t.items}</b></div><div><small>{t.deliveryCount}</small><b>{successfulOutputs.length}{t.items}</b></div><div><small>{t.ocrCount || t.serviceOcr}</small><b>{ocrFiles}{t.items}</b></div><div><small>{t.totalDuration || t.taskDuration}</small><b>{totalMs ? (totalMs / 1000).toFixed(1) + 's' : '—'}</b></div></div><section className="source-summary"><div><b>{document.documentElement.lang.startsWith('zh') ? '本次上传文件' : 'Uploaded files'}</b><span>{fileTotal || analysis.file_count || 0}</span></div><p>{sourceNames.slice(0, 6).join('、')}{sourceNames.length > 6 ? document.documentElement.lang.startsWith('zh') ? ` 等 ${sourceNames.length} 个文件` : ` and ${sourceNames.length - 6} more` : ''}</p></section>{analysis?.files?.length > 0 && <section className="analysis-panel"><div className="analysis-head"><div><span>{t.analysisLabel || 'DOCUMENT ANALYZER'}</span><h2>{t.analysisTitle || 'Document analysis result'}</h2><p>{analysis.summary}</p></div><b className={`complexity complexity-${analysis.complexity}`}>{t.analysisComplexity || 'Complexity'}: {analysis.complexity}</b></div><div className="analysis-summary-grid"><div><small>{t.analysisCategory || 'Category'}</small><b>{analysis.document_category || '—'}</b></div><div><small>{t.analysisFormats || 'Formats'}</small><b>{(analysis.input_formats || []).join(', ') || '—'}</b></div><div><small>{t.analysisLanguages || 'Languages'}</small><b>{(analysis.detected_languages || []).join(', ') || '—'}</b></div><div><small>{t.analysisFiles || 'Files analyzed'}</small><b>{analysis.file_count || 0}</b></div></div><div className="analysis-compact-head"><b>{document.documentElement.lang.startsWith('zh') ? `本次分析 ${analysis.files.length} 个文件` : `${analysis.files.length} files analyzed`}</b><button type="button" onClick={() => setAnalysisOpen(v => !v)}>{analysisOpen ? document.documentElement.lang.startsWith('zh') ? '收起文件明细' : 'Collapse' : document.documentElement.lang.startsWith('zh') ? '展开文件明细' : 'Show details'}</button></div>{analysisOpen && <div className="analysis-files compact">{analysis.files.slice(0, 50).map((file, index) => <article key={`${file.name}-${index}`}><div className="analysis-file-title"><FileText /><span><b>{file.name}</b><small>{file.format} · {(file.size_bytes / 1024 / 1024).toFixed(2)} MB</small></span></div><div className="analysis-metrics">{Object.entries(file.details || {}).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)).slice(0, 6).map(([k, v]) => <span key={k}><small>{t[`metric_${k}`] || k.replaceAll('_', ' ')}</small><b>{typeof v === 'boolean' ? v ? t.yes : t.no : String(v)}</b></span>)}</div>{file.warnings?.length > 0 && <div className="analysis-warning">{file.warnings.map((w, i) => <p key={i}>⚠ {w}</p>)}</div>}</article>)}</div>}{!terminal && <div className="recommended-workflow"><b>{t.analysisWorkflow || 'Recommended workflow'}</b><div>{(analysis.recommended_workflow || []).map((step, i) => <span key={i}><i>{i + 1}</i>{step}</span>)}</div></div>}</section>}{partial && <div className="alert warning">{document.documentElement.lang.startsWith('zh') ? `部分完成：成功交付 ${result.successful_output_count || Math.max(0, outputs.length - 1)} 个文件，${result.failure_count || 0} 项失败。请在失败项目中查看具体原因。` : `Partially completed: ${result.successful_output_count || Math.max(0, outputs.length - 1)} files delivered, ${result.failure_count || 0} failures. Review the failed items for details.`}</div>}{waitingConfig && <div className="alert warning">{document.documentElement.lang.startsWith('zh') ? '平台 AI 翻译服务暂时不可用。任务尚未执行且不会扣除 Credits，请稍后重试或联系管理员。' : 'The platform AI translation service is temporarily unavailable. The task has not run and will not be charged; retry later or contact an administrator.'}</div>}{trackError && <div className="alert error">{trackError}</div>}{job.events?.length > 0 && <div className="event-log"><b>{t.liveLog}</b>{job.events.slice(-6).reverse().map((e, i) => <div key={i}><span>{(document.documentElement.lang.startsWith('zh') ? EVENT_ZH[e.step] : null) || e.step}</span><p>{localizeEventText(e.message, document.documentElement.lang.startsWith('zh') ? 'zh' : 'en')}</p></div>)}</div>}{(completed || partial) && <div className="delivery-panel"><div className="delivery-heading"><div><h2>{t.delivery}</h2><p>{t.deliveryDesc}</p></div>{successfulOutputs.length > 0 && <button type="button" className="delivery-main-button" onClick={downloadAll} disabled={downloading}><Archive />{downloading ? document.documentElement.lang.startsWith('zh') ? '正在打包下载…' : 'Preparing download…' : t.downloadAll}</button>}</div>{(downloading || ['pending', 'building', 'failed'].includes(deliveryPackage?.status)) && <section className={`delivery-package-state-v45 ${deliveryPackage?.status === 'failed' ? 'failed' : ''}`}><div><b>{deliveryPackage?.status === 'failed' ? document.documentElement.lang.startsWith('zh') ? '交付包生成失败' : 'Delivery package failed' : document.documentElement.lang.startsWith('zh') ? '正在生成交付包' : 'Generating delivery package'}</b><span>{Math.max(0, Math.min(100, Number(deliveryPackage?.progress || 0)))}%</span></div><div className="delivery-package-progress-v45"><i style={{ width: `${Math.max(0, Math.min(100, Number(deliveryPackage?.progress || 0)))}%` }} /></div><p>{deliveryPackage?.error || deliveryPackage?.message || (document.documentElement.lang.startsWith('zh') ? `正在整理 ${deliveryPackage?.file_count || successfulOutputs.length} 个文件` : `Organizing ${deliveryPackage?.file_count || successfulOutputs.length} files`)}</p>{deliveryPackage?.status === 'failed' && <button type="button" onClick={downloadAll} disabled={downloading}><RotateCcw />{document.documentElement.lang.startsWith('zh') ? '重新生成' : 'Retry generation'}</button>}</section>}{successfulOutputs.length || failures.length ? <><div className="delivery-toolbar"><div className="delivery-tabs"><button type="button" className={deliveryFilter === 'success' ? 'active' : ''} onClick={() => setDeliveryFilter('success')}>{document.documentElement.lang.startsWith('zh') ? `成功文件（${successfulOutputs.length}）` : `Successful (${successfulOutputs.length})`}</button><button type="button" className={deliveryFilter === 'failed' ? 'active' : ''} onClick={() => setDeliveryFilter('failed')}>{document.documentElement.lang.startsWith('zh') ? `失败项目（${failures.length}）` : `Failed (${failures.length})`}</button></div>{deliveryFilter === 'success' && <input value={deliveryQuery} onChange={e => {
+            }[stepKey] || safeText(step.label, stepKey);
+            const stateText = stepState === 'completed' ? t.stepCompleted : stepState === 'running' ? t.stepRunning : stepState === 'failed' ? t.stepFailed : t.stepPending;
+            return <article className={`task-step ${stepState}`} key={`${stepKey}-${index}`}><i>{stepState === 'completed' ? <Check /> : stepState === 'failed' ? <X /> : index + 1}</i><div><b>{label}</b><small>{stateText}{durationMs ? ` · ${durationMs < 100 ? '<0.1' : (durationMs / 1000).toFixed(1)}s` : ''}</small>{message && <p>{localizeEventText(message, document.documentElement.lang.startsWith('zh') ? 'zh' : 'en')}</p>}</div></article>;
+          })}</div></section>}<div className="status-grid summary-grid"><div><small>{t.currentStatus}</small><b>{waitingConfig ? document.documentElement.lang.startsWith('zh') ? '等待配置' : 'Configuration required' : (job.state || tracking.status) === 'completed' ? t.statusCompleted : (job.state || tracking.status) === 'failed' ? t.statusFailed : t.statusProcessing}</b></div><div><small>{t.successCount || t.fileCount}</small><b>{successfulCount}{t.items}</b></div><div><small>{t.failedCount || t.statusFailed}</small><b>{failureCount}{t.items}</b></div><div><small>{t.deliveryCount}</small><b>{successfulOutputs.length}{t.items}</b></div><div><small>{t.ocrCount || t.serviceOcr}</small><b>{ocrFiles}{t.items}</b></div><div><small>{t.totalDuration || t.taskDuration}</small><b>{totalMs ? (totalMs / 1000).toFixed(1) + 's' : '—'}</b></div></div><section className="source-summary"><div><b>{document.documentElement.lang.startsWith('zh') ? '本次上传文件' : 'Uploaded files'}</b><span>{fileTotal || safeNumber(analysis.file_count, 0)}</span></div><p>{sourceNames.slice(0, 6).join('、')}{sourceNames.length > 6 ? document.documentElement.lang.startsWith('zh') ? ` 等 ${sourceNames.length} 个文件` : ` and ${sourceNames.length - 6} more` : ''}</p></section>{analysisFiles.length > 0 && <section className="analysis-panel"><div className="analysis-head"><div><span>{t.analysisLabel || 'DOCUMENT ANALYZER'}</span><h2>{t.analysisTitle || 'Document analysis result'}</h2><p>{safeText(analysis.summary)}</p></div><b className={`complexity complexity-${safeText(analysis.complexity, 'unknown')}`}>{t.analysisComplexity || 'Complexity'}: {safeText(analysis.complexity, 'unknown')}</b></div><div className="analysis-summary-grid"><div><small>{t.analysisCategory || 'Category'}</small><b>{safeText(analysis.document_category, '—')}</b></div><div><small>{t.analysisFormats || 'Formats'}</small><b>{inputFormats.join(', ') || '—'}</b></div><div><small>{t.analysisLanguages || 'Languages'}</small><b>{detectedLanguages.join(', ') || '—'}</b></div><div><small>{t.analysisFiles || 'Files analyzed'}</small><b>{safeNumber(analysis.file_count, 0)}</b></div></div><div className="analysis-compact-head"><b>{document.documentElement.lang.startsWith('zh') ? `本次分析 ${analysisFiles.length} 个文件` : `${analysisFiles.length} files analyzed`}</b><button type="button" onClick={() => setAnalysisOpen(v => !v)}>{analysisOpen ? document.documentElement.lang.startsWith('zh') ? '收起文件明细' : 'Collapse' : document.documentElement.lang.startsWith('zh') ? '展开文件明细' : 'Show details'}</button></div>{analysisOpen && <div className="analysis-files compact">{analysisFiles.slice(0, 50).map((file, index) => {
+              const details = isRecord(file.details) ? file.details : {};
+              const warnings = safeTextArray(file.warnings);
+              const fileName = String(file.name || file.original_name || `file-${index + 1}`);
+              const fileFormat = String(file.format || '—');
+              const fileSizeMb = Math.max(0, Number(file.size_bytes || 0) / 1024 / 1024).toFixed(2);
+              return <article key={`${fileName}-${index}`}><div className="analysis-file-title"><FileText /><span><b>{fileName}</b><small>{fileFormat} · {fileSizeMb} MB</small></span></div><div className="analysis-metrics">{Object.entries(details).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)).slice(0, 6).map(([k, v]) => <span key={k}><small>{t[`metric_${k}`] || k.replaceAll('_', ' ')}</small><b>{typeof v === 'boolean' ? v ? t.yes : t.no : String(v)}</b></span>)}</div>{warnings.length > 0 && <div className="analysis-warning">{warnings.map((w, i) => <p key={i}>⚠ {w}</p>)}</div>}</article>;
+            })}</div>}{!terminal && <div className="recommended-workflow"><b>{t.analysisWorkflow || 'Recommended workflow'}</b><div>{recommendedWorkflow.map((step, i) => <span key={i}><i>{i + 1}</i>{step}</span>)}</div></div>}</section>}{partial && <div className="alert warning">{document.documentElement.lang.startsWith('zh') ? `部分完成：成功交付 ${result.successful_output_count || Math.max(0, outputs.length - 1)} 个文件，${result.failure_count || 0} 项失败。请在失败项目中查看具体原因。` : `Partially completed: ${result.successful_output_count || Math.max(0, outputs.length - 1)} files delivered, ${result.failure_count || 0} failures. Review the failed items for details.`}</div>}{waitingConfig && <div className="alert warning">{document.documentElement.lang.startsWith('zh') ? '平台 AI 翻译服务暂时不可用。任务尚未执行且不会扣除 Credits，请稍后重试或联系管理员。' : 'The platform AI translation service is temporarily unavailable. The task has not run and will not be charged; retry later or contact an administrator.'}</div>}{trackError && <div className="alert error">{trackError}</div>}{events.length > 0 && <div className="event-log"><b>{t.liveLog}</b>{events.slice(-6).reverse().map((e, i) => {
+              const eventStep = String(e.step || 'processing');
+              const eventMessage = String(e.message || '');
+              return <div key={i}><span>{(document.documentElement.lang.startsWith('zh') ? EVENT_ZH[eventStep] : null) || eventStep}</span><p>{localizeEventText(eventMessage, document.documentElement.lang.startsWith('zh') ? 'zh' : 'en')}</p></div>;
+            })}</div>}{(completed || partial) && <div className="delivery-panel"><div className="delivery-heading"><div><h2>{t.delivery}</h2><p>{t.deliveryDesc}</p></div>{successfulOutputs.length > 0 && <button type="button" className="delivery-main-button" onClick={downloadAll} disabled={downloading}><Archive />{downloading ? document.documentElement.lang.startsWith('zh') ? '正在打包下载…' : 'Preparing download…' : t.downloadAll}</button>}</div>{(downloading || ['pending', 'building', 'failed'].includes(deliveryPackage?.status)) && <section className={`delivery-package-state-v45 ${deliveryPackage?.status === 'failed' ? 'failed' : ''}`}><div><b>{deliveryPackage?.status === 'failed' ? document.documentElement.lang.startsWith('zh') ? '交付包生成失败' : 'Delivery package failed' : document.documentElement.lang.startsWith('zh') ? '正在生成交付包' : 'Generating delivery package'}</b><span>{Math.max(0, Math.min(100, Number(deliveryPackage?.progress || 0)))}%</span></div><div className="delivery-package-progress-v45"><i style={{ width: `${Math.max(0, Math.min(100, Number(deliveryPackage?.progress || 0)))}%` }} /></div><p>{deliveryPackage?.error || deliveryPackage?.message || (document.documentElement.lang.startsWith('zh') ? `正在整理 ${deliveryPackage?.file_count || successfulOutputs.length} 个文件` : `Organizing ${deliveryPackage?.file_count || successfulOutputs.length} files`)}</p>{deliveryPackage?.status === 'failed' && <button type="button" onClick={downloadAll} disabled={downloading}><RotateCcw />{document.documentElement.lang.startsWith('zh') ? '重新生成' : 'Retry generation'}</button>}</section>}{successfulOutputs.length || failures.length ? <><div className="delivery-toolbar"><div className="delivery-tabs"><button type="button" className={deliveryFilter === 'success' ? 'active' : ''} onClick={() => setDeliveryFilter('success')}>{document.documentElement.lang.startsWith('zh') ? `成功文件（${successfulOutputs.length}）` : `Successful (${successfulOutputs.length})`}</button><button type="button" className={deliveryFilter === 'failed' ? 'active' : ''} onClick={() => setDeliveryFilter('failed')}>{document.documentElement.lang.startsWith('zh') ? `失败项目（${failures.length}）` : `Failed (${failures.length})`}</button></div>{deliveryFilter === 'success' && <input value={deliveryQuery} onChange={e => {
               setDeliveryQuery(e.target.value);
               setDeliveryPage(1);
-            }} placeholder={document.documentElement.lang.startsWith('zh') ? '搜索文件名…' : 'Search files…'} />}</div>{deliveryFilter === 'success' ? <><div className="delivery-files compact">{visibleOutputs.map(file => {
-                const ext = (file.original_name.split('.').pop() || 'FILE').toUpperCase();
-                const created = file.created_at ? new Date(file.created_at).toLocaleString() : '';
-                return <article key={file.file_id || file.id} className="delivery-file-card"><div className={`delivery-file-icon ${fileTypeClass(file.original_name)}`}><FileText /></div><div className="delivery-file-info"><b>{file.original_name}</b><div><span>{t.fileType}: {ext}</span><span>{(file.size_bytes / 1024).toFixed(1)} KB</span>{created && <span>{t.generatedAt}: {created}</span>}</div></div><div className="delivery-file-actions"><button type="button" onClick={() => downloadSingle(file)} disabled={downloadingFileId !== null}><Download />{downloadingFileId === (file.file_id || file.id) ? document.documentElement.lang.startsWith('zh') ? '正在下载…' : 'Downloading…' : t.downloadFile}</button><button type="button" onClick={() => copyDownloadLink(file)}><Copy />{document.documentElement.lang.startsWith('zh') ? '复制下载链接' : 'Copy link'}</button></div></article>;
-              })}</div>{totalDeliveryPages > 1 && <div className="pagination"><button type="button" disabled={deliveryPage === 1} onClick={() => setDeliveryPage(p => Math.max(1, p - 1))}>‹</button><span>{deliveryPage} / {totalDeliveryPages}</span><button type="button" disabled={deliveryPage === totalDeliveryPages} onClick={() => setDeliveryPage(p => Math.min(totalDeliveryPages, p + 1))}>›</button></div>}</> : <div className="failure-list">{failures.length ? failures.map((item, index) => <article key={index}><X /><div><b>{item.source_name || '-'}</b><small>{item.format || 'processing'}</small><p>{item.error || 'Unknown error'}</p></div></article>) : <p>{document.documentElement.lang.startsWith('zh') ? '没有失败项目。' : 'No failed items.'}</p>}</div>}</> : <div className="alert error">{t.noOutput}</div>}{successfulOutputs.length === 1 && <div className="delivery-footer-actions"><button type="button" className="delivery-main-button" onClick={downloadAll} disabled={downloading}><Archive />{downloading ? document.documentElement.lang.startsWith('zh') ? '正在打包下载…' : 'Preparing download…' : t.downloadAll}</button></div>}{deliveryMessage && <p className="delivery-message">{deliveryMessage}</p>}</div>}{downloadInfo && <div className="download-modal-backdrop"><div className="download-modal"><CircleCheck /><h2>{document.documentElement.lang.startsWith('zh') ? '交付包保存完成' : 'Delivery package saved'}</h2><p>{document.documentElement.lang.startsWith('zh') ? '交付包已经保存。' : 'The delivery package has been saved.'}</p><div><small>{document.documentElement.lang.startsWith('zh') ? '文件名' : 'File name'}</small><b>{downloadInfo.filename}</b></div><div><small>{document.documentElement.lang.startsWith('zh') ? '查找位置' : 'Find it in'}</small><b>{downloadInfo.folder}</b></div><div className="download-modal-actions"><button type="button" onClick={downloadAll}><Download />{document.documentElement.lang.startsWith('zh') ? '重新选择位置保存' : 'Choose another location'}</button><button type="button" onClick={() => setDownloadInfo(null)}>{document.documentElement.lang.startsWith('zh') ? '关闭' : 'Close'}</button></div><small className="download-browser-note">{document.documentElement.lang.startsWith('zh') ? '交付 ZIP 只保存在你刚刚通过 Windows“另存为”选择的位置，软件不会再在 C 盘 outputs 目录生成副本。' : 'The ZIP is saved only to the location selected in the system Save As dialog; no project-output copy is created.'}</small></div></div>}<div className="status-actions"><button className="secondary-xl" onClick={() => setPage('home')}><ArrowLeft />{t.backHome}</button><button className="primary-xl" onClick={() => setPage('order')}>{t.newProject}</button><button className="secondary-xl" onClick={() => setPage('dashboard')}>{t.workspace}</button></div><small className="track-note">{t.saveOrder}{tracking.order_number}</small></section></main>;
+            }} placeholder={document.documentElement.lang.startsWith('zh') ? '搜索文件名…' : 'Search files…'} />}</div>{deliveryFilter === 'success' ? <><div className="delivery-files compact">{visibleOutputs.map((file, index) => {
+                const safeFile = isRecord(file) ? file : {};
+                const fileId = safeFile.file_id || safeFile.id || `output-${index}`;
+                const fileName = String(safeFile.original_name || safeFile.filename || `output-${index + 1}`);
+                const ext = (fileName.split('.').pop() || 'FILE').toUpperCase();
+                const created = safeFile.created_at ? new Date(safeFile.created_at).toLocaleString() : '';
+                const sizeKb = Math.max(0, Number(safeFile.size_bytes || 0) / 1024).toFixed(1);
+                return <article key={fileId} className="delivery-file-card"><div className={`delivery-file-icon ${fileTypeClass(fileName)}`}><FileText /></div><div className="delivery-file-info"><b>{fileName}</b><div><span>{t.fileType}: {ext}</span><span>{sizeKb} KB</span>{created && <span>{t.generatedAt}: {created}</span>}</div></div><div className="delivery-file-actions"><button type="button" onClick={() => downloadSingle(safeFile)} disabled={downloadingFileId !== null}><Download />{downloadingFileId === (safeFile.file_id || safeFile.id) ? document.documentElement.lang.startsWith('zh') ? '正在下载…' : 'Downloading…' : t.downloadFile}</button><button type="button" onClick={() => copyDownloadLink(safeFile)}><Copy />{document.documentElement.lang.startsWith('zh') ? '复制下载链接' : 'Copy link'}</button></div></article>;
+              })}</div>{totalDeliveryPages > 1 && <div className="pagination"><button type="button" disabled={deliveryPage === 1} onClick={() => setDeliveryPage(p => Math.max(1, p - 1))}>‹</button><span>{deliveryPage} / {totalDeliveryPages}</span><button type="button" disabled={deliveryPage === totalDeliveryPages} onClick={() => setDeliveryPage(p => Math.min(totalDeliveryPages, p + 1))}>›</button></div>}</> : <div className="failure-list">{failures.length ? failures.map((item, index) => <article key={index}><X /><div><b>{safeText(item.source_name, '-')}</b><small>{safeText(item.format, 'processing')}</small><p>{safeText(item.error, 'Unknown error')}</p></div></article>) : <p>{document.documentElement.lang.startsWith('zh') ? '没有失败项目。' : 'No failed items.'}</p>}</div>}</> : <div className="alert error">{t.noOutput}</div>}{successfulOutputs.length === 1 && <div className="delivery-footer-actions"><button type="button" className="delivery-main-button" onClick={downloadAll} disabled={downloading}><Archive />{downloading ? document.documentElement.lang.startsWith('zh') ? '正在打包下载…' : 'Preparing download…' : t.downloadAll}</button></div>}{deliveryMessage && <p className="delivery-message">{deliveryMessage}</p>}</div>}{downloadInfo && <div className="download-modal-backdrop"><div className="download-modal"><CircleCheck /><h2>{document.documentElement.lang.startsWith('zh') ? '交付包保存完成' : 'Delivery package saved'}</h2><p>{document.documentElement.lang.startsWith('zh') ? '交付包已经保存。' : 'The delivery package has been saved.'}</p><div><small>{document.documentElement.lang.startsWith('zh') ? '文件名' : 'File name'}</small><b>{downloadInfo.filename}</b></div><div><small>{document.documentElement.lang.startsWith('zh') ? '查找位置' : 'Find it in'}</small><b>{downloadInfo.folder}</b></div><div className="download-modal-actions"><button type="button" onClick={downloadAll}><Download />{document.documentElement.lang.startsWith('zh') ? '重新选择位置保存' : 'Choose another location'}</button><button type="button" onClick={() => setDownloadInfo(null)}>{document.documentElement.lang.startsWith('zh') ? '关闭' : 'Close'}</button></div><small className="download-browser-note">{document.documentElement.lang.startsWith('zh') ? '交付 ZIP 只保存在你刚刚通过 Windows“另存为”选择的位置，软件不会再在 C 盘 outputs 目录生成副本。' : 'The ZIP is saved only to the location selected in the system Save As dialog; no project-output copy is created.'}</small></div></div>}<div className="status-actions"><button className="secondary-xl" onClick={() => setPage('home')}><ArrowLeft />{t.backHome}</button><button className="primary-xl" onClick={() => setPage('order')}>{t.newProject}</button><button className="secondary-xl" onClick={() => setPage('dashboard')}>{t.workspace}</button></div><small className="track-note">{t.saveOrder}{tracking.order_number}</small></section></main>;
 }
 function BillingLive({
   setPage,
