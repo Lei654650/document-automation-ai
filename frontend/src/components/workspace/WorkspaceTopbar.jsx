@@ -74,29 +74,29 @@ export default function WorkspaceTopbar({
 
   return (
     <header className="workspace-global-topbar" aria-label={isZh ? '工作区顶部导航' : 'Workspace navigation'}>
-      <button className="workspace-global-brand" type="button" onClick={() => setPage('dashboard')}>
-        <span>DA</span>
-        <div>
-          <b>Document Automation AI</b>
-          <small>{pageName}</small>
-        </div>
-      </button>
-      <div className="workspace-global-actions">
-        <button type="button" className="workspace-global-text-action" onClick={() => setPage('home')}>
+      <div className="workspace-global-leading">
+        <button type="button" className="workspace-global-home" onClick={() => setPage('home')}>
           <House />
-          <span>{isZh ? '首页' : 'Home'}</span>
+          <span>{isZh ? '返回首页' : 'Home'}</span>
         </button>
+        <div>
+          <b>{pageName}</b>
+          <small>Document Automation AI</small>
+        </div>
+      </div>
+      <div className="workspace-global-actions">
         <button type="button" className="workspace-global-primary" onClick={() => setPage('order')}>
           <Sparkles />
           <span>{isZh ? '新建任务' : 'New task'}</span>
         </button>
         <button
           type="button"
-          className="workspace-global-icon"
+          className="workspace-global-text-action"
           title={isZh ? '帮助' : 'Help'}
           onClick={() => setPage('knowledge')}
         >
           <HelpCircle />
+          <span>{isZh ? '帮助中心' : 'Help center'}</span>
         </button>
         <div className="workspace-language-menu" ref={menuRef}>
           <button

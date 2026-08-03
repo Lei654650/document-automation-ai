@@ -9,6 +9,17 @@
   gap: 9px;
 }
 
+.workspace-dashboard-leading-v45 {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 22px;
+}
+
+.workspace-dashboard-leading-v45 > div {
+  min-width: 0;
+}
+
 .workspace-header-tools-v45 button {
   cursor: pointer;
 }
@@ -279,6 +290,20 @@
 }
 
 @media (max-width: 720px) {
+  .workspace-dashboard-leading-v45 {
+    gap: 10px;
+  }
+
+  .workspace-dashboard-leading-v45 .workspace-header-home-v45 span {
+    display: none;
+  }
+
+  .workspace-dashboard-leading-v45 .workspace-header-home-v45 {
+    width: 42px;
+    padding: 0;
+    justify-content: center;
+  }
+
   .workspace-header-account-v45 > span,
   .workspace-header-help-v45 > span {
     display: none;

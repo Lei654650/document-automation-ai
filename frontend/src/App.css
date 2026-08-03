@@ -2584,3 +2584,67 @@ html{scrollbar-gutter:stable}
 .order-center-v3014 button:hover svg{color:#3157ff;filter:drop-shadow(0 4px 8px rgba(49,87,255,.2));transform:translateY(-1px)}
 /* Retire the old sidebar home placement; home lives in the page header. */
 .unified-sidebar-home{display:none!important}
+/* V45.0.6 delivery interaction states */
+.delivery-file-actions button:first-child {
+  border-color: #3157ff;
+  background: #3157ff;
+  color: #fff;
+}
+
+.delivery-file-actions button:disabled {
+  cursor: wait;
+  opacity: .7;
+}
+
+.delivery-package-state-v45 {
+  display: grid;
+  gap: 9px;
+  margin: 14px 0;
+  padding: 14px 16px;
+  border: 1px solid #cfdafd;
+  border-radius: 13px;
+  background: #f5f8ff;
+  color: #294063;
+}
+
+.delivery-package-state-v45 > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.delivery-package-state-v45 b,
+.delivery-package-state-v45 p,
+.delivery-package-state-v45 span {
+  font-size: 14px;
+}
+
+.delivery-package-state-v45 p {
+  margin: 0;
+  color: #53627a;
+}
+
+.delivery-package-state-v45 > button {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 40px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid #b32929;
+  border-radius: 10px;
+  background: #fff;
+  color: #b32929;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.delivery-package-state-v45 > button svg {
+  width: 17px;
+}
+
+.delivery-package-state-v45.failed {
+  border-color: #efb5b5;
+  background: #fff6f6;
+}

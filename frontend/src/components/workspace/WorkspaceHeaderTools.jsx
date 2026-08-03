@@ -30,6 +30,7 @@ export default function WorkspaceHeaderTools({
   setAuthToken,
   setCurrentUser,
   primaryAction,
+  showHome = true,
 }) {
   const [target, setTarget] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -105,10 +106,10 @@ export default function WorkspaceHeaderTools({
 
   return createPortal((
     <div className="workspace-header-tools-v45">
-      <button type="button" className="workspace-header-home-v45" onClick={() => go('home')} title={L('返回首页', 'Back to home', 'Về trang chủ')}>
+      {showHome && <button type="button" className="workspace-header-home-v45" onClick={() => go('home')} title={L('返回首页', 'Back to home', 'Về trang chủ')}>
         <House />
         <span>{L('返回首页', 'Home', 'Trang chủ')}</span>
-      </button>
+      </button>}
       {primaryAction && (
         <button type="button" className="workspace-header-primary-v45" onClick={primaryAction.onClick}>
           <Sparkles />

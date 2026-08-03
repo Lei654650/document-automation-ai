@@ -1,7 +1,7 @@
 {
   "name": "document-automation-ai-enterprise",
   "private": true,
-  "version": "45.0.0",
+  "version": "45.0.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,5 +15,5 @@
     "react-dom": "^19.2.0",
     "vite": "^8.1.4"
   },
-  "description": "Document Automation AI V45.0.0 Workspace"
+  "description": "Document Automation AI V45.0.6 Workspace"
 }
