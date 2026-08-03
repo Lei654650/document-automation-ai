@@ -16,6 +16,34 @@ FORMAT_LABELS = {
 }
 
 
+LANGUAGE_LABELS = {
+    'zh': '中文（简体）',
+    'zh-TW': '中文（繁体）',
+    'vi': '越南语',
+    'en': '英语',
+    'unknown': '未知',
+}
+
+_TRADITIONAL_HINTS = set('體臺灣國學醫療證號處護歷責務廠區聯絡資資料書員門間說應與為於實業產點權機關檔圖個進這種')
+_SIMPLIFIED_HINTS = set('体台国学医疗证号处护历责任务厂区联络资资料书员门间说应与为于实业产点权机关档图个进这种')
+_VIETNAMESE_CHARS_RE = re.compile(r'[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ]', re.I)
+_VIETNAMESE_WORD_RE = re.compile(r'\b(?:và|của|người|công\s+ty|ngày|tháng|năm|địa\s+chỉ|sức\s+khỏe|giấy|cam\s+kết|quy\+?định|nhân\s+viên|tại|không|được|phải|họ\s+và\s+tên)\b', re.I)
+_ENGLISH_WORD_RE = re.compile(r'\b(?:the|and|of|to|for|with|company|employee|agreement|document|information|factory|health|passport|address|date|signature|shall|this|that|from|during|business)\b', re.I)
+
+
+def _detect_sensitive_categories(text: str, filename: str = '') -> list[str]:
+    value = f'{filename}\n{text or ""}'
+    patterns = [
+        ('身份与护照信息', r'passport|hộ\s*chiếu|护照|身份[证證]|cccd|cmnd'),
+        ('健康与医疗信息', r'sức\s*khỏe|health\s*(?:check|certificate)|健康|诊断|chẩn\s*đoán|medical'),
+        ('无犯罪与司法记录', r'无犯罪|無犯罪|criminal\s*record|lý\s*lịch\s*tư\s*pháp|xác\s*nhận\s*dân\s*sự'),
+        ('地址与联系方式', r'địa\s*chỉ|address|地址|điện\s*thoại|telephone|phone|聯絡電話|联系电话'),
+        ('签名、指纹或印章', r'ký\s*tên|signature|签名|簽名|指纹|指模|vân\s*tay|印章|đóng\s*dấu'),
+        ('就业与背景材料', r'工作经历|工作經歷|quá\s*trình\s*công\s*tác|employment|xin\s*việc|nhân\s*viên'),
+    ]
+    return [label for label, pattern in patterns if re.search(pattern, value, re.I)]
+
+
 def _base(name: str, path: Path) -> dict[str, Any]:
     suffix = path.suffix.lower()
     return {
@@ -31,52 +59,152 @@ def _base(name: str, path: Path) -> dict[str, Any]:
 
 
 def _detect_language(text: str) -> dict[str, Any]:
-    sample = (text or '').strip()[:30000]
+    """Detect every meaningful language in a sample instead of forcing one label.
+
+    The former detector treated any Vietnamese diacritic as decisive and therefore
+    collapsed mixed Chinese/Vietnamese/English packets into one language.  This
+    scorer keeps per-language evidence and returns a backward-compatible primary
+    language together with the complete detected set.
+    """
+    sample = (text or '').strip()[:120000]
     if not sample:
-        return {'code': 'unknown', 'name': '未知', 'confidence': 0.0}
-    cjk = len(re.findall(r'[\u4e00-\u9fff]', sample))
-    vietnamese = len(re.findall(r'[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ]', sample, re.I))
+        return {'code': 'unknown', 'name': '未知', 'confidence': 0.0, 'languages': [], 'scores': {}}
+
+    cjk_chars = re.findall(r'[\u3400-\u9fff]', sample)
+    cjk = len(cjk_chars)
+    traditional = sum(ch in _TRADITIONAL_HINTS for ch in cjk_chars)
+    simplified = sum(ch in _SIMPLIFIED_HINTS for ch in cjk_chars)
+    vi_chars = len(_VIETNAMESE_CHARS_RE.findall(sample))
+    vi_words = len(_VIETNAMESE_WORD_RE.findall(sample))
+    en_words = len(_ENGLISH_WORD_RE.findall(sample))
     latin_words = len(re.findall(r'\b[A-Za-z]{3,}\b', sample))
-    total = max(1, cjk + vietnamese + latin_words)
-    if cjk >= max(8, vietnamese * 2, latin_words // 2):
-        return {'code': 'zh', 'name': '中文', 'confidence': round(min(0.99, cjk / total + 0.25), 2)}
-    if vietnamese >= 3:
-        return {'code': 'vi', 'name': '越南语', 'confidence': round(min(0.99, vietnamese / max(1, vietnamese + latin_words) + 0.45), 2)}
-    if latin_words >= 5:
-        return {'code': 'en', 'name': '英语', 'confidence': round(min(0.95, latin_words / total), 2)}
-    return {'code': 'unknown', 'name': '未知', 'confidence': 0.2}
+
+    raw_scores: dict[str, float] = {}
+    if cjk >= 4:
+        if traditional >= 2 and traditional >= simplified:
+            raw_scores['zh-TW'] = cjk + traditional * 4
+            if simplified >= 2:
+                raw_scores['zh'] = simplified * 4
+        elif simplified >= 2:
+            raw_scores['zh'] = cjk + simplified * 4
+            if traditional >= 2:
+                raw_scores['zh-TW'] = traditional * 4
+        else:
+            raw_scores['zh'] = float(cjk)
+    vi_score = vi_chars * 2.4 + vi_words * 10
+    if vi_chars >= 2 or vi_words >= 2:
+        raw_scores['vi'] = vi_score
+    # Require recognisable English function/domain words so Vietnamese Latin text
+    # is not also labelled English merely because it contains unaccented words.
+    en_score = en_words * 10 + max(0, latin_words - vi_words * 2) * 0.25
+    if en_words >= 3 or (en_words >= 1 and latin_words >= 18):
+        raw_scores['en'] = en_score
+
+    if not raw_scores:
+        return {'code': 'unknown', 'name': '未知', 'confidence': 0.2, 'languages': [], 'scores': {}}
+    maximum = max(raw_scores.values())
+    threshold = max(4.0, maximum * 0.12)
+    ordered = [code for code, score in sorted(raw_scores.items(), key=lambda item: item[1], reverse=True) if score >= threshold]
+    primary = ordered[0]
+    confidence = round(min(0.99, raw_scores[primary] / max(1.0, sum(raw_scores.values())) + 0.35), 2)
+    return {
+        'code': primary,
+        'name': LANGUAGE_LABELS[primary],
+        'confidence': confidence,
+        'languages': [{'code': code, 'name': LANGUAGE_LABELS[code], 'confidence': round(min(0.99, raw_scores[code] / max(1.0, maximum)), 2)} for code in ordered],
+        'scores': {code: round(score, 2) for code, score in raw_scores.items()},
+    }
 
 
 def _analyze_pdf(item: dict, path: Path) -> None:
     from pypdf import PdfReader
     reader = PdfReader(str(path))
     pages = len(reader.pages)
-    chunks = [(page.extract_text() or '')[:4000] for page in reader.pages[:8]]
+    chunks: list[str] = []
+    page_details: list[dict[str, Any]] = []
     image_count = 0
-    for page in reader.pages:
+    scanned_pages = 0
+    text_pages = 0
+    table_page_estimate = 0
+    page_languages: dict[str, int] = {}
+
+    # Inspect every page for normal customer packets. Very large PDFs are sampled
+    # evenly so order creation remains bounded while still seeing the whole file.
+    if pages <= 80:
+        page_indices = list(range(pages))
+    else:
+        page_indices = sorted(set([*range(20), *range(max(20, pages - 20), pages), *[round(i * (pages - 1) / 39) for i in range(40)]]))
+
+    for index, page in enumerate(reader.pages):
+        text = ''
+        if index in page_indices:
+            try:
+                text = page.extract_text() or ''
+            except Exception:
+                text = ''
+            if text.strip():
+                chunks.append(text[:8000])
+        page_image_count = 0
         try:
-            resources = page.get("/Resources") or {}
-            x_objects = resources.get("/XObject") or {}
-            x_objects = x_objects.get_object() if hasattr(x_objects, "get_object") else x_objects
+            resources = page.get('/Resources') or {}
+            x_objects = resources.get('/XObject') or {}
+            x_objects = x_objects.get_object() if hasattr(x_objects, 'get_object') else x_objects
             for value in x_objects.values():
-                obj = value.get_object() if hasattr(value, "get_object") else value
-                if obj.get("/Subtype") == "/Image":
-                    image_count += 1
+                obj = value.get_object() if hasattr(value, 'get_object') else value
+                if obj.get('/Subtype') == '/Image':
+                    page_image_count += 1
         except Exception:
-            continue
+            page_image_count = 0
+        image_count += page_image_count
+        chars = len(text.strip())
+        likely_scanned_page = chars < 35 and page_image_count > 0 or chars < 8
+        if likely_scanned_page:
+            scanned_pages += 1
+        else:
+            text_pages += 1
+        lines = [line for line in text.splitlines() if line.strip()]
+        looks_tabular = sum(bool(re.search(r'\S\s{2,}\S|\t', line)) for line in lines) >= 3
+        if looks_tabular:
+            table_page_estimate += 1
+        language = _detect_language(text)
+        for entry in language.get('languages', []):
+            page_languages[entry['name']] = page_languages.get(entry['name'], 0) + 1
+        if index in page_indices:
+            page_details.append({
+                'page': index + 1,
+                'text_chars': chars,
+                'image_count': page_image_count,
+                'likely_scanned': likely_scanned_page,
+                'languages': [entry['name'] for entry in language.get('languages', [])],
+                'table_like': looks_tabular,
+            })
+
     sample = '\n'.join(chunks)
-    avg = len(sample.strip()) / max(1, min(pages, 8))
     item['_text_sample'] = sample
+    sensitive = _detect_sensitive_categories(sample, item.get('name', ''))
     item['details'].update({
         'pages': pages,
         'extractable_text_chars_sample': len(sample),
-        'likely_scanned': avg < 40,
+        'likely_scanned': scanned_pages > 0,
+        'scanned_page_count': scanned_pages,
+        'text_page_count': text_pages,
+        'mixed_scan_text': scanned_pages > 0 and text_pages > 0,
         'encrypted': bool(reader.is_encrypted),
         'image_count': image_count,
+        'table_page_count_estimate': table_page_estimate,
+        'page_language_summary': page_languages,
+        'page_analysis_complete': len(page_indices) == pages,
+        'page_details': page_details[:120],
+        'contains_sensitive_data': bool(sensitive),
+        'sensitive_categories': sensitive,
     })
-    item['capabilities'] += ['文本提取', '页数识别']
-    if avg < 40:
-        item['warnings'].append('疑似扫描版 PDF，建议启用 OCR。')
+    item['capabilities'] += ['文本提取', '页数识别', '页面级语言识别', '扫描页识别', '敏感信息类别识别']
+    if scanned_pages:
+        item['warnings'].append(f'检测到 {scanned_pages} 个扫描或图片页面，建议启用 OCR。')
+    if scanned_pages and text_pages:
+        item['warnings'].append('该 PDF 同时包含扫描页与可提取文本页，需要混合处理。')
+    if sensitive:
+        item['warnings'].append('检测到身份、健康、联系信息或签章类敏感材料；处理与日志应采用脱敏策略。')
 
 
 def _analyze_xlsx(item: dict, path: Path) -> None:
@@ -230,7 +358,9 @@ def _analyze_zip(item: dict, path: Path) -> None:
 
 
 def _category(files: list[dict], requirements: str) -> str:
-    text = (' '.join(x['name'] for x in files) + ' ' + requirements + ' ' + ' '.join(x.get('_text_sample','')[:1500] for x in files)).lower()
+    text = (' '.join(x['name'] for x in files) + ' ' + requirements + ' ' + ' '.join(x.get('_text_sample','')[:8000] for x in files)).lower()
+    if any(key in text for key in ['passport', 'hộ chiếu', '护照', '健康', 'sức khỏe', '工作经历', 'quá trình công tác', '保密承诺', 'cam kết bảo mật']):
+        return '人员证件与合规材料'
     rules = [
         (['invoice','发票'], '发票'), (['quotation','quote','报价'], '报价单'), (['contract','合同'], '合同'),
         (['bom','物料清单'], 'BOM'), (['sop','作业指导'], 'SOP'), (['plc','i/o','io list'], 'PLC I/O'),
@@ -246,10 +376,12 @@ def _category(files: list[dict], requirements: str) -> str:
 
 
 def _industry(files: list[dict], requirements: str) -> str:
-    text = (' '.join(x['name'] for x in files) + ' ' + requirements + ' ' + ' '.join(x.get('_text_sample', '')[:3000] for x in files)).lower()
+    text = (' '.join(x['name'] for x in files) + ' ' + requirements + ' ' + ' '.join(x.get('_text_sample', '')[:10000] for x in files)).lower()
+    if any(key in text for key in ['passport', 'hộ chiếu', '护照', '工作经历', 'quá trình công tác', '员工', 'nhân viên', '驻厂', '駐廠']):
+        return '人事与合规'
     rules = [
+        (['patient', 'clinical', 'diagnosis', 'medical', 'hospital', 'sức khỏe', '医疗', '患者', '临床', '医院', '健康'], '医疗'),
         (['vehicle', 'automotive', 'engine', 'ecu', 'can bus', '汽车', '车辆', '发动机', '整车'], '汽车'),
-        (['patient', 'clinical', 'diagnosis', 'medical', 'hospital', '医疗', '患者', '临床', '医院'], '医疗'),
         (['contract', 'agreement', 'legal', 'liability', '合同', '协议', '条款', '法律'], '法律'),
         (['invoice', 'balance sheet', 'financial', 'accounting', '发票', '财务', '会计', '审计'], '金融与财务'),
         (['training', 'course', 'curriculum', 'education', '培训', '课程', '教材', '教育'], '教育'),
@@ -292,6 +424,10 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
             item['details']['ocr_status'] = '已启用'
         language = _detect_language(item.get('_text_sample',''))
         item['details']['detected_language'] = language
+        if not item['details'].get('sensitive_categories'):
+            sensitive = _detect_sensitive_categories(item.get('_text_sample', ''), item.get('name', ''))
+            item['details']['contains_sensitive_data'] = bool(sensitive)
+            item['details']['sensitive_categories'] = sensitive
         files.append(item)
 
     workflow = ['接收并校验文件', '识别文件格式与内部结构', '检测文档主要语言与行业']
@@ -341,6 +477,8 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
             image_count_complete = False
 
         table_value = details.get('table_count')
+        if table_value is None and fmt == 'PDF':
+            table_value = details.get('table_page_count_estimate')
         if table_value is not None:
             total_tables += int(table_value or 0)
         elif fmt in {'PDF', '图片'}:
@@ -349,29 +487,92 @@ def analyze_order_files(paths: list[tuple[str,str]], services: list[str], requir
         needs_ocr = bool(details.get('likely_scanned')) or fmt == '图片'
         if needs_ocr:
             ocr_required = True
-            language_name = details.get('detected_language', {}).get('name')
-            if language_name and language_name != '未知':
-                ocr_languages.add(language_name)
+            language_info = details.get('detected_language', {})
+            language_entries = language_info.get('languages') or []
+            if language_entries:
+                for entry in language_entries:
+                    if entry.get('name') and entry.get('name') != '未知':
+                        ocr_languages.add(entry['name'])
+            else:
+                language_name = language_info.get('name')
+                if language_name and language_name != '未知':
+                    ocr_languages.add(language_name)
     warnings = [w for x in files for w in x['warnings']]
-    complexity = '低'
-    object_count = sum((x['details'].get('text_shape_count') or 0) + (x['details'].get('table_count') or 0) + (x['details'].get('picture_count') or 0) for x in files)
-    if len(files)>3 or total>20*1024*1024 or object_count>100: complexity='中'
-    if len(files)>10 or total>100*1024*1024 or object_count>500 or any((x['details'].get('pages') or x['details'].get('slide_count') or 0)>100 for x in files): complexity='高'
+    detected_language_names: list[str] = []
+    language_codes: list[str] = []
+    sensitive_categories: list[str] = []
+    scanned_pages = text_pages = 0
+    for item in files:
+        language = item.get('details', {}).get('detected_language', {})
+        entries = language.get('languages') or ([{'code': language.get('code'), 'name': language.get('name')}] if language.get('name') not in {None, '未知'} else [])
+        for entry in entries:
+            name = entry.get('name')
+            code = entry.get('code')
+            if name and name != '未知' and name not in detected_language_names:
+                detected_language_names.append(name)
+            if code and code != 'unknown' and code not in language_codes:
+                language_codes.append(code)
+        details = item.get('details', {})
+        scanned_pages += int(details.get('scanned_page_count') or (1 if details.get('likely_scanned') else 0))
+        text_pages += int(details.get('text_page_count') or 0)
+        for category_name in details.get('sensitive_categories') or []:
+            if category_name not in sensitive_categories:
+                sensitive_categories.append(category_name)
+
+    languages = detected_language_names or ['未知']
+    mixed_language = len(detected_language_names) > 1
+    object_count = sum(
+        (x['details'].get('text_shape_count') or 0)
+        + (x['details'].get('table_count') or x['details'].get('table_page_count_estimate') or 0)
+        + (x['details'].get('picture_count') or x['details'].get('image_count') or 0)
+        for x in files
+    )
+    complexity_score = 0
+    if len(files) > 3 or total > 20 * 1024 * 1024 or object_count > 100 or total_pages > 5:
+        complexity_score += 1
+    if len(files) > 10 or total > 100 * 1024 * 1024 or object_count > 500 or total_pages > 40:
+        complexity_score += 1
+    if mixed_language:
+        complexity_score += 1
+    if scanned_pages and text_pages:
+        complexity_score += 1
+    if len(sensitive_categories) >= 2:
+        complexity_score += 1
+    complexity = '高' if complexity_score >= 3 else '中' if complexity_score >= 1 else '低'
     category = _category(files, requirements)
     industry = _industry(files, requirements)
-    languages = sorted({x['details'].get('detected_language',{}).get('name','未知') for x in files})
     for item in files:
         item.pop('_text_sample', None)
     duration_ms = max(1, round((time.perf_counter() - started_at) * 1000))
     return {
-        'engine_version': '11.2-document-analyzer', 'status': 'completed', 'file_count': len(files), 'total_size_bytes': total,
-        'input_formats': sorted(formats), 'detected_languages': languages, 'document_category': category, 'industry': industry,
-        'complexity': complexity, 'files': files, 'recommended_workflow': workflow,
-        'total_pages': total_pages, 'page_count_complete': page_count_complete,
-        'total_images': total_images, 'image_count_complete': image_count_complete,
-        'total_tables': total_tables, 'table_count_complete': table_count_complete,
-        'ocr_required': ocr_required, 'ocr_languages': sorted(ocr_languages),
+        'engine_version': '45.1-multilingual-document-analyzer',
+        'status': 'completed',
+        'file_count': len(files),
+        'total_size_bytes': total,
+        'input_formats': sorted(formats),
+        'detected_languages': languages,
+        'detected_language_codes': language_codes,
+        'mixed_language': mixed_language,
+        'document_category': category,
+        'industry': industry,
+        'complexity': complexity,
+        'files': files,
+        'recommended_workflow': workflow,
+        'total_pages': total_pages,
+        'page_count_complete': page_count_complete,
+        'scanned_page_count': scanned_pages,
+        'text_page_count': text_pages,
+        'mixed_scan_text': bool(scanned_pages and text_pages),
+        'total_images': total_images,
+        'image_count_complete': image_count_complete,
+        'total_tables': total_tables,
+        'table_count_complete': table_count_complete,
+        'ocr_required': ocr_required,
+        'ocr_languages': sorted(ocr_languages),
+        'contains_sensitive_data': bool(sensitive_categories),
+        'sensitive_categories': sensitive_categories,
+        'privacy_notice': '检测到敏感材料时，界面与日志仅展示类别，不展示证件号码、健康内容或联系方式。' if sensitive_categories else '',
         'analysis_duration_ms': duration_ms,
         'warnings': warnings or ['未发现明显风险。'],
-        'summary': f'已深度识别 {len(files)} 个文件；格式：{", ".join(sorted(formats))}；文档类别：“{category}”；行业：“{industry}”；语言：{", ".join(languages)}；复杂度：{complexity}。'
+        'summary': f'已深度识别 {len(files)} 个文件；格式：{", ".join(sorted(formats))}；类别：“{category}”；行业：“{industry}”；语言：{", ".join(languages)}；复杂度：{complexity}。'
     }

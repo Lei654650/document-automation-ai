@@ -15,9 +15,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_DATA_DIR=/data
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 unar libarchive-tools \
+    && apt-get install -y --no-install-recommends \
+        libgomp1 \
+        unar \
+        libarchive-tools \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-vie \
+        tesseract-ocr-chi-sim \
+        tesseract-ocr-chi-tra \
     && command -v unar >/dev/null \
     && command -v bsdtar >/dev/null \
+    && command -v tesseract >/dev/null \
+    && tesseract --list-langs 2>/dev/null | grep -q '^eng$' \
+    && tesseract --list-langs 2>/dev/null | grep -q '^vie$' \
+    && tesseract --list-langs 2>/dev/null | grep -q '^chi_sim$' \
+    && tesseract --list-langs 2>/dev/null | grep -q '^chi_tra$' \
     && rm -rf /var/lib/apt/lists/*
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   ArrowRight,
   Bot,
   Check,
@@ -21,70 +22,35 @@ import {
 
 const LANGUAGE_GROUPS = [
   {
-    id: 'asia',
-    zh: '亚洲',
-    en: 'Asia',
-    items: [
-      ['zh', '中文（简体）'],
-      ['zh-TW', '中文（繁体）'],
-      ['en', 'English'],
-      ['vi', 'Tiếng Việt'],
-      ['th', 'ไทย'],
-      ['id', 'Bahasa Indonesia'],
-      ['ms', 'Bahasa Melayu'],
-      ['ja', '日本語'],
-      ['ko', '한국어'],
+    id: 'asia', zh: '亚洲', en: 'Asia', items: [
+      ['zh', '中文（简体）'], ['zh-TW', '中文（繁体）'], ['en', 'English'], ['vi', 'Tiếng Việt'],
+      ['th', 'ไทย'], ['id', 'Bahasa Indonesia'], ['ms', 'Bahasa Melayu'], ['ja', '日本語'], ['ko', '한국어'],
     ],
   },
   {
-    id: 'europe',
-    zh: '欧洲',
-    en: 'Europe',
-    items: [
-      ['de', 'Deutsch'],
-      ['fr', 'Français'],
-      ['es', 'Español'],
-      ['it', 'Italiano'],
-      ['pt', 'Português'],
-      ['nl', 'Nederlands'],
-      ['pl', 'Polski'],
+    id: 'europe', zh: '欧洲', en: 'Europe', items: [
+      ['de', 'Deutsch'], ['fr', 'Français'], ['es', 'Español'], ['it', 'Italiano'],
+      ['pt', 'Português'], ['nl', 'Nederlands'], ['pl', 'Polski'],
     ],
   },
 ];
 
+const LANGUAGE_LABELS = Object.fromEntries(LANGUAGE_GROUPS.flatMap(group => group.items));
+
 const OUTPUT_META = {
-  original: { zh: '保留原格式', en: 'Preserve source', group: 'source' },
-  docx: { zh: 'Word', en: 'Word', group: 'office' },
-  xlsx: { zh: 'Excel', en: 'Excel', group: 'office' },
-  pptx: { zh: 'PowerPoint', en: 'PowerPoint', group: 'office' },
-  pdf: { zh: 'PDF', en: 'PDF', group: 'pdf' },
-  csv: { zh: 'CSV', en: 'CSV', group: 'data' },
-  md: { zh: 'Markdown', en: 'Markdown', group: 'web' },
-  html: { zh: 'HTML', en: 'HTML', group: 'web' },
-  txt: { zh: 'TXT', en: 'TXT', group: 'web' },
-  json: { zh: 'JSON', en: 'JSON', group: 'data' },
-  xml: { zh: 'XML', en: 'XML', group: 'data' },
-  images: { zh: '图片', en: 'Images', group: 'image' },
+  original: { zh: '保留源文件格式', en: 'Preserve source format' },
+  docx: { zh: 'Word', en: 'Word' },
+  xlsx: { zh: 'Excel', en: 'Excel' },
+  pptx: { zh: 'PowerPoint', en: 'PowerPoint' },
+  pdf: { zh: 'PDF', en: 'PDF' },
+  csv: { zh: 'CSV', en: 'CSV' },
+  md: { zh: 'Markdown', en: 'Markdown' },
+  html: { zh: 'HTML', en: 'HTML' },
+  txt: { zh: 'TXT', en: 'TXT' },
+  json: { zh: 'JSON', en: 'JSON' },
+  xml: { zh: 'XML', en: 'XML' },
+  images: { zh: '图片', en: 'Images' },
 };
-
-const OUTPUT_GROUPS = [
-  ['source', '源文件', 'Source'],
-  ['office', 'Office', 'Office'],
-  ['pdf', 'PDF', 'PDF'],
-  ['data', '结构化数据', 'Structured data'],
-  ['web', '文本与网页', 'Text & web'],
-  ['image', '图片', 'Images'],
-];
-
-const LAYOUTS = [
-  ['auto', 'AI 自动推荐', 'AI recommended', '系统根据文件结构和行业自动选择'],
-  ['target-only', '仅输出译文', 'Translation only', '只交付目标语言内容'],
-  ['vertical', '双语上下', 'Bilingual stacked', '原文与译文上下对应'],
-  ['columns', '双语左右', 'Bilingual side-by-side', '原文与译文左右分列'],
-  ['inline', '双语同行', 'Bilingual inline', '原文与译文同行对照'],
-  ['publishing', '出版布局', 'Publishing layout', '适合手册、报告和正式出版'],
-  ['industrial', '工业布局', 'Industrial layout', '适合表格、标签和技术编号'],
-];
 
 const SERVICES = [
   ['ocr', ScanText, 'OCR', 'OCR'],
@@ -97,18 +63,22 @@ const SERVICES = [
   ['scan_enhancement', ScanText, '扫描增强', 'Scan enhancement'],
   ['layout_recovery', FileOutput, '版式恢复', 'Layout recovery'],
   ['document_organization', Sparkles, '文档整理', 'Document organization'],
-  ['markdown', FileOutput, 'Markdown', 'Markdown'],
-  ['html', FileOutput, 'HTML', 'HTML'],
-  ['json', Database, 'JSON', 'JSON'],
-  ['csv', Table2, 'CSV', 'CSV'],
-  ['xml', Database, 'XML', 'XML'],
-  ['office', FileOutput, 'Office', 'Office'],
+  ['enterprise_analysis', Database, '企业级文档分析', 'Enterprise document analysis'],
 ];
 
-const FORMAT_CAPABILITIES = {
-  markdown: ['md'], html: ['html'], json: ['json'], csv: ['csv'], xml: ['xml'],
-  office: ['docx', 'xlsx', 'pptx'],
-};
+const BILINGUAL_LAYOUTS = [
+  ['auto', 'AI 自动推荐', 'AI recommended', '系统根据文件结构选择上下、左右或同行对照'],
+  ['vertical', '双语上下', 'Stacked bilingual', '原文与译文上下对应'],
+  ['columns', '双语左右', 'Side-by-side bilingual', '原文与译文左右分列'],
+  ['inline', '双语同行', 'Inline bilingual', '原文与译文同行对照'],
+];
+
+const LAYOUT_PROFILES = [
+  ['auto', '自动适配', 'Auto adapt', '根据文件类型和版式自动优化', 'Optimize automatically for the document type and layout'],
+  ['industrial', '工业表格与标签', 'Industrial tables & labels', '保护 PLC、型号、变量和技术编号', 'Protect PLC terms, models, variables and technical identifiers'],
+  ['publishing', '报告与出版物', 'Reports & publishing', '优化段落、标题、分页和阅读顺序', 'Optimize paragraphs, headings, pagination and reading order'],
+  ['source-first', '原版式优先', 'Source layout first', '尽量不改变原文件结构和位置', 'Preserve the original structure and positioning wherever possible'],
+];
 
 function SwitchRow({ checked, label, onChange }) {
   return (
@@ -135,6 +105,9 @@ export default function ProcessingPlanPanel({
   form,
   setForm,
   recommendation,
+  analysis,
+  uploadedFileCount,
+  actualFileCount,
   analysisReady,
   aiAnalyzing,
   hasArchiveErrors,
@@ -145,29 +118,18 @@ export default function ProcessingPlanPanel({
   estimatedQuality,
   submitting,
   error,
+  onBack,
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advancedSection, setAdvancedSection] = useState('document');
 
   const markChanged = () => setPlanConfirmed(false);
-  const toggleList = (id, values, setter) => {
-    setter(values.includes(id) ? values.filter(item => item !== id) : [...values, id]);
+  const setOption = (key, value) => {
+    setOutputOptions(current => ({ ...current, [key]: value }));
     markChanged();
   };
   const toggleCapability = id => {
-    const active = services.includes(id);
-    setServices(current => {
-      const next = active ? current.filter(item => item !== id) : [...current, id];
-      if (!active && FORMAT_CAPABILITIES[id] && !next.includes('conversion')) next.push('conversion');
-      return [...new Set(next)];
-    });
-    if (!active && FORMAT_CAPABILITIES[id]) {
-      setOutputFormats(current => [...new Set([...current, ...FORMAT_CAPABILITIES[id]])]);
-    }
-    markChanged();
-  };
-  const setOption = (key, value) => {
-    setOutputOptions(current => ({ ...current, [key]: value }));
+    setServices(current => current.includes(id) ? current.filter(item => item !== id) : [...new Set([...current, id])]);
     markChanged();
   };
   const applyInstruction = text => {
@@ -179,68 +141,142 @@ export default function ProcessingPlanPanel({
   };
 
   const translationEnabled = services.includes('translation');
-  const conversionEnabled = services.some(id => id === 'conversion' || id === 'pdf_rebuild' || Object.prototype.hasOwnProperty.call(FORMAT_CAPABILITIES, id));
-  const sourceLanguages = recommendation?.detected_languages || [];
+  const sourceLanguages = recommendation?.detected_languages || analysis?.detected_languages || [];
   const suggestedTargets = recommendation?.suggested_target_languages || [];
+  const translationAvailable = recommendation?.translation_available !== false;
+  const languageMode = outputOptions.language_mode || (translationTargets.length > 1 ? 'multiple' : 'single');
+  const outputStrategy = outputOptions.output_strategy || recommendation?.output_strategy || 'preserve';
+  const compatible = [...new Set((compatibleFormats || []).filter(format => OUTPUT_META[format]))];
+  const nonOriginalFormats = compatible.filter(format => format !== 'original');
+  const primaryFormat = outputOptions.primary_format || recommendation?.primary_output || nonOriginalFormats[0] || 'pdf';
+  const additionalFormats = Array.isArray(outputOptions.additional_formats)
+    ? outputOptions.additional_formats.filter(format => nonOriginalFormats.includes(format))
+    : outputFormats.filter(format => format !== 'original' && nonOriginalFormats.includes(format));
 
   const setTranslationDecision = enabled => {
     setServices(current => {
       const next = current.filter(item => item !== 'translation');
       return enabled ? [...next, 'translation'] : next;
     });
-    if (!enabled) setTranslationTargets([]);
-    setPlanConfirmed(false);
+    if (!enabled) {
+      setTranslationTargets([]);
+      setOutputOptions(current => ({
+        ...current,
+        language_mode: 'none',
+        bilingual_layout: 'none',
+        layout_profile: 'auto',
+      }));
+    } else {
+      setOutputOptions(current => ({
+        ...current,
+        language_mode: current.language_mode && current.language_mode !== 'none' ? current.language_mode : 'single',
+        bilingual_layout: current.bilingual_layout && current.bilingual_layout !== 'none' ? current.bilingual_layout : 'target-only',
+      }));
+    }
+    markChanged();
   };
-  const languageMode = outputOptions.language_mode || (translationTargets.length > 1 ? 'multiple' : 'single');
+
   const setLanguageMode = mode => {
     setOutputOptions(current => ({
       ...current,
       language_mode: mode,
       bilingual_layout: mode === 'bilingual'
-        ? (current.bilingual_layout === 'target-only' ? 'auto' : current.bilingual_layout || 'auto')
+        ? (['auto', 'vertical', 'columns', 'inline'].includes(current.bilingual_layout) ? current.bilingual_layout : 'auto')
         : 'target-only',
     }));
     if (mode !== 'multiple') setTranslationTargets(current => current.slice(0, 1));
     markChanged();
   };
 
-  const outputGroups = OUTPUT_GROUPS.map(([id, zh, en]) => ({
-    id,
-    label: isZh ? zh : en,
-    formats: compatibleFormats.filter(format => OUTPUT_META[format]?.group === id),
-  })).filter(group => group.formats.length);
+  const selectTarget = id => {
+    if (languageMode === 'multiple') {
+      setTranslationTargets(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
+    } else {
+      setTranslationTargets([id]);
+    }
+    markChanged();
+  };
+
+  const setOutputStrategy = strategy => {
+    if (strategy === 'preserve') {
+      setOutputFormats(['original']);
+      setServices(current => current.filter(item => item !== 'conversion'));
+      setOutputOptions(current => ({ ...current, output_strategy: 'preserve', primary_format: 'original', additional_formats: [] }));
+    } else if (strategy === 'convert') {
+      const nextPrimary = primaryFormat === 'original' ? nonOriginalFormats[0] || 'pdf' : primaryFormat;
+      setOutputFormats([nextPrimary]);
+      setServices(current => [...new Set([...current, 'conversion'])]);
+      setOutputOptions(current => ({ ...current, output_strategy: 'convert', primary_format: nextPrimary, additional_formats: [] }));
+    } else {
+      const nextAdditional = additionalFormats.length ? additionalFormats : nonOriginalFormats.slice(0, 1);
+      setOutputFormats(['original', ...nextAdditional]);
+      setServices(current => [...new Set([...current, 'conversion'])]);
+      setOutputOptions(current => ({ ...current, output_strategy: 'preserve_and_additional', primary_format: 'original', additional_formats: nextAdditional }));
+    }
+    markChanged();
+  };
+
+  const setPrimaryFormat = format => {
+    setOutputFormats([format]);
+    setOutputOptions(current => ({ ...current, output_strategy: 'convert', primary_format: format, additional_formats: [] }));
+    markChanged();
+  };
+
+  const toggleAdditionalFormat = format => {
+    const next = additionalFormats.includes(format)
+      ? additionalFormats.filter(item => item !== format)
+      : [...additionalFormats, format];
+    setOutputFormats(['original', ...next]);
+    setOutputOptions(current => ({ ...current, output_strategy: 'preserve_and_additional', primary_format: 'original', additional_formats: next }));
+    markChanged();
+  };
 
   const missingTranslationTarget = translationEnabled && translationTargets.length === 0;
-  const missingOutput = conversionEnabled && outputFormats.length === 0;
+  const invalidTargetCount = translationEnabled && languageMode !== 'multiple' && translationTargets.length > 1;
+  const missingOutput = outputStrategy === 'convert' && !primaryFormat;
+  const missingAdditional = outputStrategy === 'preserve_and_additional' && additionalFormats.length === 0;
+  const providerUnavailable = translationEnabled && !translationAvailable;
   const canConfirm = files.length > 0
     && analysisReady
     && !aiAnalyzing
     && !hasArchiveErrors
     && !missingTranslationTarget
-    && !missingOutput;
+    && !invalidTargetCount
+    && !missingOutput
+    && !missingAdditional
+    && !providerUnavailable;
 
   const selectedCapabilityLabels = useMemo(() => {
     const map = Object.fromEntries(SERVICES.map(([id,, zh, en]) => [id, isZh ? zh : en]));
-    if (translationEnabled) map.translation = isZh ? '文档翻译' : 'Document translation';
-    return services.map(id => map[id] || id);
-  }, [services, translationEnabled, isZh]);
+    map.translation = isZh ? '文档翻译' : 'Document translation';
+    return services.map(id => map[id]).filter(Boolean);
+  }, [services, isZh]);
 
-  const recommendationLabel = recommendation
-    ? isZh ? '真实分析方案' : 'Analyzed recommendation'
-    : isZh ? '安全默认方案' : 'Safe fallback plan';
+  const uploadedCount = Number(analysis?.uploaded_file_count || uploadedFileCount || files.length || 0);
+  const actualCount = Number(analysis?.expanded_file_count || analysis?.actual_file_count || analysis?.file_count || actualFileCount || files.length || 0);
+  const pageCount = Number(analysis?.total_pages || 0);
+  const sheetCount = (analysis?.files || []).reduce((total, item) => total + Number(item?.details?.sheet_count || 0), 0);
+  const languageText = translationEnabled
+    ? `${languageMode === 'bilingual' ? (isZh ? '双语输出：' : 'Bilingual: ') : languageMode === 'multiple' ? (isZh ? '多语言：' : 'Multiple: ') : (isZh ? '目标语言：' : 'Target: ')}${translationTargets.map(code => LANGUAGE_LABELS[code] || code).join(' / ') || (isZh ? '待选择' : 'Not selected')}`
+    : (isZh ? '不执行翻译' : 'No translation');
+  const outputText = outputStrategy === 'preserve'
+    ? (isZh ? '每个文件保持原格式' : 'Preserve each source format')
+    : outputStrategy === 'convert'
+      ? `${isZh ? '转换为' : 'Convert to'} ${OUTPUT_META[primaryFormat]?.[isZh ? 'zh' : 'en'] || primaryFormat}`
+      : `${isZh ? '保留原格式，并附加' : 'Preserve source plus'} ${additionalFormats.map(id => OUTPUT_META[id]?.[isZh ? 'zh' : 'en'] || id).join(' / ')}`;
 
   const instructionTemplates = isZh
     ? [
         ['保持原版式', '保持原始版式、图片、表格、分页和字体层级。'],
         ['术语一致', '使用 AI 识别行业的专业术语，并保持全文术语一致。'],
         ['保护标识', '品牌、型号、编号、公式、变量和专有名词不要翻译。'],
-        ['双语交付', '原文与译文必须清晰对应，并使用当前选择的双语布局。'],
+        ['隐私保护', '处理日志和质量报告中不得显示证件号码、联系方式和完整原文。'],
       ]
     : [
         ['Preserve layout', 'Preserve layout, images, tables, pagination and typography hierarchy.'],
         ['Consistent terms', 'Use terminology from the detected industry consistently throughout the document.'],
         ['Protect identifiers', 'Do not translate brands, models, codes, formulas, variables or proper nouns.'],
-        ['Bilingual delivery', 'Keep source and translation clearly aligned using the selected bilingual layout.'],
+        ['Protect privacy', 'Do not expose identifiers, contact details or complete source content in logs or reports.'],
       ];
 
   return (
@@ -249,51 +285,47 @@ export default function ProcessingPlanPanel({
         <div>
           <span><Settings2 /></span>
           <div>
-            <small>{isZh ? '第 5 步 · 用户确认' : 'Step 5 · User confirmation'}</small>
-            <h2>{isZh ? '请确认翻译需求、处理能力与最终输出' : 'Confirm translation, capabilities and final outputs'}</h2>
-            <p>{isZh ? 'AI 已完成文件分析，但不会替您决定目标语言。确认后才可创建任务。' : 'AI analyzed the files, but it will not choose a target language for you. Confirm before creating the task.'}</p>
+            <small>{isZh ? '第 5 步 · 用户确认' : 'STEP 5 · USER CONFIRMATION'}</small>
+            <b>{isZh ? '确认本次真实执行方案' : 'Confirm the actual execution plan'}</b>
+            <p>{isZh ? 'AI 负责分析和推荐；是否翻译、目标语言、输出策略和布局由您最终决定。' : 'AI analyzes and recommends. You make the final translation, language, output and layout decisions.'}</p>
           </div>
         </div>
-        <em><Sparkles />{recommendationLabel}</em>
+        <em><Sparkles />{recommendation ? (isZh ? '真实分析方案' : 'Analyzed plan') : (isZh ? '安全默认方案' : 'Safe fallback')}</em>
       </header>
 
+      {(recommendation?.contains_sensitive_data || analysis?.contains_sensitive_data) && (
+        <div className="plan-privacy-notice-v45">
+          <ShieldCheck />
+          <span><b>{isZh ? '敏感资料任务' : 'Sensitive-content task'}</b><small>{recommendation?.privacy_notice || (isZh ? '请确认您有权处理该文件；平台日志不应显示证件号码、健康信息或完整原文。' : 'Confirm authorization to process this file. Logs must not expose identifiers, health data or full source content.')}</small></span>
+        </div>
+      )}
+
       <section className="translation-decision-v45">
-        <header>
-          <div>
-            <small>{isZh ? '第一步' : 'Step one'}</small>
-            <b>{isZh ? '本次任务是否需要翻译？' : 'Does this task need translation?'}</b>
-            <p>{isZh ? `已识别源语言：${sourceLanguages.join(' / ') || '待处理时确认'}。系统不会默认选择中文或英文。` : `Detected source language: ${sourceLanguages.join(' / ') || 'confirm during processing'}. No target language is assumed.`}</p>
-          </div>
-          <Languages />
-        </header>
+        <header><Languages /><div><b>{isZh ? '这个任务是否需要翻译？' : 'Does this task require translation?'}</b><small>{isZh ? `已识别语言：${sourceLanguages.join(' / ') || '自动识别'}。AI 只提供建议，不替用户决定。` : `Detected: ${sourceLanguages.join(' / ') || 'automatic'}. AI recommends but does not decide for you.`}</small></div></header>
         <div>
           <button type="button" className={translationEnabled ? 'active' : ''} onClick={() => setTranslationDecision(true)}>
             {translationEnabled && <Check />}
-            <span><b>{isZh ? '需要翻译' : 'Translation required'}</b><small>{isZh ? '下一步选择一个或多个目标语言' : 'Choose one or more target languages next'}</small></span>
+            <span><b>{isZh ? '需要翻译' : 'Translation required'}</b><small>{isZh ? '显示目标语言、翻译模式、布局与质量设置' : 'Show language, mode, layout and quality settings'}</small></span>
           </button>
           <button type="button" className={!translationEnabled ? 'active' : ''} onClick={() => setTranslationDecision(false)}>
             {!translationEnabled && <Check />}
-            <span><b>{isZh ? '无需翻译' : 'No translation'}</b><small>{isZh ? '仅执行格式、整理、分析或 OCR' : 'Run formatting, cleanup, analysis or OCR only'}</small></span>
+            <span><b>{isZh ? '无需翻译' : 'No translation'}</b><small>{isZh ? '清除所有翻译参数，仅执行 OCR、整理、分析或格式处理' : 'Clear translation parameters and run OCR, cleanup, analysis or format processing only'}</small></span>
           </button>
         </div>
         {translationEnabled && suggestedTargets.length > 0 && (
-          <p className="translation-suggestion-v45"><Sparkles />{isZh ? `AI 建议优先考虑：${suggestedTargets.join(' / ')}，仍需由您点击确认。` : `AI suggests considering: ${suggestedTargets.join(' / ')}. You still need to select it.`}</p>
+          <p className="translation-suggestion-v45"><Sparkles />{isZh ? `AI 建议考虑：${suggestedTargets.map(code => LANGUAGE_LABELS[code] || code).join(' / ')}，仍需由您点击确认。` : `AI suggests: ${suggestedTargets.map(code => LANGUAGE_LABELS[code] || code).join(' / ')}. You still need to select it.`}</p>
         )}
+        {providerUnavailable && <p className="plan-inline-warning-v45"><AlertTriangle />{isZh ? '平台 AI 翻译服务暂时不可用。任务不会创建，也不会扣除 Credits，请联系管理员。' : 'Platform AI translation is unavailable. The task will not be created or charged; contact an administrator.'}</p>}
       </section>
 
       <div className="processing-plan-grid-v44">
         <section className="plan-block-v44 capabilities">
-          <header><div><b>{isZh ? '处理能力' : 'Processing capabilities'}</b><small>{isZh ? '可按任务需要增减' : 'Adjust for this job'}</small></div><strong>{services.length}</strong></header>
+          <header><div><b>{isZh ? '处理能力' : 'Processing capabilities'}</b><small>{isZh ? '只选择本任务真正需要的能力' : 'Select only what this job needs'}</small></div><strong>{services.length}</strong></header>
           <div className="plan-capability-grid-v44">
             {SERVICES.map(([id, Icon, zh, en]) => {
               const active = services.includes(id);
               return (
-                <button
-                  type="button"
-                  className={active ? 'active' : ''}
-                  key={id}
-                  onClick={() => toggleCapability(id)}
-                >
+                <button type="button" className={active ? 'active' : ''} key={id} onClick={() => toggleCapability(id)}>
                   <Icon /><span>{isZh ? zh : en}</span>{active && <Check />}
                 </button>
               );
@@ -303,13 +335,13 @@ export default function ProcessingPlanPanel({
 
         {translationEnabled && (
           <section className="plan-block-v44 languages">
-            <header><div><b>{isZh ? '目标语言' : 'Target languages'}</b><small>{isZh ? '必须由用户确认，可多选' : 'User confirmation required · multiple allowed'}</small></div><Globe2 /></header>
+            <header><div><b>{isZh ? '目标语言与输出模式' : 'Target language and output mode'}</b><small>{languageMode === 'multiple' ? (isZh ? '可多选目标语言' : 'Multiple target languages allowed') : (isZh ? '请选择 1 个目标语言' : 'Select exactly one target language')}</small></div><Globe2 /></header>
             <div className="language-mode-v45">
               {[
-                ['single', isZh ? '单语言' : 'Single language'],
-                ['multiple', isZh ? '多语言' : 'Multiple languages'],
-                ['bilingual', isZh ? '双语输出' : 'Bilingual output'],
-              ].map(([id, label]) => <button type="button" key={id} className={languageMode === id ? 'active' : ''} onClick={() => setLanguageMode(id)}>{languageMode === id && <Check />}{label}</button>)}
+                ['single', isZh ? '单语言' : 'Single language', isZh ? '只交付一种目标语言' : 'Deliver one target language'],
+                ['multiple', isZh ? '多语言' : 'Multiple languages', isZh ? '每种语言生成独立交付文件' : 'Create a separate deliverable per language'],
+                ['bilingual', isZh ? '双语输出' : 'Bilingual output', isZh ? '原文 + 1 个目标语言' : 'Source + one target language'],
+              ].map(([id, label, desc]) => <button type="button" key={id} className={languageMode === id ? 'active' : ''} onClick={() => setLanguageMode(id)}>{languageMode === id && <Check />}<span><b>{label}</b><small>{desc}</small></span></button>)}
             </div>
             <div className="language-regions-v44">
               {LANGUAGE_GROUPS.map(group => (
@@ -317,12 +349,7 @@ export default function ProcessingPlanPanel({
                   <span>{isZh ? group.zh : group.en}</span>
                   <div>
                     {group.items.map(([id, label]) => (
-                      <button
-                        type="button"
-                        className={translationTargets.includes(id) ? 'active' : ''}
-                        key={id}
-                        onClick={() => languageMode === 'multiple' ? toggleList(id, translationTargets, setTranslationTargets) : (setTranslationTargets([id]), markChanged())}
-                      >
+                      <button type="button" className={translationTargets.includes(id) ? 'active' : ''} key={id} onClick={() => selectTarget(id)}>
                         {translationTargets.includes(id) && <Check />}{label}
                       </button>
                     ))}
@@ -331,71 +358,75 @@ export default function ProcessingPlanPanel({
               ))}
             </div>
             {missingTranslationTarget && <p className="plan-inline-warning-v45"><AlertTriangle />{isZh ? '请选择至少一个目标语言。' : 'Select at least one target language.'}</p>}
-          </section>
-        )}
-
-        {conversionEnabled && (
-          <section className="plan-block-v44 outputs">
-            <header><div><b>{isZh ? '最终输出格式' : 'Final output formats'}</b><small>{isZh ? '支持多选，只显示真实兼容格式' : 'Multiple selection · compatible formats only'}</small></div><FileOutput /></header>
-            <div className="output-groups-v44">
-              {outputGroups.map(group => (
-                <div key={group.id}>
-                  <span>{group.label}</span>
-                  <div>
-                    {group.formats.map(format => (
-                      <button
-                        type="button"
-                        className={outputFormats.includes(format) ? 'active' : ''}
-                        key={format}
-                        onClick={() => toggleList(format, outputFormats, setOutputFormats)}
-                      >
-                        {outputFormats.includes(format) && <Check />}
-                        {isZh ? OUTPUT_META[format].zh : OUTPUT_META[format].en}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-            {missingOutput && <p className="plan-inline-warning-v45"><AlertTriangle />{isZh ? '请选择至少一个输出格式。' : 'Select at least one output format.'}</p>}
+            {invalidTargetCount && <p className="plan-inline-warning-v45"><AlertTriangle />{isZh ? '单语言和双语输出只能选择一个目标语言。' : 'Single and bilingual output allow only one target language.'}</p>}
           </section>
         )}
 
         {translationEnabled && (
           <section className="plan-block-v44 layout">
-            <header><div><b>{isZh ? '翻译输出布局' : 'Translation output layout'}</b><small>{isZh ? '仅在启用翻译时显示' : 'Shown only when translation is enabled'}</small></div><Languages /></header>
-            <div className="layout-options-v44">
-              {LAYOUTS.map(([id, zh, en, description]) => (
-                <button
-                  type="button"
-                  className={(outputOptions.bilingual_layout || 'auto') === id ? 'active' : ''}
-                  key={id}
-                  onClick={() => setOption('bilingual_layout', id)}
-                >
-                  <i>{(outputOptions.bilingual_layout || 'auto') === id && <Check />}</i>
-                  <span><b>{isZh ? zh : en}</b><small>{isZh ? description : ({
-                    auto: 'Let AI choose from document structure',
-                    'target-only': 'Deliver the target language only',
-                    vertical: 'Source and translation stacked',
-                    columns: 'Source and translation in columns',
-                    inline: 'Source and translation on the same line',
-                    publishing: 'For manuals, reports and publishing',
-                    industrial: 'For tables, labels and technical identifiers',
-                  })[id]}</small></span>
-                </button>
-              ))}
+            <header><div><b>{isZh ? '翻译输出布局' : 'Translation output layout'}</b><small>{isZh ? '基础布局与场景优化分开设置' : 'Choose base layout and scenario profile separately'}</small></div><Languages /></header>
+            {languageMode === 'bilingual' ? (
+              <>
+                <small className="plan-subheading-v45">{isZh ? '基础双语布局（单选）' : 'Base bilingual layout (single choice)'}</small>
+                <div className="layout-options-v44">
+                  {BILINGUAL_LAYOUTS.map(([id, zh, en, description]) => (
+                    <button type="button" className={(outputOptions.bilingual_layout || 'auto') === id ? 'active' : ''} key={id} onClick={() => setOption('bilingual_layout', id)}>
+                      <i>{(outputOptions.bilingual_layout || 'auto') === id && <Check />}</i>
+                      <span><b>{isZh ? zh : en}</b><small>{isZh ? description : ({ auto: 'Choose from document structure', vertical: 'Source and translation stacked', columns: 'Source and translation in columns', inline: 'Source and translation on the same line' })[id]}</small></span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="layout-target-only-v45"><CircleCheck /><span><b>{isZh ? '仅输出目标语言' : 'Target language only'}</b><small>{isZh ? '单语言或多语言模式不混入原文；多语言会分别生成文件。' : 'Single or multiple mode excludes source text; multiple languages create separate files.'}</small></span></div>
+            )}
+            <small className="plan-subheading-v45">{isZh ? '场景优化（单选）' : 'Scenario optimization (single choice)'}</small>
+            <div className="layout-profile-grid-v45">
+              {LAYOUT_PROFILES.map(([id, zh, en, zhDesc, enDesc]) => <button type="button" key={id} className={(outputOptions.layout_profile || recommendation?.layout_profile || 'auto') === id ? 'active' : ''} onClick={() => setOption('layout_profile', id)}>{(outputOptions.layout_profile || recommendation?.layout_profile || 'auto') === id && <Check />}<span><b>{isZh ? zh : en}</b><small>{isZh ? zhDesc : enDesc}</small></span></button>)}
             </div>
+            {recommendation?.layout_reason && <p className="layout-reason-v45"><Sparkles />{recommendation.layout_reason}</p>}
           </section>
         )}
+
+        <section className="plan-block-v44 outputs">
+          <header><div><b>{isZh ? '最终输出' : 'Final output'}</b><small>{isZh ? '先选输出策略，再选择主格式或附加格式' : 'Choose a strategy before selecting primary or additional formats'}</small></div><FileOutput /></header>
+          <div className="output-strategy-v45">
+            {[
+              ['preserve', isZh ? '保持源文件格式（推荐）' : 'Preserve source formats', isZh ? 'Excel→Excel、Word→Word、PDF→PDF；混合任务分别保持原格式' : 'Excel→Excel, Word→Word, PDF→PDF; mixed jobs preserve each type'],
+              ['convert', isZh ? '转换为指定格式' : 'Convert to one format', isZh ? '主输出格式只能单选，并可能改变版式' : 'One primary output; layout may change'],
+              ['preserve_and_additional', isZh ? '保留源格式并生成附加版本' : 'Preserve source plus additional versions', isZh ? '主文件保持原格式，可额外生成 PDF、Word 等兼容版本' : 'Keep source and add compatible PDF, Word or other versions'],
+            ].map(([id, label, desc]) => <button type="button" key={id} className={outputStrategy === id ? 'active' : ''} onClick={() => setOutputStrategy(id)}>{outputStrategy === id && <Check />}<span><b>{label}</b><small>{desc}</small></span></button>)}
+          </div>
+
+          {outputStrategy === 'convert' && (
+            <div className="output-format-choice-v45">
+              <b>{isZh ? '主输出格式（单选）' : 'Primary output format (single choice)'}</b>
+              <div>{nonOriginalFormats.map(format => <button type="button" key={format} className={primaryFormat === format ? 'active' : ''} onClick={() => setPrimaryFormat(format)}>{primaryFormat === format && <Check />}{OUTPUT_META[format]?.[isZh ? 'zh' : 'en'] || format}</button>)}</div>
+              {recommendation?.output_warnings?.[primaryFormat] && <p><AlertTriangle />{recommendation.output_warnings[primaryFormat]}</p>}
+            </div>
+          )}
+
+          {outputStrategy === 'preserve_and_additional' && (
+            <div className="output-format-choice-v45">
+              <b>{isZh ? '附加输出格式（可多选）' : 'Additional output formats (multiple allowed)'}</b>
+              <div>{nonOriginalFormats.map(format => <button type="button" key={format} className={additionalFormats.includes(format) ? 'active' : ''} onClick={() => toggleAdditionalFormat(format)}>{additionalFormats.includes(format) && <Check />}{OUTPUT_META[format]?.[isZh ? 'zh' : 'en'] || format}</button>)}</div>
+              {additionalFormats.map(format => recommendation?.output_warnings?.[format] ? <p key={format}><AlertTriangle />{recommendation.output_warnings[format]}</p> : null)}
+            </div>
+          )}
+          {missingOutput && <p className="plan-inline-warning-v45"><AlertTriangle />{isZh ? '请选择一个主输出格式。' : 'Select one primary output format.'}</p>}
+          {missingAdditional && <p className="plan-inline-warning-v45"><AlertTriangle />{isZh ? '请选择至少一个附加输出格式。' : 'Select at least one additional output format.'}</p>}
+        </section>
       </div>
 
       <section className="plan-final-summary-v45">
-        <header><CircleCheck /><div><b>{isZh ? '本次任务将这样执行' : 'This task will run as follows'}</b><small>{isZh ? '创建前最后确认，不再显示模糊的推荐结果。' : 'Final review before creation, with no ambiguous recommendation.'}</small></div></header>
+        <header><CircleCheck /><div><b>{isZh ? '本次任务将这样执行' : 'This task will run as follows'}</b><small>{isZh ? '创建前最后确认，使用客户可理解的名称，不显示内部代码。' : 'Final review with customer-facing names rather than internal codes.'}</small></div></header>
         <div>
-          <span><small>{isZh ? '输入' : 'Input'}</small><b>{files.length} {isZh ? '个文件' : 'files'}</b></span>
-          <span><small>{isZh ? '能力' : 'Capabilities'}</small><b>{selectedCapabilityLabels.join(' + ') || (isZh ? '标准处理' : 'Standard processing')}</b></span>
-          <span><small>{isZh ? '语言' : 'Languages'}</small><b>{translationEnabled ? translationTargets.join(' / ') || (isZh ? '待选择' : 'Not selected') : (isZh ? '不翻译' : 'No translation')}</b></span>
-          <span><small>{isZh ? '输出' : 'Outputs'}</small><b>{conversionEnabled ? outputFormats.map(id => OUTPUT_META[id]?.[isZh ? 'zh' : 'en'] || id).join(' / ') || (isZh ? '待选择' : 'Not selected') : (isZh ? '保留原格式' : 'Preserve source')}</b></span>
+          <span><small>{isZh ? '上传 / 实际处理' : 'Uploaded / actual'}</small><b>{uploadedCount} / {actualCount} {isZh ? '个文件' : 'files'}</b></span>
+          <span><small>{isZh ? '页数 / 工作表' : 'Pages / sheets'}</small><b>{pageCount || '—'} / {sheetCount || '—'}</b></span>
+          <span><small>{isZh ? '处理能力' : 'Capabilities'}</small><b>{selectedCapabilityLabels.join(' + ') || (isZh ? '标准处理' : 'Standard processing')}</b></span>
+          <span><small>{isZh ? '语言' : 'Languages'}</small><b>{languageText}</b></span>
+          <span><small>{isZh ? '输出' : 'Output'}</small><b>{outputText}</b></span>
+          {translationEnabled && languageMode === 'bilingual' && <span><small>{isZh ? '双语布局' : 'Bilingual layout'}</small><b>{BILINGUAL_LAYOUTS.find(item => item[0] === (outputOptions.bilingual_layout || 'auto'))?.[isZh ? 1 : 2]}</b></span>}
         </div>
       </section>
 
@@ -413,43 +444,14 @@ export default function ProcessingPlanPanel({
               ['table', Table2, '表格与 Excel', 'Tables & Excel'],
               ['engine', Database, 'AI、性能与缓存', 'AI, performance & cache'],
             ].map(([id, Icon, zh, en]) => (
-              <button type="button" className={advancedSection === id ? 'active' : ''} key={id} onClick={() => setAdvancedSection(id)}>
-                <Icon />{isZh ? zh : en}
-              </button>
+              <button type="button" className={advancedSection === id ? 'active' : ''} key={id} onClick={() => setAdvancedSection(id)}><Icon />{isZh ? zh : en}</button>
             ))}
           </nav>
           <div className="plan-advanced-content-v44">
-            {advancedSection === 'document' && (
-              <>
-                <SwitchRow checked={outputOptions.preserve_layout !== false} label={isZh ? '保持原始版式' : 'Preserve original layout'} onChange={value => setOption('preserve_layout', value)} />
-                <SwitchRow checked={outputOptions.preserve_links !== false} label={isZh ? '保留超链接' : 'Preserve hyperlinks'} onChange={value => setOption('preserve_links', value)} />
-                <SwitchRow checked={!!outputOptions.preserve_comments} label={isZh ? '保留批注' : 'Preserve comments'} onChange={value => setOption('preserve_comments', value)} />
-              </>
-            )}
-            {advancedSection === 'ocr' && (
-              <>
-                <SwitchRow checked={outputOptions.preserve_images !== false} label={isZh ? '保留原始图片' : 'Preserve source images'} onChange={value => setOption('preserve_images', value)} />
-                <div className="engine-managed-v44"><ScanText /><span><b>{isZh ? 'OCR 语言' : 'OCR language'}</b><small>{isZh ? '由真实文件分析结果自动选择' : 'Selected from the actual file analysis'}</small></span><em>{isZh ? 'AI 自动' : 'Automatic'}</em></div>
-              </>
-            )}
-            {advancedSection === 'table' && (
-              <>
-                <SwitchRow checked={outputOptions.preserve_formulas !== false} label={isZh ? '保留公式' : 'Preserve formulas'} onChange={value => setOption('preserve_formulas', value)} />
-                <SwitchRow checked={outputOptions.preserve_merged_cells !== false} label={isZh ? '保持合并单元格' : 'Preserve merged cells'} onChange={value => setOption('preserve_merged_cells', value)} />
-                <SwitchRow checked={outputOptions.preserve_cell_coordinates !== false} label={isZh ? '保持单元格坐标' : 'Preserve cell coordinates'} onChange={value => setOption('preserve_cell_coordinates', value)} />
-                <SwitchRow checked={outputOptions.protect_plc_codes !== false} label={isZh ? '保护技术编号、变量名和型号' : 'Protect technical identifiers, variables and models'} onChange={value => setOption('protect_plc_codes', value)} />
-              </>
-            )}
-            {advancedSection === 'engine' && (
-              <div className="engine-managed-grid-v44">
-                {[
-                  [Bot, 'AI Provider', isZh ? '按可用性自动路由' : 'Routed by availability'],
-                  [Gauge, isZh ? '性能与并发' : 'Performance & concurrency', isZh ? '由任务规模自动决定' : 'Adapted to job size'],
-                  [Database, isZh ? '缓存策略' : 'Cache policy', isZh ? '由处理引擎自动管理' : 'Managed by the processing engine'],
-                  [ShieldCheck, isZh ? '质量守护' : 'Quality guard', isZh ? '始终启用' : 'Always enabled'],
-                ].map(([Icon, title, value]) => <div key={title}><Icon /><span><b>{title}</b><small>{value}</small></span></div>)}
-              </div>
-            )}
+            {advancedSection === 'document' && <><SwitchRow checked={outputOptions.preserve_layout !== false} label={isZh ? '保持原始版式' : 'Preserve original layout'} onChange={value => setOption('preserve_layout', value)} /><SwitchRow checked={outputOptions.preserve_links !== false} label={isZh ? '保留超链接' : 'Preserve hyperlinks'} onChange={value => setOption('preserve_links', value)} /><SwitchRow checked={!!outputOptions.preserve_comments} label={isZh ? '保留批注' : 'Preserve comments'} onChange={value => setOption('preserve_comments', value)} /></>}
+            {advancedSection === 'ocr' && <><SwitchRow checked={outputOptions.preserve_images !== false} label={isZh ? '保留原始图片' : 'Preserve source images'} onChange={value => setOption('preserve_images', value)} /><div className="engine-managed-v44"><ScanText /><span><b>{isZh ? 'OCR 语言' : 'OCR language'}</b><small>{(recommendation?.ocr_languages || analysis?.ocr_languages || []).join(' / ') || (isZh ? '由真实文件分析自动选择' : 'Selected from file analysis')}</small></span><em>{recommendation?.ocr_available === false ? (isZh ? '暂不可用' : 'Unavailable') : (isZh ? '平台自动' : 'Automatic')}</em></div></>}
+            {advancedSection === 'table' && <><SwitchRow checked={outputOptions.preserve_formulas !== false} label={isZh ? '保留公式' : 'Preserve formulas'} onChange={value => setOption('preserve_formulas', value)} /><SwitchRow checked={outputOptions.preserve_merged_cells !== false} label={isZh ? '保持合并单元格' : 'Preserve merged cells'} onChange={value => setOption('preserve_merged_cells', value)} /><SwitchRow checked={outputOptions.preserve_cell_coordinates !== false} label={isZh ? '保持单元格坐标' : 'Preserve cell coordinates'} onChange={value => setOption('preserve_cell_coordinates', value)} /><SwitchRow checked={outputOptions.protect_plc_codes !== false} label={isZh ? '保护技术编号、变量名和型号' : 'Protect technical identifiers, variables and models'} onChange={value => setOption('protect_plc_codes', value)} /></>}
+            {advancedSection === 'engine' && <div className="engine-managed-grid-v44">{[[Bot, 'AI Provider', recommendation?.primary_provider ? `${recommendation.primary_provider}${recommendation.backup_provider ? ` → ${recommendation.backup_provider}` : ''}` : (isZh ? '平台自动路由' : 'Platform auto routing')], [Gauge, isZh ? '性能与并发' : 'Performance & concurrency', isZh ? '由任务规模自动决定' : 'Adapted to job size'], [Database, isZh ? '缓存策略' : 'Cache policy', isZh ? '由处理引擎自动管理' : 'Managed by the processing engine'], [ShieldCheck, isZh ? '质量守护' : 'Quality guard', isZh ? '始终启用' : 'Always enabled']].map(([Icon, title, value]) => <div key={title}><Icon /><span><b>{title}</b><small>{value}</small></span></div>)}</div>}
           </div>
         </section>
       )}
@@ -457,27 +459,21 @@ export default function ProcessingPlanPanel({
       <section className="plan-instructions-v44">
         <header><Bot /><div><b>{isZh ? '业务要求（可选）' : 'Business instructions (optional)'}</b><small>{isZh ? '只填写 AI 无法自动判断的特殊要求' : 'Add only requirements AI cannot infer'}</small></div></header>
         <div>{instructionTemplates.map(([label, text]) => <button type="button" key={label} onClick={() => applyInstruction(text)}>{label}</button>)}</div>
-        <textarea
-          value={form.requirements}
-          onChange={event => {
-            setForm(current => ({ ...current, requirements: event.target.value }));
-            markChanged();
-          }}
-          placeholder={isZh ? '例如：品牌名称保持英文；法律条款使用公司术语库；交付中英双语。' : 'Example: Keep brand names in English; use the company legal glossary; deliver bilingual output.'}
-        />
+        <textarea value={form.requirements} onChange={event => { setForm(current => ({ ...current, requirements: event.target.value })); markChanged(); }} placeholder={isZh ? '例如：品牌名称保持英文；法律条款使用公司术语库；日志中隐藏证件号码。' : 'Example: Keep brand names in English; use the company legal glossary; hide identifiers in logs.'} />
         <p><ShieldCheck />{isZh ? '企业质量守护自动检查漏译、公式、文件结构和术语一致性。' : 'Enterprise Quality Guard checks missing translations, formulas, file structure and terminology.'}</p>
       </section>
 
       {error && <div className="plan-error-v44"><AlertTriangle />{error}</div>}
 
       <section className="plan-confirm-v44">
-        <button type="button" className={planConfirmed ? 'confirmed' : ''} disabled={!canConfirm} onClick={() => setPlanConfirmed(value => !value)}>
-          {planConfirmed ? <CircleCheck /> : <Check />}
-          {planConfirmed
-            ? isZh ? '方案已确认，可以创建任务' : 'Plan confirmed — ready to create'
-            : isZh ? '确认以上方案' : 'Confirm this plan'}
-        </button>
-        <small>{isZh ? '确认后才会开放创建任务；此时仍未开始处理文件。' : 'The task button is enabled only after confirmation. Processing has not started yet.'}</small>
+        <div className="plan-confirm-actions-v45">
+          <button type="button" className="plan-back-button-v45" onClick={onBack}><ArrowLeft />{isZh ? '返回分析报告' : 'Back to analysis'}</button>
+          <button type="button" className={planConfirmed ? 'confirmed' : ''} disabled={!canConfirm} onClick={() => setPlanConfirmed(value => !value)}>
+            {planConfirmed ? <CircleCheck /> : <Check />}
+            {planConfirmed ? (isZh ? '方案已确认，可以创建任务' : 'Plan confirmed — ready to create') : (isZh ? '确认以上方案' : 'Confirm this plan')}
+          </button>
+        </div>
+        <small>{isZh ? '确认后才会开放创建任务；此时仍未开始处理文件，也不会扣除 Credits。' : 'The task button is enabled only after confirmation. Processing and charging have not started.'}</small>
       </section>
 
       <footer className="plan-submit-v44">
@@ -486,10 +482,10 @@ export default function ProcessingPlanPanel({
           <span><b>{estimatedQuality}%</b><small>{isZh ? '预计质量' : 'Quality target'}</small></span>
           <span><b>{estimatedCredits}</b><small>{isZh ? 'Credits 预估' : 'Credits estimate'}</small></span>
         </div>
-        <button type="submit" disabled={submitting || !files.length || hasArchiveErrors || !planConfirmed}>
+        <button type="submit" disabled={submitting || !canConfirm || !planConfirmed}>
           {submitting ? t.creating : (isZh ? '创建任务并进入队列' : 'Create task and open queue')}<ArrowRight />
         </button>
-        <small><ShieldCheck />{isZh ? '创建任务后会立即写入工作台和任务队列，并按实际任务规则结算 Credits。' : 'The task appears in the workspace and queue immediately, with credits settled by the actual job rules.'}</small>
+        <small><ShieldCheck />{isZh ? '平台会在任务创建前再次检查 AI/OCR 服务；不可用时不会创建任务或扣除 Credits。' : 'The platform rechecks AI/OCR before creation; unavailable services do not create or charge a task.'}</small>
       </footer>
     </section>
   );

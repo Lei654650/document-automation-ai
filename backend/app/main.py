@@ -2267,7 +2267,11 @@ SUPPORTED_OUTPUT_FORMATS = {"original", "docx", "xlsx", "pptx", "pdf", "md", "ma
 
 
 def normalize_processing_request(services: list[str], conversion: dict | None) -> tuple[list[str], dict]:
-    """Expand product-facing capabilities into executable engine services."""
+    """Expand product-facing capabilities into executable engine services.
+
+    Output selection is normalized into one explicit strategy so the UI cannot
+    submit both "preserve source" and an unrelated set of primary formats.
+    """
     normalized: list[str] = []
     requested_formats: list[str] = []
     for raw in services or ["standard"]:
@@ -2277,15 +2281,142 @@ def normalize_processing_request(services: list[str], conversion: dict | None) -
                 normalized.append(expanded)
         if service in SERVICE_OUTPUT_FORMATS:
             requested_formats.extend(item for item in SERVICE_OUTPUT_FORMATS[service] if item not in requested_formats)
+
     payload = dict(conversion or {})
-    formats = payload.get("formats") if isinstance(payload.get("formats"), list) else []
-    for raw in [*formats, *requested_formats]:
+    raw_formats = payload.get("formats") if isinstance(payload.get("formats"), list) else []
+    for raw in [*raw_formats, *requested_formats]:
         value = "md" if str(raw).strip().lower() == "markdown" else str(raw).strip().lower()
         if value in SUPPORTED_OUTPUT_FORMATS and value not in requested_formats:
             requested_formats.append(value)
+
+    requested_strategy = str(payload.get("output_strategy") or "").strip().lower()
+    legacy_multi_format = requested_strategy not in {"preserve", "convert", "preserve_and_additional"} and len(requested_formats) > 1
+    strategy = requested_strategy
+    if strategy not in {"preserve", "convert", "preserve_and_additional"}:
+        strategy = "preserve" if not requested_formats or requested_formats == ["original"] else (
+            "preserve_and_additional" if "original" in requested_formats else "convert"
+        )
+    primary = str(payload.get("primary_format") or "").strip().lower()
+    if primary == "markdown":
+        primary = "md"
+    additional = payload.get("additional_formats") if isinstance(payload.get("additional_formats"), list) else []
+    additional = ["md" if str(item).strip().lower() == "markdown" else str(item).strip().lower() for item in additional]
+    additional = [item for item in dict.fromkeys(additional) if item in SUPPORTED_OUTPUT_FORMATS and item != "original"]
+
+    if strategy == "preserve":
+        formats = ["original"]
+        primary = "original"
+        additional = []
+    elif strategy == "convert":
+        if primary not in SUPPORTED_OUTPUT_FORMATS or primary == "original":
+            primary = next((item for item in requested_formats if item != "original"), "pdf")
+        # Older clients submitted several explicit formats without an output
+        # strategy. Preserve that contract; the V45.0.1 UI always sends an
+        # explicit single-primary or source-plus-additional strategy.
+        formats = list(dict.fromkeys(requested_formats)) if legacy_multi_format else [primary]
+        additional = [item for item in formats if item != primary] if legacy_multi_format else []
+    else:
+        if primary not in SUPPORTED_OUTPUT_FORMATS or primary == "original":
+            primary = "original"
+        if not additional:
+            additional = [item for item in requested_formats if item != "original"]
+        formats = ["original", *additional]
+
     if "conversion" in normalized:
-        payload["formats"] = requested_formats or ["original"]
+        payload.update({
+            "formats": list(dict.fromkeys(formats)),
+            "output_strategy": strategy,
+            "primary_format": primary,
+            "additional_formats": additional,
+        })
+    else:
+        payload.update({
+            "formats": ["original"],
+            "output_strategy": "preserve",
+            "primary_format": "original",
+            "additional_formats": [],
+        })
     return normalized or ["conversion"], payload
+
+
+_LANGUAGE_CODE_ALIASES = {
+    "zh-cn": "zh", "zh_cn": "zh", "zh-hans": "zh",
+    "zh-tw": "zh_tw", "zh_tw": "zh_tw", "zh-hant": "zh_tw",
+    "zh-en": "en", "zh-vi": "vi",
+}
+_ALLOWED_TRANSLATION_MODES = {"single", "multiple", "bilingual"}
+_ALLOWED_BILINGUAL_LAYOUTS = {"auto", "vertical", "columns", "inline"}
+
+
+def _normalize_language_code(value: Any, default: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    lowered = raw.lower().replace(" ", "")
+    return _LANGUAGE_CODE_ALIASES.get(lowered, lowered)
+
+
+def normalize_translation_request(services: list[str], translation: dict | None) -> tuple[list[str], dict]:
+    """Make the translation decision authoritative across UI and workers."""
+    normalized_services = list(dict.fromkeys(str(item).strip().lower() for item in services if str(item).strip()))
+    payload = dict(translation or {})
+    enabled = "translation" in normalized_services and payload.get("enabled", True) is not False
+    if not enabled:
+        normalized_services = [item for item in normalized_services if item != "translation"]
+        return normalized_services, {
+            "enabled": False,
+            "source_language": "auto",
+            "target_language": "",
+            "targets": [],
+            "language_mode": "none",
+            "bilingual_layout": "none",
+        }
+
+    mode = str(payload.get("language_mode") or "single").strip().lower()
+    if mode not in _ALLOWED_TRANSLATION_MODES:
+        mode = "single"
+    raw_targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
+    if not raw_targets and payload.get("target_language"):
+        raw_targets = [payload.get("target_language")]
+    targets = [_normalize_language_code(item) for item in raw_targets]
+    targets = [item for item in dict.fromkeys(targets) if item and item not in {"auto", "none"}]
+    if mode in {"single", "bilingual"}:
+        targets = targets[:1]
+    else:
+        targets = targets[:8]
+    if not targets:
+        raise HTTPException(status_code=400, detail="请选择至少一个目标语言。")
+
+    layout = str(payload.get("bilingual_layout") or "auto").strip().lower()
+    if mode == "bilingual":
+        if layout not in _ALLOWED_BILINGUAL_LAYOUTS:
+            layout = "auto"
+    else:
+        layout = "target-only"
+    return normalized_services, {
+        "enabled": True,
+        "source_language": _normalize_language_code(payload.get("source_language"), "auto"),
+        "target_language": targets[0],
+        "targets": targets,
+        "language_mode": mode,
+        "bilingual_layout": layout,
+        "layout_profile": str(payload.get("layout_profile") or "auto").strip().lower(),
+        "custom_source_language": str(payload.get("custom_source_language") or "").strip(),
+        "custom_target_language": str(payload.get("custom_target_language") or "").strip(),
+    }
+
+
+def _validate_platform_capabilities(services: list[str]) -> None:
+    if "translation" in services and not translation_capability().configured:
+        raise HTTPException(
+            status_code=503,
+            detail="平台 AI 翻译服务暂时不可用，任务尚未创建且不会扣除 Credits。请稍后重试或联系管理员。",
+        )
+    if "ocr" in services and not ocr_capability().available:
+        raise HTTPException(
+            status_code=503,
+            detail="平台 OCR 服务暂时不可用，任务尚未创建且不会扣除 Credits。请稍后重试或联系管理员。",
+        )
 
 
 def _wallet_total(db: sqlite3.Connection, email: str) -> int:
@@ -2384,133 +2515,164 @@ def archive_capabilities() -> dict:
 
 
 def _build_workspace_recommendation(analysis: dict) -> dict:
-    """Turn real document analysis into an explainable, confirmation-first plan."""
+    """Build a content-aware plan that remains subordinate to user choices."""
     formats = {str(item).lower() for item in analysis.get("input_formats", [])}
     files = analysis.get("files", [])
-    scanned = any(
-        bool(item.get("details", {}).get("likely_scanned"))
-        or item.get("format") == "图片"
-        for item in files
-    )
-    spreadsheet = bool(formats & {"excel", "csv"})
-    presentation = "powerpoint" in formats
+    scanned_pages = int(analysis.get("scanned_page_count") or 0)
+    text_pages = int(analysis.get("text_page_count") or 0)
+    legacy_scanned = any(bool((item.get("details") or {}).get("likely_scanned")) for item in files if isinstance(item, dict))
+    scanned = bool(analysis.get("ocr_required") or scanned_pages or legacy_scanned)
+    mixed_scan_text = bool(analysis.get("mixed_scan_text") or (scanned_pages and text_pages))
+    spreadsheet = bool(formats & {"excel", "csv"}) and formats <= {"excel", "csv"}
+    presentation = "powerpoint" in formats and len(formats) == 1
+    pdf_only = formats == {"pdf"}
     image_only = bool(formats) and formats <= {"图片"}
+    mixed_inputs = len(formats) > 1
+    legacy_analysis_payload = not any(key in analysis for key in ("total_pages", "scanned_page_count", "text_page_count", "ocr_required", "detected_language_codes"))
 
     if scanned or image_only:
         profile = "scan"
         services = ["ocr", "translation", "conversion"]
-        enhancement_services = ["data_cleanup"]
-        auto_apply_services = ["ocr", "conversion", *enhancement_services]
-        outputs = ["original", "pdf", "docx"]
-        reason = "检测到扫描内容或图片，建议先完成 OCR，再进行整理、可选翻译和版式交付。"
+        enhancement_services = ["image_recognition", "pdf_rebuild", "layout_recovery", "scan_enhancement", "data_cleanup", "proofreading"]
+        auto_apply_services = ["ocr", "image_recognition", "pdf_rebuild", "layout_recovery", "scan_enhancement", "data_cleanup"]
+        outputs = ["original", "pdf", "docx", "images"]
+        primary_output = "original"
+        recommended_layout = "vertical"
+        layout_profile = "publishing"
+        reason = f"检测到 {scanned_pages or '若干'} 个扫描或图片页面，建议先 OCR，再恢复版式并按需翻译。"
     elif spreadsheet:
         profile = "spreadsheet"
         services = ["translation", "conversion"]
         enhancement_services = ["data_cleanup", "enterprise_analysis"]
-        auto_apply_services = ["conversion", *enhancement_services]
+        auto_apply_services = ["conversion", "data_cleanup", "enterprise_analysis"]
         outputs = ["original", "xlsx", "csv", "pdf"]
-        reason = "检测到表格结构，建议保护公式、合并单元格、技术编号与变量，并启用整理和数据分析。"
+        primary_output = "original"
+        recommended_layout = "columns"
+        layout_profile = "industrial"
+        reason = "检测到表格结构，建议保留公式、合并单元格、技术编号与变量，并采用适合逐行核对的布局。"
     elif presentation:
         profile = "presentation"
         services = ["translation", "conversion"]
         enhancement_services = ["data_cleanup"]
-        auto_apply_services = ["conversion", *enhancement_services]
+        auto_apply_services = ["conversion", "data_cleanup"]
         outputs = ["original", "pptx", "pdf"]
-        reason = "检测到演示文稿，建议保留文本框、图片、图表与幻灯片层级，并提供原格式和 PDF 交付。"
-    else:
+        primary_output = "original"
+        recommended_layout = "vertical"
+        layout_profile = "publishing"
+        reason = "检测到演示文稿，建议保留文本框、图片、图表与幻灯片层级。"
+    elif pdf_only:
         profile = "document"
         services = ["translation", "conversion"]
+        enhancement_services = ["data_cleanup", "layout_recovery"]
+        auto_apply_services = ["conversion", "data_cleanup", "layout_recovery"]
+        outputs = ["original", "pdf", "docx"]
+        primary_output = "original"
+        recommended_layout = "vertical"
+        layout_profile = "publishing"
+        reason = "检测到 PDF 文档，建议保留 PDF 作为主交付格式；可按需生成可编辑 Word 副本。"
+    else:
+        profile = "mixed" if mixed_inputs else "document"
+        services = ["translation", "conversion"]
         enhancement_services = ["data_cleanup"]
-        auto_apply_services = ["conversion", *enhancement_services]
-        outputs = ["original", "docx", "pdf"]
-        if "pdf" in formats:
-            outputs.append("images")
-        reason = "检测到文档结构，建议保留原始版式，启用智能整理，并按需选择翻译和兼容输出。"
+        auto_apply_services = ["conversion", "data_cleanup"]
+        outputs = ["original", "pdf"] if mixed_inputs else ["original", "docx", "pdf", "txt"]
+        primary_output = "original"
+        recommended_layout = "vertical"
+        layout_profile = "auto"
+        reason = "检测到文档结构，建议保持每个源文件格式，并按需选择翻译或附加交付版本。"
 
-    # Every listed output now has a real backend implementation. Keep the
-    # source-specific recommendations first, then expose the complete delivery
-    # set for users who need additional formats.
-    outputs = list(dict.fromkeys([*outputs, "docx", "xlsx", "pptx", "pdf", "md", "html", "txt", "csv", "json", "xml"]))
-
+    if profile == "scan" and legacy_analysis_payload:
+        # Keep the historical API contract for old analysis payloads. New real
+        # analysis responses expose the restricted, reliable output matrix.
+        outputs = ["original", "pdf", "docx", "xlsx", "pptx", "md", "html", "txt", "csv", "json", "xml", "images"]
+    outputs = list(dict.fromkeys(outputs))
     detected_languages = analysis.get("detected_languages", [])
-    detected_text = "、".join(str(item) for item in detected_languages)
-    if "中文" in detected_text or "Chinese" in detected_text:
+    language_codes = list(analysis.get("detected_language_codes", []) or [])
+    if not language_codes:
+        language_label_map = {
+            "chinese": "zh", "中文": "zh", "中文（简体）": "zh", "简体中文": "zh",
+            "中文（繁体）": "zh-TW", "繁体中文": "zh-TW", "traditional chinese": "zh-TW",
+            "english": "en", "英语": "en", "越南语": "vi", "vietnamese": "vi",
+        }
+        for label in detected_languages:
+            code = language_label_map.get(str(label).strip().lower()) or language_label_map.get(str(label).strip())
+            if code and code not in language_codes:
+                language_codes.append(code)
+    if any(str(code).startswith("zh") for code in language_codes):
         suggested_targets = ["en", "vi"]
-    elif "越南" in detected_text or "Vietnam" in detected_text:
+    elif "vi" in language_codes:
         suggested_targets = ["zh", "en"]
-    elif "英文" in detected_text or "English" in detected_text:
+    elif "en" in language_codes:
         suggested_targets = ["zh", "vi"]
     else:
         suggested_targets = []
 
-    warnings = [
-        warning
-        for warning in analysis.get("warnings", [])
-        if warning and warning != "未发现明显风险。"
-    ]
-    confidence = 0.94 if not warnings else 0.84
+    warnings = [warning for warning in analysis.get("warnings", []) if warning and warning != "未发现明显风险。"]
+    confidence = 0.96
+    if analysis.get("page_count_complete") is False:
+        confidence -= 0.05
+    if any("深度分析未完成" in str(item) for item in warnings):
+        confidence -= 0.12
+    confidence = max(0.65, confidence)
     file_count = int(analysis.get("file_count") or len(files) or 1)
+    uploaded_file_count = int(analysis.get("uploaded_file_count") or file_count)
     total_size_bytes = int(analysis.get("total_size_bytes") or 0)
     size_mb = total_size_bytes / 1024 / 1024
     pages = int(analysis.get("total_pages") or file_count)
     images = int(analysis.get("total_images") or 0)
     tables = int(analysis.get("total_tables") or 0)
     complexity = str(analysis.get("complexity") or "低")
-    complexity_multiplier = {"低": 1.0, "中": 1.25, "高": 1.6}.get(complexity, 1.15)
-    estimated_seconds = max(
-        8,
-        round(
-            (6 + file_count * 2.5 + size_mb * 0.35 + pages * 0.8 + images * 0.2 + tables * 0.35)
-            * complexity_multiplier
-            * (1.25 if scanned else 1.0)
-        ),
-    )
+    complexity_multiplier = {"低": 1.0, "中": 1.3, "高": 1.75}.get(complexity, 1.2)
+    estimated_seconds = max(8, round((6 + file_count * 2.5 + size_mb * 0.35 + pages * 0.9 + images * 0.18 + tables * 0.4) * complexity_multiplier * (1.35 if scanned else 1.0)))
     estimated_credits = _estimate_order_credits(analysis, auto_apply_services, file_count, total_size_bytes)
-    quality_score = 98
-    if complexity == "中":
-        quality_score -= 2
-    elif complexity == "高":
-        quality_score -= 4
-    quality_score -= min(5, len(warnings))
-    if scanned:
-        quality_score -= 1
-    quality_score = max(86, quality_score)
+    quality_score = max(84, 98 - {"低": 0, "中": 2, "高": 5}.get(complexity, 2) - min(4, len(warnings)) - (1 if scanned else 0))
 
     input_category_map = {
-        "word": "Office", "excel": "Office", "powerpoint": "Office",
-        "pdf": "PDF", "图片": "图片", "zip": "压缩包",
-        "csv": "结构化数据", "txt": "文本与数据",
+        "word": "Office", "excel": "Office", "powerpoint": "Office", "pdf": "PDF",
+        "图片": "图片", "zip": "压缩包", "csv": "结构化数据", "txt": "文本与数据",
     }
     input_group_map: dict[str, list[str]] = {}
     for value in analysis.get("input_formats", []):
         category_name = input_category_map.get(str(value).lower(), "其它")
         input_group_map.setdefault(category_name, []).append(str(value))
-    input_groups = [
-        {"category": category_name, "formats": sorted(set(values))}
-        for category_name, values in input_group_map.items()
-    ]
+    input_groups = [{"category": category_name, "formats": sorted(set(values))} for category_name, values in input_group_map.items()]
 
     output_category_map = {
-        "original": "源文件", "docx": "Office", "xlsx": "Office", "pptx": "Office",
-        "pdf": "PDF", "md": "文本与网页", "html": "文本与网页", "txt": "文本与网页",
-        "csv": "结构化数据", "json": "结构化数据", "xml": "结构化数据", "images": "图片",
+        "original": "源文件", "docx": "Office", "xlsx": "Office", "pptx": "Office", "pdf": "PDF",
+        "md": "文本与网页", "html": "文本与网页", "txt": "文本与网页", "csv": "结构化数据",
+        "json": "结构化数据", "xml": "结构化数据", "images": "图片",
     }
     output_group_map: dict[str, list[str]] = {}
     for value in outputs:
         output_group_map.setdefault(output_category_map[value], []).append(value)
-    output_groups = [
-        {"category": category_name, "formats": values}
-        for category_name, values in output_group_map.items()
-    ]
+    output_groups = [{"category": category_name, "formats": values} for category_name, values in output_group_map.items()]
 
     reason_details = [reason]
+    if analysis.get("mixed_language"):
+        reason_details.append(f"检测到多语言混合内容：{' / '.join(str(item) for item in detected_languages)}；是否统一翻译由用户确认。")
+    if mixed_scan_text:
+        reason_details.append(f"文档包含 {scanned_pages} 个扫描页和 {text_pages} 个文本页，需要 OCR 与原生文本混合处理。")
     industry = analysis.get("industry", "通用")
     if industry and industry != "通用":
-        reason_details.append(f"文件内容更接近“{industry}”行业，将优先使用对应专业术语与质量规则。")
-    reason_details.append("翻译是否启用、目标语言和双语布局必须由用户确认，系统不会默认假定中文或英文。")
-    reason_details.append("输出格式已按当前输入与真实转换能力过滤，可多选最终交付格式。")
-    if scanned:
-        reason_details.append("扫描件或图片需要 OCR，建议在翻译前先完成文字识别。")
+        reason_details.append(f"内容更接近“{industry}”，将优先使用相应术语与质量规则。")
+    reason_details.append("AI 仅推荐能力；是否翻译、目标语言和双语布局必须由用户确认。")
+    reason_details.append("默认保持每个源文件格式；只有用户选择转换或附加版本时才生成其他格式。")
+
+    sensitive_categories = analysis.get("sensitive_categories", [])
+    if sensitive_categories:
+        reason_details.append("检测到敏感材料类别，任务摘要和日志应仅展示类别，不展示证件号码、健康内容或联系方式。")
+
+    provider_settings = translation_public_settings()
+    provider_capability = provider_settings.get("capability") or {}
+    configured_providers = [item["id"] for item in provider_settings.get("providers", []) if item.get("configured")]
+    routing = provider_settings.get("routing") or {}
+
+    output_warnings = {
+        "docx": "转换为 Word 可能改变扫描表格、印章、图片位置和分页。",
+        "csv": "CSV 仅保留表格数据，不保留样式、公式、图片或合并单元格。",
+        "pdf": "PDF 适合查看和交付，但不适合继续编辑。",
+        "images": "图片输出便于预览，但不可直接编辑文本。",
+    }
 
     return {
         "profile": profile,
@@ -2518,28 +2680,51 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
         "enhancement_services": enhancement_services,
         "auto_apply_services": auto_apply_services,
         "compatible_outputs": outputs,
+        "primary_output": primary_output,
+        "additional_outputs": [item for item in outputs if item != primary_output],
+        "output_strategy": "preserve",
+        "output_warnings": {key: value for key, value in output_warnings.items() if key in outputs},
+        "recommended_layout": recommended_layout,
+        "layout_profile": layout_profile,
+        "layout_reason": reason,
         "recommended_target_language": suggested_targets[0] if suggested_targets else None,
         "suggested_target_languages": suggested_targets,
         "translation_confirmation_required": True,
-        "confidence": confidence,
+        "confidence": round(confidence, 2),
         "reason": reason,
         "reason_details": reason_details,
         "category": analysis.get("document_category", "通用文档"),
         "industry": industry,
         "complexity": complexity,
         "detected_languages": detected_languages,
+        "detected_language_codes": language_codes,
+        "mixed_language": bool(analysis.get("mixed_language")),
         "ocr_required": bool(analysis.get("ocr_required") or scanned),
         "ocr_languages": analysis.get("ocr_languages", []),
+        "scanned_page_count": scanned_pages,
+        "text_page_count": text_pages,
         "estimated_seconds": estimated_seconds,
         "estimated_credits": estimated_credits,
         "quality_score": quality_score,
         "quality_label": "企业级",
+        "uploaded_file_count": uploaded_file_count,
+        "actual_file_count": file_count,
         "input_groups": input_groups,
         "output_groups": output_groups,
-        "warnings": warnings[:5],
+        "warnings": warnings[:8],
+        "contains_sensitive_data": bool(sensitive_categories),
+        "sensitive_categories": sensitive_categories,
+        "privacy_notice": analysis.get("privacy_notice", ""),
         "quality_checks": ["漏译检查", "术语一致性", "公式与结构校验", "交付前复检"],
         "knowledge_strategy": "企业知识库 → 行业知识库 → 语言规则 → 质量守护",
         "provider_strategy": "provider-neutral",
+        "routing_strategy": "platform-managed-failover",
+        "translation_available": bool(provider_capability.get("configured")),
+        "configured_providers": configured_providers,
+        "primary_provider": routing.get("primary_provider") or provider_capability.get("provider") or "",
+        "backup_provider": routing.get("backup_provider") or "",
+        "auto_failover": routing.get("auto_failover", True),
+        "ocr_available": ocr_capability().available,
     }
 
 
@@ -2553,6 +2738,8 @@ async def analyze_workspace_uploads(
         raise HTTPException(status_code=400, detail="At least one file is required.")
     temp_root = Path(tempfile.mkdtemp(prefix="dai_workspace_analysis_", dir=str(PERSISTENT_ROOT)))
     analysis_paths: list[tuple[str, str]] = []
+    uploaded_file_count = len(files)
+    archive_file_count = 0
     try:
         for index, upload in enumerate(files):
             original_name = Path(upload.filename or f"document-{index + 1}").name
@@ -2568,6 +2755,7 @@ async def analyze_workspace_uploads(
                         raise HTTPException(status_code=413, detail=f"{original_name} exceeds {MAX_FILE_SIZE_MB} MB.")
                     output.write(chunk)
             if suffix in ARCHIVE_SUFFIXES:
+                archive_file_count += 1
                 expanded = _safe_extract_archive(stored_path, temp_root / f"expanded-{index}")
                 analysis_paths.extend((name, path) for name, path, _ in expanded)
             else:
@@ -2575,6 +2763,9 @@ async def analyze_workspace_uploads(
         if not analysis_paths:
             raise HTTPException(status_code=400, detail="No supported documents were found.")
         analysis = analyze_order_files(analysis_paths, [], "", {})
+        analysis["uploaded_file_count"] = uploaded_file_count
+        analysis["archive_file_count"] = archive_file_count
+        analysis["expanded_file_count"] = len(analysis_paths)
         return {
             "success": True,
             "analysis": analysis,
@@ -2700,8 +2891,9 @@ def _create_order_from_paths(payload: ChunkedOrderCreate, user: dict) -> dict:
         raise HTTPException(status_code=400, detail="Name and email are required.")
     if not payload.upload_ids:
         raise HTTPException(status_code=400, detail="At least one uploaded file is required.")
-    translation_data = dict(payload.translation or {})
     selected_services, conversion_data = normalize_processing_request(payload.services or ["standard"], payload.conversion)
+    selected_services, translation_data = normalize_translation_request(selected_services, payload.translation)
+    _validate_platform_capabilities(selected_services)
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
     order_folder = UPLOAD_DIR / order_number
@@ -2730,6 +2922,11 @@ def _create_order_from_paths(payload: ChunkedOrderCreate, user: dict) -> dict:
             analysis_paths.extend((n,p) for n,p,_,_ in upload_rows)
             consumed_sessions.append(upload_id)
         ai_analysis = analyze_order_files(analysis_paths, selected_services, payload.requirements.strip(), translation_data)
+        ai_analysis.update({
+            "uploaded_file_count": len(payload.upload_ids),
+            "expanded_file_count": len(prepared_rows),
+            "actual_file_count": len(prepared_rows),
+        })
         suggested_quote = suggest_quote(ai_analysis, selected_services)
         estimated_credits = _estimate_order_credits(ai_analysis, selected_services, len(prepared_rows), sum(r[2] for r in prepared_rows))
         def insert_order(db):
@@ -2793,6 +2990,8 @@ async def create_order(
     if not isinstance(translation_data, dict) or not isinstance(conversion_data, dict):
         raise HTTPException(status_code=400, detail="Invalid processing settings.")
     selected_services, conversion_data = normalize_processing_request(selected_services, conversion_data)
+    selected_services, translation_data = normalize_translation_request(selected_services, translation_data)
+    _validate_platform_capabilities(selected_services)
 
     order_number = f"DA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     created_at = utc_now()
@@ -2817,6 +3016,11 @@ async def create_order(
             analysis_paths.extend((n, p) for n, p, _, _ in upload_rows)
 
         ai_analysis = analyze_order_files(analysis_paths, selected_services, requirements.strip(), translation_data)
+        ai_analysis.update({
+            "uploaded_file_count": len(files),
+            "expanded_file_count": len(prepared_rows),
+            "actual_file_count": len(prepared_rows),
+        })
         suggested_quote = suggest_quote(ai_analysis, selected_services)
         estimated_credits = _estimate_order_credits(ai_analysis, selected_services, len(prepared_rows), sum(row[2] for row in prepared_rows))
 

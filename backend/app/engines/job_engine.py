@@ -3490,8 +3490,19 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
     or translation provider.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    services = list(order.get("services") or [])
+    translation_data = dict(order.get("translation") or {})
+    translation_enabled = "translation" in services and translation_data.get("enabled", True) is not False and translation_data.get("language_mode") != "none"
+    if not translation_enabled:
+        services = [service for service in services if service != "translation"]
+        translation_data = {
+            "enabled": False, "source_language": "auto", "target_language": "",
+            "targets": [], "language_mode": "none", "bilingual_layout": "none",
+        }
+        order = copy.deepcopy(order)
+        order["services"] = services
+        order["translation"] = translation_data
     plan = build_plan(order)
-    services = order.get("services") or []
     ocr = ocr_capability()
     translation = translation_capability()
     blockers: list[str] = []
@@ -3557,8 +3568,6 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
         _update(progress_callback, 25, "configuration", blockers[0])
         return {"state": "waiting_configuration", "progress": 25, "current_step": "configuration", "plan": plan, "blockers": blockers, "manifest_path": str(manifest_path), "outputs": []}
 
-    translation_data = order.get("translation") or {}
-
     def make_client() -> TranslationClient | None:
         if "translation" not in services:
             return None
@@ -3572,6 +3581,7 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
             custom_target=translation_data.get("custom_target_language", ""),
         )
         client.bilingual_layout = translation_data.get("bilingual_layout") or (conversion_data.get("options") or {}).get("bilingual_layout")
+        client.layout_profile = translation_data.get("layout_profile") or (conversion_data.get("options") or {}).get("layout_profile") or "auto"
         client.output_options = conversion_data.get("options") if isinstance(conversion_data.get("options"), dict) else {}
         return client
 
@@ -3800,11 +3810,23 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
     first value.  This wrapper makes the API contract real while retaining the
     well-tested single-target engine below it.
     """
-    translation = order.get("translation") or {}
-    services = order.get("services") or []
+    translation = dict(order.get("translation") or {})
+    services = list(order.get("services") or [])
+    enabled = "translation" in services and translation.get("enabled", True) is not False and translation.get("language_mode") != "none"
+    if not enabled:
+        clean_order = copy.deepcopy(order)
+        clean_order["services"] = [service for service in services if service != "translation"]
+        clean_order["translation"] = {
+            "enabled": False, "source_language": "auto", "target_language": "",
+            "targets": [], "language_mode": "none", "bilingual_layout": "none",
+        }
+        return _run_local_job_single_target(clean_order, source_paths, output_dir, progress_callback)
     raw_targets = translation.get("targets") if isinstance(translation.get("targets"), list) else []
     targets = list(dict.fromkeys(str(item).strip() for item in raw_targets if str(item).strip()))
-    if "translation" not in services or len(targets) <= 1:
+    mode = str(translation.get("language_mode") or ("multiple" if len(targets) > 1 else "single")).strip().lower()
+    if mode != "multiple":
+        targets = targets[:1]
+    if len(targets) <= 1:
         if targets:
             order = copy.deepcopy(order)
             order.setdefault("translation", {})["target_language"] = {"zh-en": "en", "zh-vi": "vi"}.get(targets[0], targets[0])

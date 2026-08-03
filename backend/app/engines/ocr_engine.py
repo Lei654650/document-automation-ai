@@ -4,7 +4,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from PIL import Image, ImageEnhance, ImageOps
 
@@ -38,7 +38,14 @@ def capability() -> OcrCapability:
     executable = _find_tesseract()
     if executable and pytesseract is not None:
         pytesseract.pytesseract.tesseract_cmd = executable
-        return OcrCapability(True, "tesseract", executable)
+        try:
+            languages = sorted(pytesseract.get_languages(config=""))
+        except Exception:
+            languages = []
+        detail = executable
+        if languages:
+            detail += " · language packs: " + ", ".join(languages)
+        return OcrCapability(True, "tesseract", detail)
     if not executable:
         return OcrCapability(False, "none", "Tesseract OCR is not installed or is not available in PATH.")
     return OcrCapability(False, "none", "The pytesseract Python package is not installed.")
@@ -56,26 +63,32 @@ def _prepare_image(image: Image.Image) -> Image.Image:
     return gray
 
 
-def _language_candidates(preferred: str = "auto") -> Iterable[str]:
-    value = (preferred or "auto").lower()
+def _language_candidates(preferred: str | Sequence[str] = "auto") -> Iterable[str]:
     mapping = {
-        "zh": "chi_sim+eng",
-        "zh_cn": "chi_sim+eng",
-        "zh_tw": "chi_tra+eng",
-        "vi": "vie+eng",
-        "en": "eng",
-        "ja": "jpn+eng",
-        "ko": "kor+eng",
+        "zh": "chi_sim", "zh_cn": "chi_sim", "zh-cn": "chi_sim",
+        "zh_tw": "chi_tra", "zh-tw": "chi_tra",
+        "vi": "vie", "en": "eng", "ja": "jpn", "ko": "kor",
     }
-    chosen = mapping.get(value)
-    if chosen:
-        yield chosen
-    # Broad multilingual fallback, then English-only fallback.
-    yield "eng+vie+chi_sim"
-    yield "eng"
+    values = preferred if isinstance(preferred, (list, tuple, set)) else [preferred]
+    requested: list[str] = []
+    for item in values:
+        code = str(item or "auto").strip().lower()
+        mapped = mapping.get(code)
+        if mapped and mapped not in requested:
+            requested.append(mapped)
+    candidates: list[str] = []
+    if requested:
+        ordered = [*requested]
+        if "eng" not in ordered:
+            ordered.append("eng")
+        candidates.append("+".join(ordered))
+    # Broad fallback supports the platform's core Chinese/Vietnamese/English
+    # document mix, including both simplified and traditional Chinese.
+    candidates.extend(["chi_sim+chi_tra+vie+eng", "vie+eng", "chi_sim+chi_tra+eng", "eng"])
+    yield from dict.fromkeys(candidates)
 
 
-def extract_text_from_image(path: str | Path, preferred_language: str = "auto") -> str:
+def extract_text_from_image(path: str | Path, preferred_language: str | Sequence[str] = "auto") -> str:
     cap = capability()
     if not cap.available:
         raise RuntimeError(cap.message)

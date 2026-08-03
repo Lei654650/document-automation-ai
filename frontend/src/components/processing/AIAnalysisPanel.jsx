@@ -19,21 +19,33 @@ import {
 } from 'lucide-react';
 
 const OUTPUT_LABELS = {
-  original: 'Original',
+  original: '保留原格式',
   docx: 'Word',
   xlsx: 'Excel',
   pptx: 'PowerPoint',
   pdf: 'PDF',
   csv: 'CSV',
-  images: 'Images',
+  md: 'Markdown',
+  html: 'HTML',
+  txt: 'TXT',
+  json: 'JSON',
+  xml: 'XML',
+  images: '图片',
 };
 
 const SERVICE_LABELS = {
-  ocr: ['OCR 与图片识别', 'OCR & image recognition'],
-  translation: ['文档翻译（待用户确认）', 'Document translation (confirm required)'],
+  ocr: ['OCR 与图片文字识别', 'OCR & image text recognition'],
+  image_recognition: ['图片识别', 'Image recognition'],
+  translation: ['文档翻译（由用户确认）', 'Document translation (user confirmation)'],
   conversion: ['格式转换', 'Format conversion'],
+  pdf_rebuild: ['PDF 重建', 'PDF reconstruction'],
   data_cleanup: ['智能整理与校对', 'Smart cleanup & proofing'],
-  enterprise_analysis: ['企业数据分析', 'Enterprise analysis'],
+  proofreading: ['AI 校对', 'AI proofreading'],
+  table_recovery: ['表格恢复', 'Table recovery'],
+  scan_enhancement: ['扫描增强', 'Scan enhancement'],
+  layout_recovery: ['版式恢复', 'Layout recovery'],
+  document_organization: ['文档整理', 'Document organization'],
+  enterprise_analysis: ['企业级文档分析', 'Enterprise document analysis'],
 };
 
 function formatBytes(bytes) {
@@ -73,7 +85,7 @@ export default function AIAnalysisPanel({
           <span><Sparkles /></span>
           <div>
             <b>{isZh ? 'AI 正在分析真实文件' : 'AI is analyzing the actual files'}</b>
-            <small>{isZh ? '正在读取文件结构、语言、行业、图片、表格和 OCR 需求；此时不会创建任务。' : 'Reading structure, language, industry, images, tables and OCR needs. No task is created yet.'}</small>
+            <small>{isZh ? '正在读取页面、语言、扫描件、图片、表格与敏感信息；此时不会创建任务。' : 'Reading pages, languages, scans, images, tables and sensitive content. No task is created yet.'}</small>
           </div>
         </header>
         <div className="ai-analysis-skeleton-v44"><i /><i /><i /><i /></div>
@@ -107,13 +119,17 @@ export default function AIAnalysisPanel({
           <span><BrainCircuit /></span>
           <div>
             <b>{isZh ? '上传后自动生成 AI 分析报告' : 'AI Analysis Report is generated after upload'}</b>
-            <small>{isZh ? 'AI 先理解文档，再推荐处理能力、输出格式和布局。' : 'AI understands the documents before recommending capabilities, formats and layout.'}</small>
+            <small>{isZh ? 'AI 先理解文档，再推荐 OCR、处理能力、输出格式与布局。' : 'AI understands the documents before recommending OCR, capabilities, formats and layout.'}</small>
           </div>
         </header>
       </section>
     );
   }
 
+  const uploadedCount = Number(analysis.uploaded_file_count || fileCount || 0);
+  const actualCount = Number(analysis.expanded_file_count || analysis.actual_file_count || analysis.file_count || fileCount || 0);
+  const scannedPages = Number(recommendation.scanned_page_count ?? analysis.scanned_page_count ?? 0);
+  const textPages = Number(recommendation.text_page_count ?? analysis.text_page_count ?? 0);
   const pageCount = displayCount(analysis.total_pages, analysis.page_count_complete !== false);
   const imageCount = displayCount(analysis.total_images, analysis.image_count_complete !== false);
   const tableCount = displayCount(analysis.total_tables, analysis.table_count_complete !== false);
@@ -122,14 +138,16 @@ export default function AIAnalysisPanel({
     : (isZh ? '无需 OCR' : 'OCR not required');
   const quality = Number(recommendation.quality_score || 0);
   const facts = [
-    [isZh ? '文件数量' : 'Files', analysis.file_count || fileCount, Files],
+    [isZh ? '上传文件' : 'Uploaded', uploadedCount, Files],
+    [isZh ? '实际处理' : 'Actual documents', actualCount, Files],
     [isZh ? '文件大小' : 'File size', formatBytes(analysis.total_size_bytes), HardDrive],
-    [isZh ? '页数 / 幻灯片' : 'Pages / slides', pageCount, FileText],
+    [isZh ? '总页数 / 幻灯片' : 'Pages / slides', pageCount, FileText],
+    [isZh ? '扫描页 / 文本页' : 'Scan / text pages', `${scannedPages} / ${textPages}`, ScanText],
     [isZh ? '图片数量' : 'Images', imageCount, ImageIcon],
     [isZh ? '表格数量' : 'Tables', tableCount, Table2],
     [isZh ? 'OCR 判断' : 'OCR decision', ocrText, ScanText],
-    [isZh ? '文档语言' : 'Document language', languages.join(' / ') || '—', Languages],
-    [isZh ? '行业识别' : 'Industry', recommendation.industry || analysis.industry || (isZh ? '通用' : 'General'), BrainCircuit],
+    [isZh ? '文档语言' : 'Document languages', languages.join(' / ') || '—', Languages],
+    [isZh ? '文档类别' : 'Category', recommendation.category || analysis.document_category || '—', BrainCircuit],
     [isZh ? '复杂度' : 'Complexity', recommendation.complexity || analysis.complexity || '—', Gauge],
     [isZh ? '预计质量' : 'Quality target', quality ? `${quality}%` : '—', ShieldCheck],
     [isZh ? '预计耗时' : 'Estimated time', recommendation.estimated_seconds ? `≈ ${recommendation.estimated_seconds}s` : '—', Clock3],
@@ -139,6 +157,12 @@ export default function AIAnalysisPanel({
   const inputGroups = recommendation.input_groups || [];
   const outputGroups = recommendation.output_groups || [];
   const reasons = recommendation.reason_details?.length ? recommendation.reason_details : [recommendation.reason].filter(Boolean);
+  const sensitiveCategories = recommendation.sensitive_categories || analysis.sensitive_categories || [];
+  const translationStatus = recommendation.translation_available === false
+    ? (isZh ? '平台翻译服务暂不可用' : 'Platform translation is temporarily unavailable')
+    : recommendation.primary_provider
+      ? `${recommendation.primary_provider}${recommendation.backup_provider ? ` → ${recommendation.backup_provider}` : ''}`
+      : (isZh ? '平台自动路由' : 'Platform auto routing');
 
   return (
     <section className={`ai-analysis-panel-v44 is-ready ${applied ? 'is-applied' : ''}`} aria-live="polite">
@@ -147,7 +171,7 @@ export default function AIAnalysisPanel({
         <div>
           <small>AI ANALYSIS REPORT</small>
           <b>{applied ? (isZh ? '推荐方案已应用，下一步请确认' : 'Recommendation applied — confirm the plan') : (isZh ? '真实文件分析完成' : 'Actual file analysis complete')}</b>
-          <p>{isZh ? '分析结果来自已上传文件。是否翻译和目标语言必须由您确认，不会自动假定。' : 'Results come from the uploaded files. Translation and target languages require your confirmation.'}</p>
+          <p>{isZh ? '分析结果来自已上传文件。是否翻译、目标语言和最终输出必须由您确认。' : 'Results come from the uploaded files. Translation, target languages and final output require your confirmation.'}</p>
         </div>
         <em>{confidence}% {isZh ? '可信度' : 'confidence'}</em>
       </header>
@@ -159,6 +183,27 @@ export default function AIAnalysisPanel({
           <span key={label}><Icon /><small>{label}</small><b title={String(value)}>{value}</b></span>
         ))}
       </div>
+
+      {(uploadedCount !== actualCount || Number(analysis.archive_file_count || 0) > 0) && (
+        <div className="analysis-count-explanation-v45">
+          <Files />
+          <span>
+            <b>{isZh ? `上传 ${uploadedCount} 个文件，解压后实际处理 ${actualCount} 个文档` : `${uploadedCount} uploads expand to ${actualCount} documents`}</b>
+            <small>{isZh ? '压缩包只作为上传容器，Credits、耗时和任务进度均按实际文档计算。' : 'Archives are upload containers only. Credits, time and progress use the actual document count.'}</small>
+          </span>
+        </div>
+      )}
+
+      {sensitiveCategories.length > 0 && (
+        <div className="analysis-sensitive-v45">
+          <ShieldCheck />
+          <span>
+            <b>{isZh ? '检测到敏感客户资料' : 'Sensitive customer content detected'}</b>
+            <small>{sensitiveCategories.join(' · ')}</small>
+            <p>{recommendation.privacy_notice || (isZh ? '处理日志不得显示证件号码和原文内容，请按平台数据保留策略管理文件。' : 'Logs must not expose identifiers or source content. Apply the platform retention policy.')}</p>
+          </span>
+        </div>
+      )}
 
       <div className="analysis-format-matrix-v44">
         <section>
@@ -173,12 +218,12 @@ export default function AIAnalysisPanel({
           </div>
         </section>
         <section>
-          <header><b>{isZh ? '兼容输出' : 'Compatible outputs'}</b><small>{isZh ? '根据输入动态生成' : 'Generated dynamically from inputs'}</small></header>
+          <header><b>{isZh ? '可靠输出' : 'Reliable outputs'}</b><small>{isZh ? '仅显示与输入兼容的格式' : 'Only formats compatible with the input'}</small></header>
           <div>
             {(outputGroups.length ? outputGroups : [{ category: isZh ? '输出' : 'Output', formats: recommendation.compatible_outputs || [] }]).map(group => (
               <span key={`${group.category}-${(group.formats || []).join('-')}`}>
                 <small>{group.category}</small>
-                <b>{(group.formats || []).map(format => OUTPUT_LABELS[format] || format).join(' · ') || '—'}</b>
+                <b>{(group.formats || []).map(format => isZh ? OUTPUT_LABELS[format] || format : format.toUpperCase()).join(' · ') || '—'}</b>
               </span>
             ))}
           </div>
@@ -191,11 +236,12 @@ export default function AIAnalysisPanel({
           {reasons.map(reason => <p key={reason}><Check />{reason}</p>)}
         </section>
         <section>
-          <b>{isZh ? '可用能力' : 'Available capabilities'}</b>
+          <b>{isZh ? '建议处理能力' : 'Suggested capabilities'}</b>
           <div>{services.length
             ? services.map(service => <i key={service}><Check />{SERVICE_LABELS[service]?.[isZh ? 0 : 1] || service}</i>)
             : '—'}
           </div>
+          <p className="analysis-provider-route-v45"><BrainCircuit />{isZh ? 'AI 路由：' : 'AI route: '}{translationStatus}</p>
         </section>
       </div>
 

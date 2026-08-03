@@ -30,6 +30,7 @@ elif os.name == "nt" and os.getenv("LOCALAPPDATA"):
 else:
     PERSISTENT_ROOT = BASE_DIR
 SETTINGS_PATH = PERSISTENT_ROOT / "data" / "ai_settings.json"
+ROUTING_PATH = PERSISTENT_ROOT / "data" / "ai_routing.json"
 _SETTINGS_LOCK = Lock()
 _CACHE_LOCK = Lock()
 _PROVIDER_LIMIT = BoundedSemaphore(max(1, min(8, int(os.getenv("TRANSLATION_GLOBAL_CONCURRENCY", "6")))))
@@ -234,48 +235,101 @@ def _env_settings() -> dict[str, Any]:
     }
 
 
+
+def _profile_configured(profiles: dict[str, dict[str, str]], provider: str) -> bool:
+    profile = profiles.get(provider) or {}
+    return bool(profile.get("api_key") and profile.get("model") and profile.get("base_url"))
+
+
+def _load_routing(profiles: dict[str, dict[str, str]], selected_provider: str) -> dict[str, Any]:
+    configured = [provider for provider in PROVIDER_DEFAULTS if _profile_configured(profiles, provider)]
+    value: dict[str, Any] = {}
+    try:
+        if ROUTING_PATH.exists():
+            candidate = json.loads(ROUTING_PATH.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                value = candidate
+    except (OSError, json.JSONDecodeError):
+        value = {}
+    primary = str(value.get("primary_provider") or selected_provider or "").strip().lower()
+    if primary not in configured:
+        primary = selected_provider if selected_provider in configured else (configured[0] if configured else "none")
+    backup = str(value.get("backup_provider") or "").strip().lower()
+    if backup not in configured or backup == primary:
+        backup = next((provider for provider in configured if provider != primary), "")
+    return {
+        "primary_provider": primary,
+        "backup_provider": backup,
+        "auto_failover": bool(value.get("auto_failover", True)),
+        "stage_providers": value.get("stage_providers") if isinstance(value.get("stage_providers"), dict) else {"translation": primary},
+        "configured_providers": configured,
+    }
+
 def load_settings(include_secret: bool = True) -> dict[str, Any]:
-    settings = _env_settings()
+    env = _env_settings()
+    settings: dict[str, Any] = {
+        "provider": env.get("provider", "none"),
+        "profiles": env.get("profiles") or _empty_profiles(),
+        "timeout_seconds": env.get("timeout_seconds", 35),
+        "max_retries": env.get("max_retries", 0),
+    }
+    stored: dict[str, Any] = {}
     if SETTINGS_PATH.exists():
         try:
-            stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-            if isinstance(stored, dict):
-                settings.update({k: v for k, v in stored.items() if k in DEFAULTS})
-                # migrate the older single-provider settings format
-                legacy_provider = str(stored.get("provider", "none")).lower()
-                if "profiles" not in stored and legacy_provider in PROVIDER_DEFAULTS:
-                    settings["profiles"][legacy_provider] = {
-                        "api_key": str(stored.get("api_key") or ""),
-                        "model": str(stored.get("model") or PROVIDER_DEFAULTS[legacy_provider]["model"]),
-                        "base_url": str(stored.get("base_url") or PROVIDER_DEFAULTS[legacy_provider]["base_url"]),
-                    }
+            candidate = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                stored = candidate
         except (OSError, json.JSONDecodeError):
-            pass
-    provider = str(settings.get("provider", "none")).strip().lower()
-    settings["provider"] = provider
+            stored = {}
+
+    # Merge profiles field by field. A blank/stale JSON profile must never erase
+    # a valid Railway/Render environment key used by background workers.
     profiles = _empty_profiles()
-    for pid, profile in (settings.get("profiles") or {}).items():
-        if pid in profiles and isinstance(profile, dict):
-            profiles[pid].update({k: str(v or "") for k, v in profile.items() if k in {"api_key", "model", "base_url"}})
-            profiles[pid]["model"] = profiles[pid]["model"] or PROVIDER_DEFAULTS[pid]["model"]
-            profiles[pid]["base_url"] = (profiles[pid]["base_url"] or PROVIDER_DEFAULTS[pid]["base_url"]).rstrip("/")
-            profiles[pid]["model"] = _normalize_provider_model(pid, profiles[pid]["model"], profiles[pid]["base_url"])
-    settings["profiles"] = profiles
-    settings["timeout_seconds"] = max(10, min(120, int(settings.get("timeout_seconds") or 35)))
-    settings["max_retries"] = max(0, min(1, int(settings.get("max_retries") or 0)))
-    active = profiles.get(provider, {"api_key": "", "model": "", "base_url": ""})
+    env_profiles = env.get("profiles") or {}
+    stored_profiles = stored.get("profiles") if isinstance(stored.get("profiles"), dict) else {}
+    legacy_provider = str(stored.get("provider") or "none").strip().lower()
+    if not stored_profiles and legacy_provider in PROVIDER_DEFAULTS:
+        stored_profiles = {
+            legacy_provider: {
+                "api_key": str(stored.get("api_key") or ""),
+                "model": str(stored.get("model") or ""),
+                "base_url": str(stored.get("base_url") or ""),
+            }
+        }
+    for provider_id in PROVIDER_DEFAULTS:
+        env_profile = env_profiles.get(provider_id) if isinstance(env_profiles.get(provider_id), dict) else {}
+        stored_profile = stored_profiles.get(provider_id) if isinstance(stored_profiles.get(provider_id), dict) else {}
+        profiles[provider_id] = {
+            "api_key": str(stored_profile.get("api_key") or env_profile.get("api_key") or "").strip(),
+            "model": str(stored_profile.get("model") or env_profile.get("model") or PROVIDER_DEFAULTS[provider_id]["model"]).strip(),
+            "base_url": str(stored_profile.get("base_url") or env_profile.get("base_url") or PROVIDER_DEFAULTS[provider_id]["base_url"]).strip().rstrip("/"),
+        }
+        profiles[provider_id]["model"] = _normalize_provider_model(provider_id, profiles[provider_id]["model"], profiles[provider_id]["base_url"])
+
+    selected = legacy_provider if legacy_provider in PROVIDER_DEFAULTS else str(env.get("provider") or "none").strip().lower()
+    routing = _load_routing(profiles, selected)
+    effective = routing["primary_provider"]
+    settings.update({
+        "provider": effective,
+        "selected_provider": selected,
+        "profiles": profiles,
+        "routing": routing,
+        "timeout_seconds": max(10, min(120, int(stored.get("timeout_seconds", env.get("timeout_seconds", 35)) or 35))),
+        "max_retries": max(0, min(2, int(stored.get("max_retries", env.get("max_retries", 0)) or 0))),
+    })
+    active = profiles.get(effective, {"api_key": "", "model": "", "base_url": ""})
     settings.update(active)
     if not include_secret:
         public_profiles = {}
-        for pid, profile in profiles.items():
+        for provider_id, profile in profiles.items():
             key = profile.get("api_key", "")
-            public_profiles[pid] = {
+            public_profiles[provider_id] = {
                 "model": profile.get("model", ""),
                 "base_url": profile.get("base_url", ""),
                 "configured": bool(key),
             }
         settings["profiles"] = public_profiles
-        settings["api_key_configured"] = public_profiles.get(provider, {}).get("configured", False)
+        settings["api_key_configured"] = public_profiles.get(effective, {}).get("configured", False)
         settings.pop("api_key", None)
     return settings
 
@@ -312,19 +366,23 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 def capability() -> TranslationCapability:
     settings = load_settings(include_secret=True)
     provider = settings["provider"]
-    configured = provider in PROVIDER_DEFAULTS and bool(settings["api_key"] and settings["base_url"] and settings["model"])
+    configured = provider in PROVIDER_DEFAULTS and _profile_configured(settings.get("profiles") or {}, provider)
+    routing = settings.get("routing") or {}
+    backup = routing.get("backup_provider") or ""
     if configured:
         message = f"{provider.title()} AI translation is ready."
-    elif provider in PROVIDER_DEFAULTS:
-        message = f"{provider.title()} API key is missing. Configure it in AI translation settings."
+        if backup:
+            message += f" Automatic fallback: {backup.title()}."
+    elif (routing.get("configured_providers") or []):
+        message = "A configured AI provider is available but routing could not select it."
     else:
-        message = "Choose and configure an AI translation provider."
+        message = "Platform AI translation service is not configured."
     return TranslationCapability(
         provider=provider,
         configured=configured,
-        mode="api" if provider in PROVIDER_DEFAULTS else "disabled",
-        model=settings["model"],
-        base_url=settings["base_url"],
+        mode="api" if configured else "disabled",
+        model=settings.get("model", ""),
+        base_url=settings.get("base_url", ""),
         message=message,
     )
 
@@ -343,6 +401,7 @@ def public_settings() -> dict[str, Any]:
         }
         for provider_id, values in PROVIDER_DEFAULTS.items()
     ]
+    result["routing"] = result.get("routing") or {}
     return result
 
 
@@ -779,6 +838,16 @@ def _memory_put_many(source: str, target: str, rows: dict[str, str], provider: s
 class TranslationClient:
     def __init__(self, source_language: str = "auto", target_language: str = "en", custom_source: str = "", custom_target: str = "") -> None:
         self.settings = load_settings(include_secret=True)
+        routing = self.settings.get("routing") or {}
+        configured = routing.get("configured_providers") or []
+        primary = routing.get("primary_provider") or self.settings.get("provider")
+        backup = routing.get("backup_provider") or ""
+        self.provider_chain = [provider for provider in [primary, backup] if provider in configured]
+        if not self.provider_chain:
+            self.provider_chain = list(configured)
+        self.auto_failover = bool(routing.get("auto_failover", True))
+        self.failover_events: list[dict[str, str]] = []
+        self.provider_usage: dict[str, dict[str, Any]] = {}
         self.source_language_code = str(source_language or "auto").strip().lower()
         self.target_language_code = str(target_language or "en").strip().lower()
         self.source_language = custom_source.strip() or LANGUAGE_NAMES.get(self.source_language_code, source_language)
@@ -792,7 +861,7 @@ class TranslationClient:
         self.output_tokens = 0
         self.elapsed_ms = 0
         cap = capability()
-        if not cap.configured:
+        if not cap.configured or not self.provider_chain:
             raise RuntimeError(cap.message)
 
     def translate(self, text: str) -> str:
@@ -1158,7 +1227,29 @@ class TranslationClient:
             return self._request_unlocked(text, batch_mode=batch_mode)
 
     def _request_unlocked(self, text: str, batch_mode: bool = False) -> str:
-        provider = self.settings["provider"]
+        last_error: Exception | None = None
+        chain = self.provider_chain if self.auto_failover else self.provider_chain[:1]
+        for index, provider in enumerate(chain):
+            try:
+                return self._request_provider(text, batch_mode=batch_mode, provider=provider)
+            except Exception as exc:
+                last_error = exc
+                if index + 1 < len(chain):
+                    next_provider = chain[index + 1]
+                    self.failover_events.append({"from": provider, "to": next_provider, "reason": str(exc)[:300]})
+                    LOGGER.warning("Translation provider failover: %s -> %s: %s", provider, next_provider, exc)
+        raise last_error or RuntimeError("AI translation request failed.")
+
+    def _request_provider(self, text: str, batch_mode: bool = False, provider: str = "") -> str:
+        profiles = self.settings.get("profiles") or {}
+        profile = profiles.get(provider) or {}
+        if not _profile_configured(profiles, provider):
+            raise RuntimeError(f"{provider.title()} is not configured.")
+        request_settings = {
+            **self.settings,
+            **profile,
+            "provider": provider,
+        }
         provider_meta = PROVIDER_DEFAULTS[provider]
         protocol = provider_meta["protocol"]
         system = (
@@ -1169,22 +1260,22 @@ class TranslationClient:
             + ("Follow the user's JSON-array output contract exactly." if batch_mode else "Return only the translated text, with no explanation.")
         )
         if protocol == "openai":
-            endpoint = f"{self.settings['base_url']}/chat/completions"
+            endpoint = f"{request_settings['base_url']}/chat/completions"
             payload = {
-                "model": self.settings["model"],
+                "model": request_settings["model"],
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
                 "temperature": 0.1,
             }
-            headers = {"Authorization": f"Bearer {self.settings['api_key']}"}
+            headers = {"Authorization": f"Bearer {request_settings['api_key']}"}
         elif protocol == "azure":
-            endpoint = f"{self.settings['base_url']}/openai/deployments/{self.settings['model']}/chat/completions?api-version=2024-10-21"
+            endpoint = f"{request_settings['base_url']}/openai/deployments/{request_settings['model']}/chat/completions?api-version=2024-10-21"
             payload = {
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
                 "temperature": 0.1,
             }
-            headers = {"api-key": self.settings["api_key"]}
+            headers = {"api-key": request_settings["api_key"]}
         elif protocol == "gemini":
-            endpoint = f"{self.settings['base_url']}/models/{self.settings['model']}:generateContent?key={self.settings['api_key']}"
+            endpoint = f"{request_settings['base_url']}/models/{request_settings['model']}:generateContent?key={request_settings['api_key']}"
             payload = {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": text}]}],
@@ -1192,15 +1283,15 @@ class TranslationClient:
             }
             headers = {}
         else:
-            endpoint = f"{self.settings['base_url']}/messages"
+            endpoint = f"{request_settings['base_url']}/messages"
             payload = {
-                "model": self.settings["model"], "max_tokens": 4096, "temperature": 0.1,
+                "model": request_settings["model"], "max_tokens": 4096, "temperature": 0.1,
                 "system": system, "messages": [{"role": "user", "content": text}],
             }
-            headers = {"x-api-key": self.settings["api_key"], "anthropic-version": "2023-06-01"}
+            headers = {"x-api-key": request_settings["api_key"], "anthropic-version": "2023-06-01"}
         headers.update({"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "DocumentAutomationAI/40.0.0"})
-        selected_model = _normalize_provider_model(provider, self.settings.get("model", ""), self.settings.get("base_url", ""))
-        self.settings["model"] = selected_model
+        selected_model = _normalize_provider_model(provider, request_settings.get("model", ""), request_settings.get("base_url", ""))
+        request_settings["model"] = selected_model
         model_fallback_used = False
         last_error: Exception | None = None
         for attempt in range(self.settings["max_retries"] + 1):
@@ -1210,7 +1301,7 @@ class TranslationClient:
             started = time.perf_counter()
             try:
                 request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-                with urllib.request.urlopen(request, timeout=self.settings["timeout_seconds"]) as response:
+                with urllib.request.urlopen(request, timeout=request_settings["timeout_seconds"]) as response:
                     result = json.loads(response.read().decode("utf-8"))
                 if protocol in {"openai", "azure"}:
                     content = result["choices"][0]["message"]["content"]
@@ -1230,11 +1321,19 @@ class TranslationClient:
                 translated = str(content).strip()
                 if not translated:
                     raise RuntimeError("The AI provider returned an empty translation.")
+                elapsed = round((time.perf_counter() - started) * 1000)
                 with self._stats_lock:
                     self.request_count += 1
                     self.input_tokens += input_tokens
                     self.output_tokens += output_tokens
-                    self.elapsed_ms += round((time.perf_counter() - started) * 1000)
+                    self.elapsed_ms += elapsed
+                    usage = self.provider_usage.setdefault(provider, {"provider": provider, "model": request_settings["model"], "request_count": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0})
+                    usage["model"] = request_settings["model"]
+                    usage["request_count"] += 1
+                    usage["input_tokens"] += input_tokens
+                    usage["output_tokens"] += output_tokens
+                    usage["elapsed_ms"] += elapsed
+                    self.settings.update({"provider": provider, "api_key": request_settings["api_key"], "model": request_settings["model"], "base_url": request_settings["base_url"]})
                 return translated
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:1200]
@@ -1245,27 +1344,37 @@ class TranslationClient:
                     fallback = preferred or next((name for name in supported if name in _DEEPSEEK_V4_MODELS), None)
                     if fallback and fallback != selected_model:
                         selected_model = fallback
-                        self.settings["model"] = fallback
+                        request_settings["model"] = fallback
                         model_fallback_used = True
                         continue
                 if exc.code not in {408, 409, 429, 500, 502, 503, 504}:
                     break
             except (urllib.error.URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
                 last_error = RuntimeError(f"{provider} translation request failed: {exc}")
-            if attempt < self.settings["max_retries"]:
+            if attempt < request_settings["max_retries"]:
                 time.sleep(min(1.0, 0.5 * (attempt + 1)))
         raise last_error or RuntimeError("AI translation request failed.")
 
     def usage_summary(self) -> dict[str, Any]:
-        provider = self.settings["provider"]
-        meta = PROVIDER_DEFAULTS[provider]
-        estimated_cost = (
-            self.input_tokens / 1_000_000 * meta["input_cost_per_million"]
-            + self.output_tokens / 1_000_000 * meta["output_cost_per_million"]
-        )
+        provider_rows = []
+        estimated_cost = 0.0
+        for provider, usage in self.provider_usage.items():
+            meta = PROVIDER_DEFAULTS[provider]
+            cost = (
+                usage["input_tokens"] / 1_000_000 * meta["input_cost_per_million"]
+                + usage["output_tokens"] / 1_000_000 * meta["output_cost_per_million"]
+            )
+            provider_rows.append({**usage, "estimated_cost_usd": round(cost, 6)})
+            estimated_cost += cost
+        effective_provider = self.settings.get("provider") or (self.provider_chain[0] if self.provider_chain else "none")
         return {
-            "provider": provider,
-            "model": self.settings["model"],
+            "provider": effective_provider,
+            "model": self.settings.get("model", ""),
+            "providers_used": provider_rows,
+            "provider_chain": self.provider_chain,
+            "failover_count": len(self.failover_events),
+            "failover_events": self.failover_events,
+            "fallback_used": bool(self.failover_events),
             "request_count": self.request_count,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
