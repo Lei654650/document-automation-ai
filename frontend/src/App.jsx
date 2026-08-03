@@ -9,6 +9,7 @@ import DefaultProcessingTemplates from './components/settings/DefaultProcessingT
 import GeneralSettingsPanel from './components/settings/GeneralSettingsPanel';
 import HoverSelect from './components/ui/HoverSelect';
 import WorkspaceHeaderTools from './components/workspace/WorkspaceHeaderTools';
+import WorkspaceTopbar from './components/workspace/WorkspaceTopbar';
 import './styles/v44-workspace-experience.css';
 import './styles/v45-shared-controls.css';
 // Local Vite development must use the same-origin /api path so requests go
