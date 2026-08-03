@@ -1607,3 +1607,190 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* V45.0.3 output choices, industry layouts and resilient desktop wrapping */
+.layout-options-v44 {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.layout-options-v44 button,
+.layout-profile-grid-v45 > button,
+.output-strategy-v45 > button {
+  min-width: 220px;
+  min-height: 74px;
+  align-content: start;
+  padding: 12px 13px;
+}
+
+.layout-options-v44 button > span,
+.layout-profile-grid-v45 > button > span,
+.output-strategy-v45 > button > span {
+  min-width: 0;
+  width: 100%;
+}
+
+.layout-options-v44 button b,
+.layout-profile-grid-v45 b,
+.output-strategy-v45 b,
+.language-mode-v45 b {
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+}
+
+.layout-options-v44 button small,
+.layout-profile-grid-v45 small,
+.output-strategy-v45 small,
+.language-mode-v45 small {
+  font-size: 10px;
+  line-height: 1.55;
+  word-break: normal !important;
+  overflow-wrap: anywhere;
+}
+
+.layout-profile-grid-v45 {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.custom-layout-controls-v45 {
+  display: grid;
+  grid-template-columns: minmax(200px, 320px) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 11px 12px;
+  border: 1px solid #dfe6f0;
+  border-radius: 11px;
+  background: #f8faff;
+}
+
+.custom-layout-controls-v45 label {
+  display: grid;
+  grid-template-columns: auto minmax(100px, 1fr);
+  align-items: center;
+  gap: 9px;
+  color: #42536d;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.custom-layout-controls-v45 select {
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid #d5deeb;
+  border-radius: 9px;
+  background: #fff;
+  color: #33465f;
+}
+
+.custom-layout-controls-v45 p {
+  margin: 0;
+  color: #708096;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.output-recommendation-v45 {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 11px 0;
+  padding: 11px 12px;
+  border: 1px solid #cbd7ff;
+  border-radius: 11px;
+  background: #f3f6ff;
+}
+
+.output-recommendation-v45 > svg {
+  width: 17px;
+  min-width: 17px;
+  color: #3157d8;
+}
+
+.output-recommendation-v45 > span { display: grid; gap: 3px; }
+.output-recommendation-v45 b { color: #2e4773; font-size: 11px; }
+.output-recommendation-v45 small { color: #65758d; font-size: 10px; line-height: 1.5; }
+
+.output-format-groups-v45 {
+  display: grid !important;
+  gap: 10px !important;
+}
+
+.output-format-groups-v45 > section {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+}
+
+.output-format-groups-v45 > section > small {
+  padding-top: 8px;
+  color: #65758b;
+  font-size: 10px;
+  font-weight: 850;
+  word-break: keep-all;
+}
+
+.output-format-groups-v45 > section > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.output-format-groups-v45 button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #dce4ef;
+  border-radius: 9px;
+  background: #fff;
+  color: #52637b;
+  font-size: 10px;
+  cursor: pointer;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+}
+
+.output-format-groups-v45 button > svg { width: 13px; min-width: 13px; }
+.output-format-groups-v45 button.active { border-color: #9eb2ff; background: #edf2ff; color: #244dcc; font-weight: 850; }
+.output-format-groups-v45 button.conditional { border-style: dashed; }
+.output-format-groups-v45 button em {
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: #e7edff;
+  color: #3157d8;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 850;
+  white-space: nowrap;
+}
+.output-format-groups-v45 button.conditional em { background: #fff4df; color: #9a5a12; }
+
+/* Never allow Chinese labels to collapse one character per line. */
+.translation-decision-v45 button,
+.language-mode-v45 button,
+.layout-options-v44 button,
+.layout-profile-grid-v45 button,
+.output-strategy-v45 button,
+.output-format-groups-v45 button {
+  writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
+}
+
+@media (max-width: 1180px) {
+  .processing-plan-grid-v44 { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .layout-options-v44,
+  .layout-profile-grid-v45 { grid-template-columns: 1fr; }
+  .layout-options-v44 button,
+  .layout-profile-grid-v45 > button,
+  .output-strategy-v45 > button { min-width: 0; }
+  .custom-layout-controls-v45,
+  .output-format-groups-v45 > section { grid-template-columns: 1fr; }
+  .output-format-groups-v45 > section > small { padding-top: 0; }
+}

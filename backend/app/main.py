@@ -47,6 +47,7 @@ from app.services.document_analyzer import analyze_order_files
 from app.services.runtime_service import storage_diagnostics
 from app.engines.quote_engine import suggest_quote
 from app.engines.job_engine import build_plan, run_local_job
+from app.engines.conversion_engine import describe_output_compatibility
 from app.engines.ocr_engine import capability as ocr_capability
 from app.knowledge_center import get_knowledge_center
 from app.engines.translation_engine import (
@@ -2369,7 +2370,14 @@ _LANGUAGE_CODE_ALIASES = {
     "zh-en": "en", "zh-vi": "vi",
 }
 _ALLOWED_TRANSLATION_MODES = {"single", "multiple", "bilingual"}
-_ALLOWED_BILINGUAL_LAYOUTS = {"auto", "vertical", "columns", "inline"}
+_ALLOWED_BILINGUAL_LAYOUTS = {
+    "auto", "vertical", "vertical-source-first", "vertical-target-first",
+    "columns", "columns-source-first", "columns-target-first",
+    "inline", "inline-source-first", "inline-target-first",
+}
+_ALLOWED_LAYOUT_PROFILES = {"auto", "industrial", "spreadsheet", "contracts", "publishing", "presentation", "source-first", "custom"}
+_ALLOWED_CONTENT_ORDERS = {"source-first", "target-first"}
+_ALLOWED_INLINE_STYLES = {"dash", "slash", "parentheses", "pipe"}
 
 
 def _normalize_language_code(value: Any, default: str = "") -> str:
@@ -2411,12 +2419,36 @@ def normalize_translation_request(services: list[str], translation: dict | None)
     if not targets:
         raise HTTPException(status_code=400, detail="请选择至少一个目标语言。")
 
-    layout = str(payload.get("bilingual_layout") or "auto").strip().lower()
+    layout = str(payload.get("bilingual_layout") or "auto").strip().lower().replace("_", "-")
+    vertical_order = str(payload.get("vertical_order") or "source-first").strip().lower()
+    column_order = str(payload.get("column_order") or "source-first").strip().lower()
+    inline_order = str(payload.get("inline_order") or "source-first").strip().lower()
+    if layout == "vertical-source-first":
+        layout, vertical_order = "vertical", "source-first"
+    elif layout == "vertical-target-first":
+        layout, vertical_order = "vertical", "target-first"
+    elif layout == "columns-source-first":
+        layout, column_order = "columns", "source-first"
+    elif layout == "columns-target-first":
+        layout, column_order = "columns", "target-first"
+    elif layout == "inline-source-first":
+        layout, inline_order = "inline", "source-first"
+    elif layout == "inline-target-first":
+        layout, inline_order = "inline", "target-first"
     if mode == "bilingual":
-        if layout not in _ALLOWED_BILINGUAL_LAYOUTS:
+        if layout not in {"auto", "vertical", "columns", "inline"}:
             layout = "auto"
     else:
         layout = "target-only"
+    vertical_order = vertical_order if vertical_order in _ALLOWED_CONTENT_ORDERS else "source-first"
+    column_order = column_order if column_order in _ALLOWED_CONTENT_ORDERS else "source-first"
+    inline_order = inline_order if inline_order in _ALLOWED_CONTENT_ORDERS else "source-first"
+    layout_profile = str(payload.get("layout_profile") or "auto").strip().lower()
+    if layout_profile not in _ALLOWED_LAYOUT_PROFILES:
+        layout_profile = "auto"
+    inline_style = str(payload.get("inline_style") or "dash").strip().lower()
+    if inline_style not in _ALLOWED_INLINE_STYLES:
+        inline_style = "dash"
     return normalized_services, {
         "enabled": True,
         "source_language": _normalize_language_code(payload.get("source_language"), "auto"),
@@ -2424,7 +2456,11 @@ def normalize_translation_request(services: list[str], translation: dict | None)
         "targets": targets,
         "language_mode": mode,
         "bilingual_layout": layout,
-        "layout_profile": str(payload.get("layout_profile") or "auto").strip().lower(),
+        "layout_profile": layout_profile,
+        "vertical_order": vertical_order,
+        "column_order": column_order,
+        "inline_order": inline_order,
+        "inline_style": inline_style,
         "custom_source_language": str(payload.get("custom_source_language") or "").strip(),
         "custom_target_language": str(payload.get("custom_target_language") or "").strip(),
     }
@@ -2605,11 +2641,18 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
         layout_profile = "auto"
         reason = "检测到文档结构，建议保持每个源文件格式，并按需选择翻译或附加交付版本。"
 
-    if profile == "scan" and legacy_analysis_payload:
-        # Keep the historical API contract for old analysis payloads. New real
-        # analysis responses expose the restricted, reliable output matrix.
-        outputs = ["original", "pdf", "docx", "xlsx", "pptx", "md", "html", "txt", "csv", "json", "xml", "images"]
-    outputs = list(dict.fromkeys(outputs))
+    compatibility = describe_output_compatibility(
+        list(formats),
+        scanned=scanned,
+        mixed_inputs=mixed_inputs,
+    )
+    # AI recommendations and selectable compatibility are intentionally
+    # separate. The recommendation stays conservative, while customers may
+    # choose any engine-backed output after seeing fidelity warnings.
+    outputs = list(compatibility["compatible"])
+    recommended_outputs = list(compatibility["recommended"])
+    if primary_output not in outputs:
+        primary_output = "original"
     detected_languages = analysis.get("detected_languages", [])
     language_codes = list(analysis.get("detected_language_codes", []) or [])
     if not language_codes:
@@ -2691,23 +2734,21 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
     configured_providers = [item["id"] for item in provider_settings.get("providers", []) if item.get("configured")]
     routing = provider_settings.get("routing") or {}
 
-    output_warnings = {
-        "docx": "转换为 Word 可能改变扫描表格、印章、图片位置和分页。",
-        "csv": "CSV 仅保留表格数据，不保留样式、公式、图片或合并单元格。",
-        "pdf": "PDF 适合查看和交付，但不适合继续编辑。",
-        "images": "图片输出便于预览，但不可直接编辑文本。",
-    }
+    output_warnings = compatibility["warnings"]
 
     return {
         "profile": profile,
         "recommended_services": services,
         "enhancement_services": enhancement_services,
         "auto_apply_services": auto_apply_services,
+        "recommended_outputs": recommended_outputs,
         "compatible_outputs": outputs,
+        "conditional_outputs": compatibility["conditional"],
         "primary_output": primary_output,
         "additional_outputs": [item for item in outputs if item != primary_output],
         "output_strategy": "preserve",
         "output_warnings": {key: value for key, value in output_warnings.items() if key in outputs},
+        "output_reason": compatibility["reason"],
         "recommended_layout": recommended_layout,
         "layout_profile": layout_profile,
         "layout_reason": reason,
@@ -2734,7 +2775,9 @@ def _build_workspace_recommendation(analysis: dict) -> dict:
         "uploaded_file_count": uploaded_file_count,
         "actual_file_count": file_count,
         "input_groups": input_groups,
-        "output_groups": output_groups,
+        "output_groups": compatibility.get("groups") or output_groups,
+        "available_layouts": ["auto", "vertical-source-first", "vertical-target-first", "columns-source-first", "columns-target-first", "inline-source-first", "inline-target-first"],
+        "layout_profiles": ["auto", "industrial", "spreadsheet", "contracts", "publishing", "presentation", "source-first", "custom"],
         "warnings": warnings[:8],
         "contains_sensitive_data": bool(sensitive_categories),
         "sensitive_categories": sensitive_categories,

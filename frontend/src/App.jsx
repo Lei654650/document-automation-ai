@@ -1031,6 +1031,8 @@ function App() {
     address_mode: 'keep',
     inline_style: 'dash',
     vertical_order: 'source-first',
+    column_order: 'source-first',
+    inline_order: 'source-first',
     pdf_split: {
       enabled: false,
       mode: 'each_page',
@@ -1328,6 +1330,8 @@ function App() {
         address_mode: 'keep',
         inline_style: 'dash',
         vertical_order: 'source-first',
+        column_order: 'source-first',
+        inline_order: 'source-first',
         pdf_split: {
           enabled: false,
           mode: 'each_page',
@@ -1408,7 +1412,11 @@ function App() {
       targets: normalizedTargets,
       language_mode: languageMode,
       bilingual_layout: languageMode === 'bilingual' ? (outputOptions.bilingual_layout || 'auto') : 'target-only',
-      layout_profile: outputOptions.layout_profile || 'auto'
+      layout_profile: outputOptions.layout_profile || 'auto',
+      vertical_order: outputOptions.vertical_order || 'source-first',
+      column_order: outputOptions.column_order || 'source-first',
+      inline_order: outputOptions.inline_order || 'source-first',
+      inline_style: outputOptions.inline_style || 'dash'
     } : {
       enabled: false,
       source_language: 'auto',
@@ -1416,7 +1424,11 @@ function App() {
       targets: [],
       language_mode: 'none',
       bilingual_layout: 'none',
-      layout_profile: 'auto'
+      layout_profile: 'auto',
+      vertical_order: 'source-first',
+      column_order: 'source-first',
+      inline_order: 'source-first',
+      inline_style: 'dash'
     };
     const conversion = {
       formats: [...new Set(resolvedFormats)],
@@ -2501,15 +2513,10 @@ function OrderCenter({
   const hasPdfFiles = workspaceFiles.some(f => /\.pdf$/i.test(f.name || ''));
   const hasPresentationFiles = workspaceFiles.some(f => /\.(pptx?|odp)$/i.test(f.name || ''));
   const hasImageFiles = workspaceFiles.some(f => /\.(png|jpe?g|bmp|tiff?|webp)$/i.test(f.name || ''));
-  const naturalFormats = hasSpreadsheetFiles
-    ? ['original', 'xlsx', 'csv', 'pdf']
-    : hasPresentationFiles
-      ? ['original', 'pptx', 'pdf']
-      : hasPdfFiles
-        ? ['original', 'pdf', 'docx']
-        : hasImageFiles
-          ? ['original', 'pdf', 'docx', 'images']
-          : ['original', 'docx', 'pdf'];
+  const allDocumentFormats = ['original', 'docx', 'xlsx', 'pptx', 'pdf', 'csv', 'md', 'html', 'txt', 'json', 'xml', 'images'];
+  const naturalFormats = hasImageFiles && !hasPdfFiles && !hasSpreadsheetFiles && !hasPresentationFiles
+    ? ['original', 'images', 'pdf', 'docx', 'pptx']
+    : allDocumentFormats;
   const fallbackFormats = Array.from(new Set(naturalFormats));
   const compatibleFormats = (recommendation?.compatible_outputs || fallbackFormats).filter(id => Object.prototype.hasOwnProperty.call(formatKeys, id));
   useEffect(() => {
@@ -2538,6 +2545,9 @@ function OrderCenter({
         profile: recommendation.profile || current.profile,
         language_mode: 'none',
         bilingual_layout: 'none',
+        vertical_order: 'source-first',
+        column_order: 'source-first',
+        inline_order: 'source-first',
         layout_profile: recommendation.layout_profile || 'auto',
         output_strategy: recommendation.output_strategy || 'preserve',
         primary_format: primaryOutput,
@@ -2556,6 +2566,9 @@ function OrderCenter({
         profile: 'auto',
         language_mode: 'none',
         bilingual_layout: 'none',
+        vertical_order: 'source-first',
+        column_order: 'source-first',
+        inline_order: 'source-first',
         layout_profile: 'auto',
         output_strategy: 'preserve',
         primary_format: 'original',

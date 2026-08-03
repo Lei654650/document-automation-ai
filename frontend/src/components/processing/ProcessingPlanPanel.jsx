@@ -68,17 +68,33 @@ const SERVICES = [
 ];
 
 const BILINGUAL_LAYOUTS = [
-  ['auto', 'AI 自动推荐', 'AI recommended', '系统根据文件结构选择上下、左右或同行对照'],
-  ['vertical', '双语上下', 'Stacked bilingual', '原文与译文上下对应'],
-  ['columns', '双语左右', 'Side-by-side bilingual', '原文与译文左右分列'],
-  ['inline', '双语同行', 'Inline bilingual', '原文与译文同行对照'],
+  ['auto', 'AI 自动推荐', 'AI recommended', '根据文件结构与行业自动选择', 'Choose from document structure and industry'],
+  ['vertical-source-first', '原文在上，译文在下', 'Source above target', '适合合同、报告和段落逐段核对', 'Best for contracts, reports and paragraph review'],
+  ['vertical-target-first', '译文在上，原文在下', 'Target above source', '先阅读译文，同时保留原文依据', 'Read the translation first while retaining the source'],
+  ['columns-source-first', '原文在左，译文在右', 'Source left, target right', '适合表格、标签和工业资料逐列核对', 'Best for tables, labels and industrial review'],
+  ['columns-target-first', '译文在左，原文在右', 'Target left, source right', '目标语言优先的左右分列布局', 'Side-by-side layout with the target first'],
+  ['inline-source-first', '原文在前，译文同行', 'Source then target inline', '适合短标签、按钮和简短字段', 'Best for short labels, buttons and fields'],
+  ['inline-target-first', '译文在前，原文同行', 'Target then source inline', '目标语言优先的同行对照', 'Inline comparison with the target first'],
 ];
 
 const LAYOUT_PROFILES = [
-  ['auto', '自动适配', 'Auto adapt', '根据文件类型和版式自动优化', 'Optimize automatically for the document type and layout'],
-  ['industrial', '工业表格与标签', 'Industrial tables & labels', '保护 PLC、型号、变量和技术编号', 'Protect PLC terms, models, variables and technical identifiers'],
-  ['publishing', '报告与出版物', 'Reports & publishing', '优化段落、标题、分页和阅读顺序', 'Optimize paragraphs, headings, pagination and reading order'],
-  ['source-first', '原版式优先', 'Source layout first', '尽量不改变原文件结构和位置', 'Preserve the original structure and positioning wherever possible'],
+  ['auto', '自动适配', 'Auto adapt', '按文件类型与版式自动优化', 'Optimize for the document type and layout'],
+  ['industrial', '工业表格与标签', 'Industrial tables & labels', '保护 PLC、型号、变量和技术编号', 'Protect PLC terms, models, variables and identifiers'],
+  ['spreadsheet', 'Excel 数据表', 'Excel data tables', '优先保持工作表、公式、合并单元格和列关系', 'Preserve sheets, formulas, merged cells and column relationships'],
+  ['contracts', '合同与报告', 'Contracts & reports', '保持段落顺序、条款编号和逐段对应', 'Preserve paragraph order, clause numbering and pairing'],
+  ['publishing', '报告与出版物', 'Reports & publishing', '优化标题、分页、脚注和阅读顺序', 'Optimize headings, pagination, notes and reading order'],
+  ['presentation', '演示文稿', 'Presentations', '保护文本框、图表、图片和幻灯片层级', 'Preserve text boxes, charts, images and slide hierarchy'],
+  ['source-first', '原版式优先', 'Source layout first', '尽量不改变原文件结构和位置', 'Preserve the source structure and positioning'],
+  ['custom', '自定义布局', 'Custom layout', '由客户自行决定排列、顺序和同行分隔符', 'Choose arrangement, order and inline separator'],
+];
+
+const OUTPUT_CATEGORIES = [
+  ['源文件', 'Source', ['original']],
+  ['Office', 'Office', ['docx', 'xlsx', 'pptx']],
+  ['PDF', 'PDF', ['pdf']],
+  ['结构化数据', 'Structured data', ['csv', 'json', 'xml']],
+  ['文本与网页', 'Text & web', ['md', 'html', 'txt']],
+  ['图片', 'Images', ['images']],
 ];
 
 function SwitchRow({ checked, label, onChange }) {
@@ -195,6 +211,56 @@ export default function ProcessingPlanPanel({
   const additionalFormats = Array.isArray(outputOptions.additional_formats)
     ? outputOptions.additional_formats.filter(format => nonOriginalFormats.includes(format))
     : outputFormats.filter(format => format !== 'original' && nonOriginalFormats.includes(format));
+  const recommendedFormats = new Set((recommendation?.recommended_outputs || [recommendation?.primary_output || 'original']).filter(Boolean));
+  const conditionalFormats = new Set(recommendation?.conditional_outputs || []);
+  const formatGroups = OUTPUT_CATEGORIES
+    .map(([zh, en, formats]) => ({ zh, en, formats: formats.filter(format => compatible.includes(format) && format !== 'original') }))
+    .filter(group => group.formats.length > 0);
+  const currentLayout = outputOptions.bilingual_layout || 'auto';
+  const selectedLayoutId = BILINGUAL_LAYOUTS.some(item => item[0] === currentLayout)
+    ? currentLayout
+    : currentLayout === 'vertical'
+      ? `vertical-${outputOptions.vertical_order === 'target-first' ? 'target-first' : 'source-first'}`
+      : currentLayout === 'columns'
+        ? `columns-${outputOptions.column_order === 'target-first' ? 'target-first' : 'source-first'}`
+        : currentLayout === 'inline'
+          ? `inline-${outputOptions.inline_order === 'target-first' ? 'target-first' : 'source-first'}`
+          : 'auto';
+
+  const chooseBilingualLayout = id => {
+    const [mode, order] = id === 'auto' ? ['auto', 'source-first'] : id.split(/-(?=source-first|target-first$)/);
+    setOutputOptions(current => ({
+      ...current,
+      bilingual_layout: id,
+      ...(mode === 'vertical' ? { vertical_order: order } : {}),
+      ...(mode === 'columns' ? { column_order: order } : {}),
+      ...(mode === 'inline' ? { inline_order: order } : {}),
+    }));
+    markChanged();
+  };
+
+  const renderFormatGroups = (selected, onSelect, multiple = false) => (
+    <div className="output-format-groups-v45">
+      {formatGroups.map(group => (
+        <section key={group.zh}>
+          <small>{isZh ? group.zh : group.en}</small>
+          <div>
+            {group.formats.filter(format => format !== 'original').map(format => {
+              const active = multiple ? selected.includes(format) : selected === format;
+              return (
+                <button type="button" key={format} className={`${active ? 'active' : ''} ${conditionalFormats.has(format) ? 'conditional' : ''}`} onClick={() => onSelect(format)}>
+                  {active && <Check />}
+                  <span>{OUTPUT_META[format]?.[isZh ? 'zh' : 'en'] || format}</span>
+                  {recommendedFormats.has(format) && <em>{isZh ? 'AI 推荐' : 'AI pick'}</em>}
+                  {!recommendedFormats.has(format) && conditionalFormats.has(format) && <em>{isZh ? '兼容转换' : 'Compatible'}</em>}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
 
   const setTranslationDecision = enabled => {
     setServices(current => {
@@ -224,8 +290,11 @@ export default function ProcessingPlanPanel({
       ...current,
       language_mode: mode,
       bilingual_layout: mode === 'bilingual'
-        ? (['auto', 'vertical', 'columns', 'inline'].includes(current.bilingual_layout) ? current.bilingual_layout : 'auto')
+        ? (BILINGUAL_LAYOUTS.some(item => item[0] === current.bilingual_layout) || ['vertical', 'columns', 'inline'].includes(current.bilingual_layout) ? current.bilingual_layout : 'auto')
         : 'target-only',
+      vertical_order: current.vertical_order || 'source-first',
+      column_order: current.column_order || 'source-first',
+      inline_order: current.inline_order || 'source-first',
     }));
     if (mode !== 'multiple') setTranslationTargets(current => current.slice(0, 1));
     markChanged();
@@ -432,10 +501,10 @@ export default function ProcessingPlanPanel({
               <>
                 <small className="plan-subheading-v45">{isZh ? '基础双语布局（单选）' : 'Base bilingual layout (single choice)'}</small>
                 <div className="layout-options-v44">
-                  {BILINGUAL_LAYOUTS.map(([id, zh, en, description]) => (
-                    <button type="button" className={(outputOptions.bilingual_layout || 'auto') === id ? 'active' : ''} key={id} onClick={() => setOption('bilingual_layout', id)}>
-                      <i>{(outputOptions.bilingual_layout || 'auto') === id && <Check />}</i>
-                      <span><b>{isZh ? zh : en}</b><small>{isZh ? description : ({ auto: 'Choose from document structure', vertical: 'Source and translation stacked', columns: 'Source and translation in columns', inline: 'Source and translation on the same line' })[id]}</small></span>
+                  {BILINGUAL_LAYOUTS.map(([id, zh, en, zhDescription, enDescription]) => (
+                    <button type="button" className={selectedLayoutId === id ? 'active' : ''} key={id} onClick={() => chooseBilingualLayout(id)}>
+                      <i>{selectedLayoutId === id && <Check />}</i>
+                      <span><b>{isZh ? zh : en}</b><small>{isZh ? zhDescription : enDescription}</small></span>
                     </button>
                   ))}
                 </div>
@@ -443,10 +512,16 @@ export default function ProcessingPlanPanel({
             ) : (
               <div className="layout-target-only-v45"><CircleCheck /><span><b>{isZh ? '仅输出目标语言' : 'Target language only'}</b><small>{isZh ? '单语言或多语言模式不混入原文；多语言会分别生成文件。' : 'Single or multiple mode excludes source text; multiple languages create separate files.'}</small></span></div>
             )}
-            <small className="plan-subheading-v45">{isZh ? '场景优化（单选）' : 'Scenario optimization (single choice)'}</small>
+            <small className="plan-subheading-v45">{isZh ? '行业与场景优化（单选）' : 'Industry and scenario optimization (single choice)'}</small>
             <div className="layout-profile-grid-v45">
               {LAYOUT_PROFILES.map(([id, zh, en, zhDesc, enDesc]) => <button type="button" key={id} className={(outputOptions.layout_profile || recommendation?.layout_profile || 'auto') === id ? 'active' : ''} onClick={() => setOption('layout_profile', id)}>{(outputOptions.layout_profile || recommendation?.layout_profile || 'auto') === id && <Check />}<span><b>{isZh ? zh : en}</b><small>{isZh ? zhDesc : enDesc}</small></span></button>)}
             </div>
+            {(outputOptions.layout_profile || recommendation?.layout_profile) === 'custom' && languageMode === 'bilingual' && (
+              <div className="custom-layout-controls-v45">
+                <label><span>{isZh ? '同行分隔符' : 'Inline separator'}</span><select value={outputOptions.inline_style || 'dash'} onChange={event => setOption('inline_style', event.target.value)}><option value="dash">—</option><option value="slash">/</option><option value="pipe">|</option><option value="parentheses">（ ）</option></select></label>
+                <p>{isZh ? '排列方式与原文/译文顺序由上方基础布局决定；这里可继续定制同行分隔符。' : 'Arrangement and source/target order come from the base layout above; customize the inline separator here.'}</p>
+              </div>
+            )}
             {recommendation?.layout_reason && <p className="layout-reason-v45"><Sparkles />{recommendation.layout_reason}</p>}
           </section>
         )}
@@ -461,10 +536,14 @@ export default function ProcessingPlanPanel({
             ].map(([id, label, desc]) => <button type="button" key={id} className={outputStrategy === id ? 'active' : ''} onClick={() => setOutputStrategy(id)}>{outputStrategy === id && <Check />}<span><b>{label}</b><small>{desc}</small></span></button>)}
           </div>
 
+          <div className="output-recommendation-v45">
+            <Sparkles /><span><b>{isZh ? 'AI 推荐，不限制客户选择' : 'AI recommendation, not a restriction'}</b><small>{recommendation?.output_reason || (isZh ? '优先保持源格式；其他格式均为系统真实支持的兼容输出。' : 'Preserve the source first; all other listed formats are engine-backed compatible outputs.')}</small></span>
+          </div>
+
           {outputStrategy === 'convert' && (
             <div className="output-format-choice-v45">
               <b>{isZh ? '主输出格式（单选）' : 'Primary output format (single choice)'}</b>
-              <div>{nonOriginalFormats.map(format => <button type="button" key={format} className={primaryFormat === format ? 'active' : ''} onClick={() => setPrimaryFormat(format)}>{primaryFormat === format && <Check />}{OUTPUT_META[format]?.[isZh ? 'zh' : 'en'] || format}</button>)}</div>
+              {renderFormatGroups(primaryFormat, setPrimaryFormat)}
               {recommendation?.output_warnings?.[primaryFormat] && <p><AlertTriangle />{recommendation.output_warnings[primaryFormat]}</p>}
             </div>
           )}
@@ -472,7 +551,7 @@ export default function ProcessingPlanPanel({
           {outputStrategy === 'preserve_and_additional' && (
             <div className="output-format-choice-v45">
               <b>{isZh ? '附加输出格式（可多选）' : 'Additional output formats (multiple allowed)'}</b>
-              <div>{nonOriginalFormats.map(format => <button type="button" key={format} className={additionalFormats.includes(format) ? 'active' : ''} onClick={() => toggleAdditionalFormat(format)}>{additionalFormats.includes(format) && <Check />}{OUTPUT_META[format]?.[isZh ? 'zh' : 'en'] || format}</button>)}</div>
+              {renderFormatGroups(additionalFormats, toggleAdditionalFormat, true)}
               {additionalFormats.map(format => recommendation?.output_warnings?.[format] ? <p key={format}><AlertTriangle />{recommendation.output_warnings[format]}</p> : null)}
             </div>
           )}
@@ -517,7 +596,7 @@ export default function ProcessingPlanPanel({
                     placeholder="1-3,4,5-7"
                     maxLength={5000}
                   />
-                  <small>{invalidSplitRange ? (isZh ? '格式不正确。请使用 1-3,4,5-7 这种格式。' : 'Invalid format. Use 1-3,4,5-7.') : (isZh ? '范围会分别应用到每个 PDF；页码不能重复或超出该文件总页数。' : 'Ranges apply to each PDF. Pages cannot repeat or exceed that file’s page count.')}</small>
+                  <small>{invalidSplitRange ? (isZh ? `页码设置无效：请使用 1-3,4,5-7；页码不能重复${smallestPdfPageCount ? `，且不能超过最短 PDF 的 ${smallestPdfPageCount} 页` : ''}。` : `Invalid ranges. Use 1-3,4,5-7; pages cannot repeat${smallestPdfPageCount ? ` or exceed the shortest PDF (${smallestPdfPageCount} pages)` : ''}.`) : (isZh ? `将生成 ${parsedSplitRanges.length || 0} 个拆分文件/每个 PDF；失败时不会保留部分输出，也不会删除原文件。` : `${parsedSplitRanges.length || 0} split file(s) per PDF. Failures keep no partial output and never delete the source.`)}</small>
                 </label>
               )}
               <SwitchRow checked={pdfSplit.keep_original} label={isZh ? '同时保留完整 PDF' : 'Also keep the complete PDF'} onChange={value => updatePdfSplit({ keep_original: value })} />
@@ -536,7 +615,7 @@ export default function ProcessingPlanPanel({
           <span><small>{isZh ? '语言' : 'Languages'}</small><b>{languageText}</b></span>
           <span><small>{isZh ? '输出' : 'Output'}</small><b>{outputText}</b></span>
           {hasPdfInput && <span><small>{isZh ? 'PDF 拆分' : 'PDF splitting'}</small><b>{splitText}</b></span>}
-          {translationEnabled && languageMode === 'bilingual' && <span><small>{isZh ? '双语布局' : 'Bilingual layout'}</small><b>{BILINGUAL_LAYOUTS.find(item => item[0] === (outputOptions.bilingual_layout || 'auto'))?.[isZh ? 1 : 2]}</b></span>}
+          {translationEnabled && languageMode === 'bilingual' && <span><small>{isZh ? '双语布局' : 'Bilingual layout'}</small><b>{BILINGUAL_LAYOUTS.find(item => item[0] === selectedLayoutId)?.[isZh ? 1 : 2]}</b></span>}
         </div>
       </section>
 

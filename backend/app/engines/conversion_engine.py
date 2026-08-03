@@ -27,6 +27,136 @@ _OFFICE_LOCK = threading.Lock()
 _OFFICE_TIMEOUT = max(15, int(os.getenv("OFFICE_CONVERSION_TIMEOUT_SECONDS", "45")))
 ConversionProgress = Callable[[int, str], None]
 
+OUTPUT_FORMAT_ORDER = [
+    "original", "docx", "xlsx", "pptx", "pdf", "csv",
+    "md", "html", "txt", "json", "xml", "images",
+]
+
+_OUTPUT_FORMAT_CATEGORY = {
+    "original": "源文件",
+    "docx": "Office", "xlsx": "Office", "pptx": "Office",
+    "pdf": "PDF",
+    "csv": "结构化数据", "json": "结构化数据", "xml": "结构化数据",
+    "md": "文本与网页", "html": "文本与网页", "txt": "文本与网页",
+    "images": "图片",
+}
+
+_INPUT_FORMAT_ALIASES = {
+    "pdf": "pdf",
+    "word": "word", "doc": "word", "docx": "word",
+    "excel": "excel", "xls": "excel", "xlsx": "excel", "csv": "excel",
+    "powerpoint": "powerpoint", "ppt": "powerpoint", "pptx": "powerpoint",
+    "图片": "image", "image": "image", "images": "image", "png": "image",
+    "jpg": "image", "jpeg": "image", "bmp": "image", "tif": "image",
+    "tiff": "image", "webp": "image",
+    "txt": "text", "md": "text", "markdown": "text", "html": "text",
+    "json": "data", "xml": "data",
+}
+
+# Every item below is backed by convert_outputs.  The matrix deliberately
+# distinguishes selectable compatibility from fidelity: AI recommendations
+# favour high-fidelity outputs, while customers may still choose a lossy but
+# supported export after seeing a warning.
+_OUTPUT_COMPATIBILITY = {
+    "pdf": set(OUTPUT_FORMAT_ORDER),
+    "word": set(OUTPUT_FORMAT_ORDER),
+    "excel": set(OUTPUT_FORMAT_ORDER),
+    "powerpoint": set(OUTPUT_FORMAT_ORDER),
+    "text": {"original", "docx", "xlsx", "pptx", "pdf", "csv", "md", "html", "txt", "json", "xml"},
+    "data": {"original", "docx", "xlsx", "pptx", "pdf", "csv", "md", "html", "txt", "json", "xml"},
+    "image": {"original", "docx", "pptx", "pdf", "images"},
+    "unknown": {"original", "docx", "pdf", "md", "html", "txt", "json", "xml"},
+}
+
+_RECOMMENDED_OUTPUTS = {
+    "pdf": ["original", "pdf", "docx"],
+    "word": ["original", "docx", "pdf"],
+    "excel": ["original", "xlsx", "pdf", "csv"],
+    "powerpoint": ["original", "pptx", "pdf"],
+    "image": ["original", "images", "pdf", "docx"],
+    "text": ["original", "txt", "docx", "pdf"],
+    "data": ["original", "xlsx", "csv", "json"],
+    "unknown": ["original", "pdf", "docx"],
+}
+
+_OUTPUT_WARNINGS = {
+    "docx": "转换为 Word 时，复杂表格、签章、图片位置和分页可能变化。",
+    "xlsx": "转换为 Excel 时，仅适合表格化内容；段落、图片和复杂版式可能被重排。",
+    "pptx": "转换为 PowerPoint 时，内容会重新分页为幻灯片，原始版式可能变化。",
+    "pdf": "PDF 适合查看和正式交付，但不适合继续编辑。",
+    "csv": "CSV 仅保留表格数据，不保留样式、公式、图片、批注或合并单元格。",
+    "md": "Markdown 仅保留可提取文本和基础结构，不保留原始版式。",
+    "html": "HTML 便于网页查看，但字体、分页和 Office 专有样式可能变化。",
+    "txt": "TXT 仅保留纯文本，不保留表格、图片、样式或分页。",
+    "json": "JSON 是结构化数据导出，不保留原始视觉版式。",
+    "xml": "XML 是结构化数据导出，不保留原始视觉版式。",
+    "images": "图片输出适合预览和归档，但文字不可直接编辑。",
+}
+
+def describe_output_compatibility(
+    input_formats: list[str] | set[str] | tuple[str, ...],
+    *,
+    scanned: bool = False,
+    mixed_inputs: bool = False,
+) -> dict[str, Any]:
+    """Return selectable formats, AI recommendations and fidelity warnings.
+
+    Compatibility is the intersection across all input families so a mixed
+    order never advertises an output that would fail for one of its files.
+    "original" always means each source keeps its own native format.
+    """
+    families = {
+        _INPUT_FORMAT_ALIASES.get(str(value or "").strip().lower(), "unknown")
+        for value in (input_formats or [])
+    } or {"unknown"}
+    compatible_sets = [_OUTPUT_COMPATIBILITY.get(family, _OUTPUT_COMPATIBILITY["unknown"]) for family in families]
+    compatible = set.intersection(*compatible_sets) if compatible_sets else set(_OUTPUT_COMPATIBILITY["unknown"] )
+    compatible.add("original")
+    ordered_compatible = [item for item in OUTPUT_FORMAT_ORDER if item in compatible]
+
+    if mixed_inputs or len(families) > 1:
+        recommended = [item for item in ["original", "pdf"] if item in compatible]
+        reason = "检测到混合文件，建议每个文件保持原格式；如需统一交付，可附加生成 PDF。"
+    else:
+        family = next(iter(families))
+        recommended = [item for item in _RECOMMENDED_OUTPUTS.get(family, _RECOMMENDED_OUTPUTS["unknown"]) if item in compatible]
+        reason_map = {
+            "pdf": "优先保留 PDF；可附加 Word 供编辑。",
+            "word": "优先保留 Word；可附加 PDF 用于正式交付。",
+            "excel": "优先保留 Excel 以保护公式、工作表和样式；可附加 PDF 或 CSV。",
+            "powerpoint": "优先保留 PowerPoint；可附加 PDF 便于查看。",
+            "image": "优先保留图片；可附加 PDF 或 Word。",
+            "text": "优先保留文本格式；可附加 Word 或 PDF。",
+            "data": "优先使用 Excel、CSV 或 JSON 等结构化格式。",
+            "unknown": "建议保持源格式，并仅在明确需要时转换。",
+        }
+        reason = reason_map.get(family, reason_map["unknown"])
+
+    if scanned and "images" in compatible and "images" not in recommended:
+        recommended.append("images")
+
+    # Put the conservative AI recommendation first, then expose every other
+    # engine-backed option. This preserves the historical API order while no
+    # longer hiding compatible customer choices.
+    ordered_compatible = list(dict.fromkeys([*recommended, *ordered_compatible]))
+    high_fidelity = set(recommended) | {"original"}
+    conditional = [item for item in ordered_compatible if item not in high_fidelity]
+    warnings = {item: _OUTPUT_WARNINGS[item] for item in ordered_compatible if item in _OUTPUT_WARNINGS}
+    groups: list[dict[str, Any]] = []
+    for category in ["源文件", "Office", "PDF", "结构化数据", "文本与网页", "图片"]:
+        values = [item for item in ordered_compatible if _OUTPUT_FORMAT_CATEGORY.get(item) == category]
+        if values:
+            groups.append({"category": category, "formats": values})
+    return {
+        "recommended": recommended,
+        "compatible": ordered_compatible,
+        "conditional": conditional,
+        "warnings": warnings,
+        "groups": groups,
+        "reason": reason,
+        "families": sorted(families),
+    }
+
 
 def _progress(callback: ConversionProgress | None, progress: int, message: str) -> None:
     if callback is not None:
