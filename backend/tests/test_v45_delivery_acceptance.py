@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import atexit
+import io
 import json
 import os
 import shutil
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pypdf import PdfReader, PdfWriter
 
 
 _RUNTIME = Path(tempfile.mkdtemp(prefix="dai_v45_delivery_acceptance_"))
@@ -349,3 +352,80 @@ def test_real_background_task_queue_and_download_flow(client: TestClient, monkey
     dashboard = client.get("/api/dashboard/recent-orders", headers=headers)
     assert dashboard.status_code == 200
     assert any(item["id"] == created["order_id"] for item in dashboard.json()["orders"])
+
+
+def test_real_pdf_split_order_individual_downloads_and_delivery_zip(client: TestClient, monkeypatch):
+    """Verify the complete customer flow from uploaded PDF to split ZIP delivery."""
+    monkeypatch.setattr(main_module, "REGISTRATION_IP_MAX_ACCOUNTS", 1000)
+    email = f"pdf-split-{time.time_ns()}@example.test"
+    token = _register_and_verify(client, email)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    pdf_bytes = io.BytesIO()
+    writer = PdfWriter()
+    for _ in range(5):
+        writer.add_blank_page(width=210, height=297)
+    writer.write(pdf_bytes)
+    writer.close()
+    split_settings = {
+        "enabled": True,
+        "mode": "ranges",
+        "ranges": "1-2,3,4-5",
+        "keep_original": False,
+    }
+
+    response = client.post(
+        "/api/orders",
+        headers=headers,
+        files={"files": ("customer-contract.pdf", pdf_bytes.getvalue(), "application/pdf")},
+        data={
+            "name": "PDF Split Acceptance",
+            "email": email,
+            "services": json.dumps(["conversion"]),
+            "translation_json": json.dumps({"enabled": False, "language_mode": "none"}),
+            "conversion_json": json.dumps({
+                "formats": ["original"],
+                "output_strategy": "preserve",
+                "primary_format": "original",
+                "pdf_split": split_settings,
+                "options": {"pdf_split": split_settings},
+            }),
+        },
+    )
+    assert response.status_code == 200, response.text
+    created = response.json()
+
+    current = None
+    for _ in range(160):
+        queue_response = client.get("/api/processing-center/jobs", params={"view": "all"}, headers=headers)
+        assert queue_response.status_code == 200, queue_response.text
+        current = next(item for item in queue_response.json()["jobs"] if item["id"] == created["order_id"])
+        if current["job"]["state"] in {"completed", "partial_completed", "failed"}:
+            break
+        time.sleep(0.05)
+
+    assert current is not None
+    assert current["job"]["state"] == "completed", current
+    assert any(step["step_key"] == "split" for step in current["job"]["steps"])
+    outputs = current["output_files"]
+    assert [item["original_name"] for item in outputs] == [
+        "customer-contract_pages_001-002.pdf",
+        "customer-contract_page_003.pdf",
+        "customer-contract_pages_004-005.pdf",
+    ]
+
+    expected_pages = [2, 1, 2]
+    for output, page_count in zip(outputs, expected_pages):
+        download = client.get(output["download_url"], headers=headers)
+        assert download.status_code == 200, download.text
+        assert len(PdfReader(io.BytesIO(download.content)).pages) == page_count
+
+    delivery = client.get(
+        "/api/track/delivery/download-all",
+        params={"order_number": created["order_number"], "email": email},
+    )
+    assert delivery.status_code == 200, delivery.text
+    assert delivery.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(delivery.content)) as archive:
+        assert archive.namelist() == [item["original_name"] for item in outputs]
+        assert all(archive.getinfo(name).file_size > 0 for name in archive.namelist())

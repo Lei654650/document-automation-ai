@@ -24,7 +24,7 @@ from openpyxl.worksheet.pagebreak import Break
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter, column_index_from_string
 from pptx import Presentation
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 
 try:
     import fitz  # PyMuPDF, used to render scanned PDF pages for OCR
@@ -234,6 +234,10 @@ def now() -> str:
 
 def build_plan(order: dict[str, Any]) -> list[dict[str, Any]]:
     services = order.get("services") or []
+    conversion = order.get("conversion") or {}
+    options = conversion.get("options") if isinstance(conversion.get("options"), dict) else {}
+    pdf_split = conversion.get("pdf_split") if isinstance(conversion.get("pdf_split"), dict) else options.get("pdf_split")
+    pdf_split_enabled = bool(isinstance(pdf_split, dict) and pdf_split.get("enabled"))
     steps: list[dict[str, Any]] = [
         {"id": "validate", "label": "Validate source files", "required": True},
         {"id": "analyze", "label": "Analyze document structure", "required": True},
@@ -248,6 +252,8 @@ def build_plan(order: dict[str, Any]) -> list[dict[str, Any]]:
         steps.append({"id": "analysis_report", "label": "企业数据分析", "required": True})
     if "conversion" in services:
         steps.append({"id": "conversion", "label": "Convert selected output formats", "required": True})
+    if pdf_split_enabled:
+        steps.append({"id": "split", "label": "Split PDF into delivery files", "required": True})
     if "layout_preserve" in services:
         steps.append({"id": "layout", "label": "Preserve or recover layout", "required": True})
     steps.append({"id": "quality", "label": "Validate processing quality", "required": True})
@@ -255,6 +261,156 @@ def build_plan(order: dict[str, Any]) -> list[dict[str, Any]]:
     if "manual_review" in services:
         steps.append({"id": "review", "label": "Manual quality review", "required": True})
     return steps
+
+
+def _parse_pdf_page_groups(raw_ranges: str, page_count: int) -> list[list[int]]:
+    """Parse one-based PDF ranges into ordered zero-based page groups.
+
+    Accepted examples: ``1``, ``1-3``, ``1-3,4,7-9``. Overlapping page
+    groups are rejected so the delivery package cannot silently contain
+    duplicate pages.
+    """
+    if page_count <= 0:
+        raise ValueError("PDF 没有可拆分页面")
+    normalized = str(raw_ranges or "").strip()
+    normalized = normalized.replace("，", ",").replace("；", ",").replace(";", ",")
+    normalized = normalized.replace("—", "-").replace("–", "-").replace("－", "-")
+    if not normalized:
+        raise ValueError("请输入页码范围，例如 1-3,4,5-7")
+    tokens = [item.strip() for item in normalized.split(",") if item.strip()]
+    if not tokens:
+        raise ValueError("请输入有效的页码范围")
+    if len(tokens) > 500:
+        raise ValueError("拆分范围过多，请减少到 500 组以内")
+
+    groups: list[list[int]] = []
+    used_pages: set[int] = set()
+    for token in tokens:
+        match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", token)
+        if not match:
+            raise ValueError(f"页码范围格式无效：{token}")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start < 1 or end < 1:
+            raise ValueError("页码必须从 1 开始")
+        if end < start:
+            raise ValueError(f"页码范围必须从小到大：{token}")
+        if end > page_count:
+            raise ValueError(f"页码范围 {token} 超出文件总页数 {page_count}")
+        group = list(range(start - 1, end))
+        duplicated = [page + 1 for page in group if page in used_pages]
+        if duplicated:
+            raise ValueError(f"页码不能重复拆分：{duplicated[0]}")
+        used_pages.update(group)
+        groups.append(group)
+    return groups
+
+
+def _unique_delivery_path(destination: Path) -> Path:
+    if not destination.exists():
+        return destination
+    for index in range(2, 10_000):
+        candidate = destination.with_name(f"{destination.stem}_{index}{destination.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"无法为拆分文件分配唯一文件名：{destination.name}")
+
+
+def _split_pdf_delivery(
+    source_pdf: Path,
+    output_dir: Path,
+    settings: dict[str, Any],
+    delivery_stem: str | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """Create validated, independently downloadable PDF delivery files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    records: list[dict[str, Any]] = []
+    source_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", delivery_stem or source_pdf.stem).strip(" ._") or "document"
+
+    try:
+        # Keep the source handle scoped to the whole split operation. This is
+        # important on Windows, where an implicitly opened PdfReader stream can
+        # otherwise prevent a generated source PDF from being renamed/deleted.
+        with source_pdf.open("rb") as source_handle:
+            reader = PdfReader(source_handle)
+            if reader.is_encrypted:
+                try:
+                    if reader.decrypt("") == 0:
+                        raise RuntimeError("empty password rejected")
+                except Exception as exc:
+                    raise RuntimeError(f"PDF 已加密，无法拆分：{source_pdf.name}") from exc
+            page_count = len(reader.pages)
+            mode = str(settings.get("mode") or "each_page").strip().lower()
+            if mode == "ranges":
+                groups = _parse_pdf_page_groups(str(settings.get("ranges") or ""), page_count)
+            else:
+                mode = "each_page"
+                groups = [[index] for index in range(page_count)]
+
+            width = max(3, len(str(page_count)))
+            metadata = {}
+            try:
+                for key, value in (reader.metadata or {}).items():
+                    if key and value is not None:
+                        metadata[str(key)] = str(value)
+            except Exception:
+                metadata = {}
+
+            for group_index, pages in enumerate(groups, start=1):
+                start_page = pages[0] + 1
+                end_page = pages[-1] + 1
+                if start_page == end_page:
+                    suffix = f"page_{start_page:0{width}d}"
+                    page_label = str(start_page)
+                else:
+                    suffix = f"pages_{start_page:0{width}d}-{end_page:0{width}d}"
+                    page_label = f"{start_page}-{end_page}"
+                destination = _unique_delivery_path(output_dir / f"{source_stem}_{suffix}.pdf")
+                temp_path = destination.with_name(f".{destination.stem}.{os.getpid()}.{time.time_ns()}.tmp.pdf")
+                writer = PdfWriter()
+                try:
+                    for page_index in pages:
+                        writer.add_page(reader.pages[page_index])
+                    if metadata:
+                        writer.add_metadata({**metadata, "/Title": f"{source_stem} pages {page_label}"})
+                    with temp_path.open("wb") as handle:
+                        writer.write(handle)
+                    # Explicitly scope the validation reader so its file handle
+                    # is closed before the atomic rename on Windows.
+                    with temp_path.open("rb") as validation_handle:
+                        validation = PdfReader(validation_handle)
+                        if len(validation.pages) != len(pages):
+                            raise RuntimeError(f"拆分文件页数校验失败：{destination.name}")
+                    _replace_with_retry(temp_path, destination)
+                finally:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                    _unlink_with_retry(temp_path, attempts=2)
+                created.append(destination)
+                records.append({
+                    "format": "pdf",
+                    "status": "completed",
+                    "path": str(destination),
+                    "message": f"PDF 拆分页码 {page_label}",
+                    "split_mode": mode,
+                    "page_start": start_page,
+                    "page_end": end_page,
+                    "page_count": len(pages),
+                    "sequence": group_index,
+                })
+                if progress_callback is not None:
+                    progress_callback(int(group_index * 100 / max(1, len(groups))), f"已生成拆分文件 {group_index}/{len(groups)}（页码 {page_label}）")
+    except Exception:
+        # Do not leave a partially completed delivery package when one range
+        # fails. The job will report the failure and the customer can retry.
+        for path in created:
+            _unlink_with_retry(path, attempts=2)
+        raise
+    return created, records
 
 
 def _resolve_job_outcome(successful_output_count: int, failure_count: int, manual_review: bool = False) -> tuple[str, str]:
@@ -3606,6 +3762,9 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
 
     conversion_data = order.get("conversion") or {}
     output_options = conversion_data.get("options") if isinstance(conversion_data.get("options"), dict) else {}
+    raw_pdf_split = conversion_data.get("pdf_split") if isinstance(conversion_data.get("pdf_split"), dict) else output_options.get("pdf_split")
+    pdf_split_options = dict(raw_pdf_split or {}) if isinstance(raw_pdf_split, dict) else {}
+    pdf_split_enabled = bool(pdf_split_options.get("enabled"))
     if translation_data.get("bilingual_layout") and not output_options.get("bilingual_layout"):
         output_options["bilingual_layout"] = translation_data.get("bilingual_layout")
     requested_formats = conversion_data.get("formats") if "conversion" in services else ["original"]
@@ -3655,12 +3814,17 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
             )
             primary_path = Path(primary["path"])
             source_suffix = Path(original_name).suffix.lower().lstrip('.')
+            source_is_pdf = source_suffix == "pdf"
+            split_this_file = pdf_split_enabled and source_is_pdf
             effective_formats = list(requested_formats)
             if 'original' in effective_formats and source_suffix == 'pdf':
                 effective_formats = [('pdf' if item == 'original' else item) for item in effective_formats]
+            if split_this_file and "pdf" not in effective_formats:
+                effective_formats.append("pdf")
             def conversion_progress(inner_progress: int, message: str) -> None:
-                # Conversion occupies the remaining 32%% of this file's share.
-                normalized = 68 + int(max(0, min(100, inner_progress)) * 0.32)
+                # Reserve the final 12%% for real PDF splitting when selected.
+                conversion_share = 0.20 if split_this_file else 0.32
+                normalized = 68 + int(max(0, min(100, inner_progress)) * conversion_share)
                 report_file_progress(index, original_name, normalized, "conversion", message)
 
             if "conversion" in services:
@@ -3680,12 +3844,61 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                     "format": "original", "status": "completed", "path": str(primary_path),
                     "message": "保持原始文件类型并保留处理后的版式",
                 }]
+            split_metadata: dict[str, dict[str, Any]] = {}
+            if split_this_file:
+                pdf_paths = [Path(item) for item in converted_paths if Path(item).suffix.lower() == ".pdf"]
+                if not pdf_paths:
+                    raise RuntimeError(f"已选择 PDF 拆分，但未生成可拆分的 PDF：{original_name}")
+
+                def split_progress(inner_progress: int, message: str) -> None:
+                    normalized = 88 + int(max(0, min(100, inner_progress)) * 0.12)
+                    report_file_progress(index, original_name, normalized, "split", message)
+
+                report_file_progress(index, original_name, 88, "split", "正在按页码生成独立 PDF 文件")
+                post_processed_paths: list[Path] = []
+                keep_original_pdf = bool(pdf_split_options.get("keep_original"))
+                for converted in converted_paths:
+                    converted_path = Path(converted)
+                    if converted_path.suffix.lower() != ".pdf":
+                        post_processed_paths.append(converted_path)
+                        continue
+                    # Customer-facing split names always derive from the
+                    # uploaded PDF name, never an internal UUID generated by a
+                    # prior translation/conversion stage.
+                    split_delivery_stem = Path(original_name).stem
+                    if keep_original_pdf:
+                        original_full_path = _unique_delivery_path(output_dir / f"{split_delivery_stem}_full.pdf")
+                        old_path = str(converted_path)
+                        if converted_path.resolve() != original_full_path.resolve():
+                            _replace_with_retry(converted_path, original_full_path)
+                            converted_path = original_full_path
+                            for record in conversion_records:
+                                if record.get("path") == old_path:
+                                    record["path"] = str(converted_path)
+                                    record["message"] = "保留完整 PDF，并生成拆分交付文件"
+                    if keep_original_pdf:
+                        post_processed_paths.append(converted_path)
+                    split_paths, split_records = _split_pdf_delivery(
+                        converted_path,
+                        output_dir,
+                        pdf_split_options,
+                        delivery_stem=split_delivery_stem,
+                        progress_callback=split_progress,
+                    )
+                    post_processed_paths.extend(split_paths)
+                    conversion_records.extend(split_records)
+                    split_metadata.update({record["path"]: record for record in split_records})
+                    if not keep_original_pdf and converted_path.parent.resolve() == output_dir.resolve():
+                        _unlink_with_retry(converted_path, attempts=2)
+                converted_paths = post_processed_paths
             file_failures.extend([
                 {"source_name": original_name, **item}
                 for item in conversion_records if item.get("status") == "failed"
             ])
             local_outputs = []
             for converted in converted_paths:
+                converted = Path(converted)
+                split_info = split_metadata.get(str(converted), {})
                 local_outputs.append({
                     **primary,
                     "name": converted.name,
@@ -3693,6 +3906,7 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                     "output_format": converted.suffix.lower().lstrip("."),
                     "source_name": original_name,
                     "conversion_records": conversion_records,
+                    **({"split": split_info} if split_info else {}),
                 })
             if "enterprise_analysis" in services and Path(stored_path).suffix.lower() == ".xlsx":
                 analysis_path = output_dir / f"{Path(original_name).stem}_企业数据分析.xlsx"
@@ -3702,7 +3916,7 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                     "source_name": original_name, "mode": "enterprise_analysis", "translated_items": 0,
                     "analysis_stats": analysis_stats, "conversion_records": []
                 })
-            final_file_step = "conversion" if "conversion" in services else primary_step
+            final_file_step = "split" if split_this_file else ("conversion" if "conversion" in services else primary_step)
             report_file_progress(index, original_name, 100, final_file_step, "文件处理完成")
             LOGGER.info(
                 "Batch worker completed: index=%s file=%s elapsed=%.2fs outputs=%s failures=%s",

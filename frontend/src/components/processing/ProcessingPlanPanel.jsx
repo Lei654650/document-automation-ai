@@ -14,6 +14,7 @@ import {
   Image as ImageIcon,
   Languages,
   ScanText,
+  Scissors,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -129,6 +130,7 @@ export default function ProcessingPlanPanel({
     markChanged();
   };
   const toggleCapability = id => {
+    if (id === 'conversion' && outputOptions.pdf_split?.enabled) return;
     setServices(current => current.includes(id) ? current.filter(item => item !== id) : [...new Set([...current, id])]);
     markChanged();
   };
@@ -146,6 +148,47 @@ export default function ProcessingPlanPanel({
   const translationAvailable = recommendation?.translation_available !== false;
   const languageMode = outputOptions.language_mode || (translationTargets.length > 1 ? 'multiple' : 'single');
   const outputStrategy = outputOptions.output_strategy || recommendation?.output_strategy || 'preserve';
+  const pdfSplit = {
+    enabled: !!outputOptions.pdf_split?.enabled,
+    mode: outputOptions.pdf_split?.mode === 'ranges' ? 'ranges' : 'each_page',
+    ranges: String(outputOptions.pdf_split?.ranges || ''),
+    keep_original: !!outputOptions.pdf_split?.keep_original,
+  };
+  const analysisFiles = Array.isArray(analysis?.files) ? analysis.files : [];
+  const pdfAnalysisFiles = analysisFiles.filter(item => item?.format === 'PDF' || /\.pdf$/i.test(item?.name || ''));
+  const hasPdfInput = pdfAnalysisFiles.length > 0 || files.some(file => /\.pdf$/i.test(file?.name || ''));
+  const pdfFileCount = pdfAnalysisFiles.length || files.filter(file => /\.pdf$/i.test(file?.name || '')).length;
+  const pdfPageCount = pdfAnalysisFiles.reduce((total, item) => total + Number(item?.details?.pages || 0), 0);
+  const knownPdfPageCounts = pdfAnalysisFiles.map(item => Number(item?.details?.pages || 0)).filter(value => value > 0);
+  const smallestPdfPageCount = knownPdfPageCounts.length ? Math.min(...knownPdfPageCounts) : 0;
+  const normalizedRangeText = pdfSplit.ranges
+    .replaceAll('，', ',')
+    .replaceAll('；', ',')
+    .replaceAll(';', ',')
+    .replaceAll('—', '-')
+    .replaceAll('–', '-')
+    .replaceAll('－', '-');
+  const splitRangeTokens = normalizedRangeText.split(',').map(item => item.trim()).filter(Boolean);
+  const parsedSplitRanges = splitRangeTokens.map(token => {
+    const match = token.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) return null;
+    return { start: Number(match[1]), end: Number(match[2] || match[1]) };
+  });
+  const orderedValidSplitRanges = parsedSplitRanges
+    .filter(Boolean)
+    .slice()
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const splitRangesOverlap = orderedValidSplitRanges.some((item, index) => (
+    index > 0 && item.start <= orderedValidSplitRanges[index - 1].end
+  ));
+  const invalidSplitRange = pdfSplit.enabled && pdfSplit.mode === 'ranges' && (
+    normalizedRangeText.length > 5000
+    || splitRangeTokens.length > 500
+    || splitRangeTokens.length === 0
+    || parsedSplitRanges.some(item => !item || item.start < 1 || item.end < item.start)
+    || splitRangesOverlap
+    || (smallestPdfPageCount > 0 && parsedSplitRanges.some(item => item && item.end > smallestPdfPageCount))
+  );
   const compatible = [...new Set((compatibleFormats || []).filter(format => OUTPUT_META[format]))];
   const nonOriginalFormats = compatible.filter(format => format !== 'original');
   const primaryFormat = outputOptions.primary_format || recommendation?.primary_output || nonOriginalFormats[0] || 'pdf';
@@ -200,7 +243,7 @@ export default function ProcessingPlanPanel({
   const setOutputStrategy = strategy => {
     if (strategy === 'preserve') {
       setOutputFormats(['original']);
-      setServices(current => current.filter(item => item !== 'conversion'));
+      setServices(current => pdfSplit.enabled ? [...new Set([...current, 'conversion'])] : current.filter(item => item !== 'conversion'));
       setOutputOptions(current => ({ ...current, output_strategy: 'preserve', primary_format: 'original', additional_formats: [] }));
     } else if (strategy === 'convert') {
       const nextPrimary = primaryFormat === 'original' ? nonOriginalFormats[0] || 'pdf' : primaryFormat;
@@ -231,6 +274,20 @@ export default function ProcessingPlanPanel({
     markChanged();
   };
 
+  const updatePdfSplit = patch => {
+    const next = { ...pdfSplit, ...patch };
+    setOutputOptions(current => ({
+      ...current,
+      ...(next.enabled ? { output_strategy: 'preserve', primary_format: 'original', additional_formats: [] } : {}),
+      pdf_split: next,
+    }));
+    if (next.enabled) {
+      setServices(current => [...new Set([...current, 'conversion'])]);
+      setOutputFormats(['original']);
+    }
+    markChanged();
+  };
+
   const missingTranslationTarget = translationEnabled && translationTargets.length === 0;
   const invalidTargetCount = translationEnabled && languageMode !== 'multiple' && translationTargets.length > 1;
   const missingOutput = outputStrategy === 'convert' && !primaryFormat;
@@ -244,6 +301,7 @@ export default function ProcessingPlanPanel({
     && !invalidTargetCount
     && !missingOutput
     && !missingAdditional
+    && !invalidSplitRange
     && !providerUnavailable;
 
   const selectedCapabilityLabels = useMemo(() => {
@@ -264,6 +322,11 @@ export default function ProcessingPlanPanel({
     : outputStrategy === 'convert'
       ? `${isZh ? '转换为' : 'Convert to'} ${OUTPUT_META[primaryFormat]?.[isZh ? 'zh' : 'en'] || primaryFormat}`
       : `${isZh ? '保留原格式，并附加' : 'Preserve source plus'} ${additionalFormats.map(id => OUTPUT_META[id]?.[isZh ? 'zh' : 'en'] || id).join(' / ')}`;
+  const splitText = !pdfSplit.enabled
+    ? (isZh ? '不拆分' : 'No splitting')
+    : pdfSplit.mode === 'each_page'
+      ? (isZh ? '每页生成一个 PDF' : 'One PDF per page')
+      : `${isZh ? '按范围拆分' : 'Split by ranges'}：${pdfSplit.ranges || '—'}`;
 
   const instructionTemplates = isZh
     ? [
@@ -418,6 +481,52 @@ export default function ProcessingPlanPanel({
         </section>
       </div>
 
+      {hasPdfInput && (
+        <section className={`pdf-split-card-v45 ${pdfSplit.enabled ? 'active' : ''}`}>
+          <header>
+            <span><Scissors /></span>
+            <div>
+              <b>{isZh ? 'PDF 文件拆分' : 'PDF splitting'}</b>
+              <small>{isZh ? `已识别 ${pdfFileCount} 个 PDF${pdfPageCount ? `，共 ${pdfPageCount} 页` : ''}。拆分后会生成多个独立 PDF，并支持统一 ZIP 下载。` : `${pdfFileCount} PDF file(s) detected${pdfPageCount ? `, ${pdfPageCount} pages total` : ''}. Split files remain individually downloadable and available in one ZIP.`}</small>
+            </div>
+            <button type="button" className={pdfSplit.enabled ? 'enabled' : ''} onClick={() => updatePdfSplit({ enabled: !pdfSplit.enabled })}>
+              {pdfSplit.enabled ? <CircleCheck /> : <Scissors />}
+              {pdfSplit.enabled ? (isZh ? '已启用拆分' : 'Splitting enabled') : (isZh ? '启用拆分' : 'Enable splitting')}
+            </button>
+          </header>
+
+          {pdfSplit.enabled && (
+            <div className="pdf-split-settings-v45">
+              <div className="pdf-split-modes-v45">
+                <button type="button" className={pdfSplit.mode === 'each_page' ? 'active' : ''} onClick={() => updatePdfSplit({ mode: 'each_page' })}>
+                  {pdfSplit.mode === 'each_page' && <Check />}
+                  <span><b>{isZh ? '按单页拆分' : 'Split every page'}</b><small>{isZh ? '第 1 页、第 2 页……分别生成独立 PDF' : 'Create a separate PDF for page 1, page 2, and so on'}</small></span>
+                </button>
+                <button type="button" className={pdfSplit.mode === 'ranges' ? 'active' : ''} onClick={() => updatePdfSplit({ mode: 'ranges' })}>
+                  {pdfSplit.mode === 'ranges' && <Check />}
+                  <span><b>{isZh ? '按指定页码范围拆分' : 'Split by page ranges'}</b><small>{isZh ? '每个范围生成一个独立 PDF，并保持输入顺序' : 'Create one PDF per range and preserve the entered order'}</small></span>
+                </button>
+              </div>
+              {pdfSplit.mode === 'ranges' && (
+                <label className={`pdf-split-range-v45 ${invalidSplitRange ? 'invalid' : ''}`}>
+                  <span>{isZh ? '页码范围' : 'Page ranges'}</span>
+                  <input
+                    type="text"
+                    value={pdfSplit.ranges}
+                    onChange={event => updatePdfSplit({ ranges: event.target.value })}
+                    placeholder="1-3,4,5-7"
+                    maxLength={5000}
+                  />
+                  <small>{invalidSplitRange ? (isZh ? '格式不正确。请使用 1-3,4,5-7 这种格式。' : 'Invalid format. Use 1-3,4,5-7.') : (isZh ? '范围会分别应用到每个 PDF；页码不能重复或超出该文件总页数。' : 'Ranges apply to each PDF. Pages cannot repeat or exceed that file’s page count.')}</small>
+                </label>
+              )}
+              <SwitchRow checked={pdfSplit.keep_original} label={isZh ? '同时保留完整 PDF' : 'Also keep the complete PDF'} onChange={value => updatePdfSplit({ keep_original: value })} />
+              <p className="pdf-split-naming-v45"><FileOutput />{isZh ? '文件名示例：合同_page_001.pdf、合同_pages_004-006.pdf；交付页按页码与输入顺序排列。' : 'Naming example: contract_page_001.pdf and contract_pages_004-006.pdf. Delivery order follows page and range order.'}</p>
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="plan-final-summary-v45">
         <header><CircleCheck /><div><b>{isZh ? '本次任务将这样执行' : 'This task will run as follows'}</b><small>{isZh ? '创建前最后确认，使用客户可理解的名称，不显示内部代码。' : 'Final review with customer-facing names rather than internal codes.'}</small></div></header>
         <div>
@@ -426,6 +535,7 @@ export default function ProcessingPlanPanel({
           <span><small>{isZh ? '处理能力' : 'Capabilities'}</small><b>{selectedCapabilityLabels.join(' + ') || (isZh ? '标准处理' : 'Standard processing')}</b></span>
           <span><small>{isZh ? '语言' : 'Languages'}</small><b>{languageText}</b></span>
           <span><small>{isZh ? '输出' : 'Output'}</small><b>{outputText}</b></span>
+          {hasPdfInput && <span><small>{isZh ? 'PDF 拆分' : 'PDF splitting'}</small><b>{splitText}</b></span>}
           {translationEnabled && languageMode === 'bilingual' && <span><small>{isZh ? '双语布局' : 'Bilingual layout'}</small><b>{BILINGUAL_LAYOUTS.find(item => item[0] === (outputOptions.bilingual_layout || 'auto'))?.[isZh ? 1 : 2]}</b></span>}
         </div>
       </section>

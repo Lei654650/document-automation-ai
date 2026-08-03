@@ -1030,7 +1030,13 @@ function App() {
     columns_style: 'address-with-text',
     address_mode: 'keep',
     inline_style: 'dash',
-    vertical_order: 'source-first'
+    vertical_order: 'source-first',
+    pdf_split: {
+      enabled: false,
+      mode: 'each_page',
+      ranges: '',
+      keep_original: false
+    }
   });
   const [form, setForm] = useState({
     name: '',
@@ -1321,7 +1327,13 @@ function App() {
         columns_style: 'address-with-text',
         address_mode: 'keep',
         inline_style: 'dash',
-        vertical_order: 'source-first'
+        vertical_order: 'source-first',
+        pdf_split: {
+          enabled: false,
+          mode: 'each_page',
+          ranges: '',
+          keep_original: false
+        }
       });
       return;
     }
@@ -1375,6 +1387,15 @@ function App() {
     const outputStrategy = outputOptions.output_strategy || 'preserve';
     const primaryFormat = outputOptions.primary_format || outputFormats.find(format => format !== 'original') || 'original';
     const additionalFormats = Array.isArray(outputOptions.additional_formats) ? outputOptions.additional_formats : outputFormats.filter(format => format !== 'original');
+    const pdfSplit = {
+      enabled: !!outputOptions.pdf_split?.enabled,
+      mode: outputOptions.pdf_split?.mode === 'ranges' ? 'ranges' : 'each_page',
+      ranges: String(outputOptions.pdf_split?.ranges || '').trim(),
+      keep_original: !!outputOptions.pdf_split?.keep_original
+    };
+    if (pdfSplit.enabled && pdfSplit.mode === 'ranges' && !pdfSplit.ranges) {
+      return setError(document.documentElement.lang.startsWith('zh') ? '请输入 PDF 拆分页码范围，例如 1-3,4,5-7。' : 'Enter PDF page ranges, for example 1-3,4,5-7.');
+    }
     const resolvedFormats = outputStrategy === 'convert'
       ? [primaryFormat]
       : outputStrategy === 'preserve_and_additional'
@@ -1402,6 +1423,7 @@ function App() {
       output_strategy: outputStrategy,
       primary_format: outputStrategy === 'convert' ? primaryFormat : 'original',
       additional_formats: outputStrategy === 'preserve_and_additional' ? additionalFormats : [],
+      pdf_split: pdfSplit,
       options: { ...outputOptions, language_mode: translation.language_mode, bilingual_layout: translation.bilingual_layout },
       user_instructions: orderForm.requirements || ''
     };

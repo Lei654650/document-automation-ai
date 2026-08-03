@@ -33,6 +33,33 @@ def test_product_capabilities_expand_to_executable_services_and_formats() -> Non
     }
 
 
+def test_pdf_split_request_is_normalized_and_forces_real_conversion() -> None:
+    services, conversion = normalize_processing_request(
+        [],
+        {
+            "formats": ["docx"],
+            "output_strategy": "convert",
+            "primary_format": "docx",
+            "pdf_split": {
+                "enabled": True,
+                "mode": "ranges",
+                "ranges": "1-2,3,4-5",
+                "keep_original": False,
+            },
+        },
+    )
+
+    assert "conversion" in services
+    assert "pdf" in conversion["formats"]
+    assert conversion["pdf_split"] == {
+        "enabled": True,
+        "mode": "ranges",
+        "ranges": "1-2,3,4-5",
+        "keep_original": False,
+    }
+    assert conversion["options"]["pdf_split"] == conversion["pdf_split"]
+
+
 def test_all_advertised_output_formats_are_real(tmp_path: Path) -> None:
     source = tmp_path / "sample.txt"
     source.write_text("Document title\nFirst row\nSecond row", encoding="utf-8")

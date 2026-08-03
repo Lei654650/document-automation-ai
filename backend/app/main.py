@@ -2283,6 +2283,28 @@ def normalize_processing_request(services: list[str], conversion: dict | None) -
             requested_formats.extend(item for item in SERVICE_OUTPUT_FORMATS[service] if item not in requested_formats)
 
     payload = dict(conversion or {})
+    options = dict(payload.get("options") or {}) if isinstance(payload.get("options"), dict) else {}
+    raw_pdf_split = payload.get("pdf_split")
+    if not isinstance(raw_pdf_split, dict):
+        raw_pdf_split = options.get("pdf_split") if isinstance(options.get("pdf_split"), dict) else {}
+    split_enabled = bool(raw_pdf_split.get("enabled"))
+    split_mode = str(raw_pdf_split.get("mode") or "each_page").strip().lower()
+    if split_mode not in {"each_page", "ranges"}:
+        split_mode = "each_page"
+    split_ranges = str(raw_pdf_split.get("ranges") or raw_pdf_split.get("page_ranges") or "").strip()
+    if len(split_ranges) > 5000:
+        split_ranges = split_ranges[:5000]
+    pdf_split = {
+        "enabled": split_enabled,
+        "mode": split_mode,
+        "ranges": split_ranges,
+        "keep_original": bool(raw_pdf_split.get("keep_original")),
+    }
+    options["pdf_split"] = pdf_split
+    payload["options"] = options
+    payload["pdf_split"] = pdf_split
+    if split_enabled and "conversion" not in normalized:
+        normalized.append("conversion")
     raw_formats = payload.get("formats") if isinstance(payload.get("formats"), list) else []
     for raw in [*raw_formats, *requested_formats]:
         value = "md" if str(raw).strip().lower() == "markdown" else str(raw).strip().lower()
@@ -2323,6 +2345,8 @@ def normalize_processing_request(services: list[str], conversion: dict | None) -
         formats = ["original", *additional]
 
     if "conversion" in normalized:
+        if split_enabled and "pdf" not in formats and "original" not in formats:
+            formats.append("pdf")
         payload.update({
             "formats": list(dict.fromkeys(formats)),
             "output_strategy": strategy,
