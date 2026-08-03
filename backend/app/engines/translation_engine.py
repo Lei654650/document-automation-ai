@@ -405,8 +405,24 @@ def public_settings() -> dict[str, Any]:
     return result
 
 
+# Normalize common Wingdings / form-control glyphs before translation.
+# Customer PDFs often use private-use code points for checked and unchecked
+# boxes. They are legitimate document content, not encoding corruption.
+_FORM_GLYPH_MAP = str.maketrans({
+    "\uf0a3": "☐",
+    "\uf0a8": "☐",
+    "\uf0fe": "☑",
+    "\uf078": "☒",
+})
+_FORM_GLYPHS = "☐☑☒□■"
+
+
+def _normalize_form_glyphs(text: str) -> str:
+    return str(text or "").translate(_FORM_GLYPH_MAP)
+
+
 def _should_translate(text: str) -> bool:
-    value = text.strip()
+    value = _normalize_form_glyphs(text).strip()
     if not value or len(value) == 1 and not value.isalpha():
         return False
     if value.startswith(("http://", "https://", "mailto:")):
@@ -427,7 +443,8 @@ def _should_translate(text: str) -> bool:
 _PROTECTED_TOKEN_RE = re.compile(
     r"%(?:\([A-Za-z_][A-Za-z0-9_]*\))?[#0 +\-]?(?:\d+|\*)?(?:\.\d+)?[diuoxXfFeEgGcs]"
     r"|\{\{[^{}]+\}\}|\{[^{}]+\}|\$\{[^{}]+\}"
-    r"|\b(?:AX|X|Y|M|D|R|SD|SM|B|W|L|F|V|Z|T|C)\d+(?:\.\d+)?\b",
+    r"|\b(?:AX|X|Y|M|D|R|SD|SM|B|W|L|F|V|Z|T|C)\d+(?:\.\d+)?\b"
+    r"|[☐☑☒□■]",
     re.I,
 )
 
@@ -660,7 +677,7 @@ def _canonicalize_technical_placeholders(text: str) -> str:
     that already start with ``%`` and end in a valid printf conversion type.
     Normal prose, PLC addresses and arithmetic expressions are untouched.
     """
-    value = str(text or "")
+    value = _normalize_form_glyphs(text)
     value = _BROKEN_NAMED_PRINTF_RE.sub(lambda m: f"%({m.group(1)}){m.group(2)}", value)
     value = _BROKEN_SIMPLE_PRINTF_RE.sub(lambda m: f"%{m.group(1)}", value)
     return value
@@ -670,10 +687,30 @@ def _technical_placeholders(text: str) -> list[str]:
     return _PROTECTED_TOKEN_RE.findall(_canonicalize_technical_placeholders(text))
 
 
+def _has_invalid_replacement_glyphs(source: str, translated: str) -> bool:
+    """Detect real encoding damage without rejecting legitimate form boxes.
+
+    U+FFFD is always corruption. Square / checkbox characters are allowed when
+    they already occur in the source. A provider-created run of boxes remains
+    suspicious and is rejected.
+    """
+    source_text = _normalize_form_glyphs(source)
+    value = _normalize_form_glyphs(translated)
+    if "\ufffd" in value:
+        return True
+    source_boxes = sum(source_text.count(ch) for ch in _FORM_GLYPHS)
+    target_boxes = sum(value.count(ch) for ch in _FORM_GLYPHS)
+    if source_boxes:
+        return target_boxes > source_boxes + max(2, source_boxes // 2)
+    if re.search(r"[☐☑☒□■]{3,}", value):
+        return True
+    return target_boxes >= 4 and target_boxes * 40 > max(1, len(value))
+
+
 def _translation_quality_ok(source: str, translated: str, target_code: str = "") -> bool:
     """Reject source echoes, mixed-language pollution and known bad legacy output."""
-    source_text = str(source or "").strip()
-    value = str(translated or "").strip()
+    source_text = _normalize_form_glyphs(source).strip()
+    value = _normalize_form_glyphs(translated).strip()
     if not value or value == source_text:
         return False
     lowered = value.casefold()
@@ -698,6 +735,8 @@ def _repair_and_validate_cached_translation(source: str, translated: str, target
     """Return a safe cached translation or ``None`` when it must be retried."""
     repaired = _canonicalize_technical_placeholders(str(translated or "").strip())
     if not repaired or not _placeholder_sequence_satisfied(source, repaired):
+        return None
+    if _has_invalid_replacement_glyphs(source, repaired):
         return None
     if not _translation_quality_ok(source, repaired, target_code):
         return None
@@ -902,8 +941,7 @@ class TranslationClient:
 
     @staticmethod
     def _validate_translation(translated: str, source: str = "") -> None:
-        invalid = {"\ufffd", "\u25a1", "\u25a0"}
-        if any(ch in translated for ch in invalid):
+        if _has_invalid_replacement_glyphs(source, translated):
             raise RuntimeError("The AI provider returned invalid replacement glyphs. Translation was rejected.")
         if "Cần xác nhận bản dịch" in translated or "待确认翻译" in translated:
             raise RuntimeError("Translation provider returned a pending-review placeholder.")

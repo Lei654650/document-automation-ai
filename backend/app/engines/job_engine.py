@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import html
 import json
 import re
 import shutil
@@ -35,6 +36,7 @@ from .ocr_engine import capability as ocr_capability, extract_text_from_image
 from .translation_engine import (
     TranslationClient,
     _canonicalize_technical_placeholders,
+    _normalize_form_glyphs,
     capability as translation_capability,
 )
 from .conversion_engine import convert_outputs
@@ -335,14 +337,43 @@ def _split_pdf_delivery(
     mode = str(settings.get("mode") or "each_page").strip().lower()
     raw_ranges = str(settings.get("ranges") or "")
 
-    def make_plan(page_count: int) -> tuple[str, list[list[int]], int]:
-        resolved_mode = "ranges" if mode == "ranges" else "each_page"
-        groups = _parse_pdf_page_groups(raw_ranges, page_count) if resolved_mode == "ranges" else [[index] for index in range(page_count)]
-        return resolved_mode, groups, max(3, len(str(page_count)))
+    def logical_page_map(page_count: int) -> list[list[int]]:
+        raw = settings.get("logical_page_groups")
+        if not isinstance(raw, list) or not raw:
+            return [[index] for index in range(page_count)]
+        mapping: list[list[int]] = []
+        used: set[int] = set()
+        for item in raw:
+            if not isinstance(item, list) or not item:
+                raise ValueError("PDF 逻辑页映射无效")
+            pages: list[int] = []
+            for value in item:
+                page_index = int(value)
+                if page_index < 0 or page_index >= page_count:
+                    raise ValueError("PDF 逻辑页映射超出实际页数")
+                if page_index in used:
+                    raise ValueError("PDF 逻辑页映射包含重复页面")
+                used.add(page_index)
+                pages.append(page_index)
+            mapping.append(pages)
+        if used != set(range(page_count)):
+            raise ValueError("PDF 逻辑页映射未覆盖全部实际页面")
+        return mapping
 
-    def names_for(groups: list[list[int]], width: int) -> list[tuple[Path, str, int, int]]:
+    def make_plan(page_count: int) -> tuple[str, list[list[int]], list[list[int]], int]:
+        resolved_mode = "ranges" if mode == "ranges" else "each_page"
+        mapping = logical_page_map(page_count)
+        logical_count = len(mapping)
+        logical_groups = _parse_pdf_page_groups(raw_ranges, logical_count) if resolved_mode == "ranges" else [[index] for index in range(logical_count)]
+        physical_groups = [
+            [physical_page for logical_index in logical_group for physical_page in mapping[logical_index]]
+            for logical_group in logical_groups
+        ]
+        return resolved_mode, physical_groups, logical_groups, max(3, len(str(logical_count)))
+
+    def names_for(logical_groups: list[list[int]], width: int) -> list[tuple[Path, str, int, int]]:
         result: list[tuple[Path, str, int, int]] = []
-        for pages in groups:
+        for pages in logical_groups:
             start_page = pages[0] + 1
             end_page = pages[-1] + 1
             if start_page == end_page:
@@ -354,9 +385,9 @@ def _split_pdf_delivery(
             result.append((_unique_delivery_path(output_dir / f"{source_stem}_{suffix}.pdf"), label, start_page, end_page))
         return result
 
-    def build_records(paths: list[Path], groups: list[list[int]], labels: list[tuple[Path, str, int, int]], resolved_mode: str, engine: str) -> list[dict[str, Any]]:
+    def build_records(paths: list[Path], physical_groups: list[list[int]], logical_groups: list[list[int]], labels: list[tuple[Path, str, int, int]], resolved_mode: str, engine: str) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for index, (path, pages, (_, label, start_page, end_page)) in enumerate(zip(paths, groups, labels), start=1):
+        for index, (path, physical_pages, logical_pages, (_, label, start_page, end_page)) in enumerate(zip(paths, physical_groups, logical_groups, labels), start=1):
             records.append({
                 "format": "pdf",
                 "status": "completed",
@@ -366,7 +397,8 @@ def _split_pdf_delivery(
                 "split_engine": engine,
                 "page_start": start_page,
                 "page_end": end_page,
-                "page_count": len(pages),
+                "page_count": len(logical_pages),
+                "physical_page_count": len(physical_pages),
                 "sequence": index,
             })
         return records
@@ -383,8 +415,8 @@ def _split_pdf_delivery(
                     except Exception as exc:
                         raise RuntimeError(f"PDF 已加密或需要密码，无法拆分：{source_pdf.name}") from exc
                 page_count = len(reader.pages)
-                resolved_mode, groups, width = make_plan(page_count)
-                labels = names_for(groups, width)
+                resolved_mode, groups, logical_groups, width = make_plan(page_count)
+                labels = names_for(logical_groups, width)
                 metadata: dict[str, str] = {}
                 try:
                     for key, value in (reader.metadata or {}).items():
@@ -417,7 +449,7 @@ def _split_pdf_delivery(
                         _unlink_with_retry(temp_path, attempts=2)
                     if progress_callback is not None:
                         progress_callback(int(group_index * 100 / max(1, len(groups))), f"已生成拆分文件 {group_index}/{len(groups)}（页码 {page_label}）")
-            return created, build_records(created, groups, labels, resolved_mode, "pypdf")
+            return created, build_records(created, groups, logical_groups, labels, resolved_mode, "pypdf")
         except Exception:
             for path in created:
                 _unlink_with_retry(path, attempts=2)
@@ -433,8 +465,8 @@ def _split_pdf_delivery(
             if getattr(document, "needs_pass", False):
                 raise RuntimeError(f"PDF 已加密或需要密码，无法拆分：{source_pdf.name}")
             page_count = int(document.page_count)
-            resolved_mode, groups, width = make_plan(page_count)
-            labels = names_for(groups, width)
+            resolved_mode, groups, logical_groups, width = make_plan(page_count)
+            labels = names_for(logical_groups, width)
             metadata = dict(document.metadata or {})
             for group_index, (pages, (destination, page_label, _, _)) in enumerate(zip(groups, labels), start=1):
                 temp_path = destination.with_name(f".{destination.stem}.{os.getpid()}.{time.time_ns()}.tmp.pdf")
@@ -461,7 +493,7 @@ def _split_pdf_delivery(
                     _unlink_with_retry(temp_path, attempts=2)
                 if progress_callback is not None:
                     progress_callback(int(group_index * 100 / max(1, len(groups))), f"已通过兼容引擎生成拆分文件 {group_index}/{len(groups)}（页码 {page_label}）")
-            return created, build_records(created, groups, labels, resolved_mode, "pymupdf")
+            return created, build_records(created, groups, logical_groups, labels, resolved_mode, "pymupdf")
         except Exception:
             for path in created:
                 _unlink_with_retry(path, attempts=2)
@@ -2072,6 +2104,335 @@ def _should_translate_excel_text(text: str) -> bool:
     has_cjk = bool(_CJK_RE.search(value))
     has_latin_language = bool(re.search(r"[A-Za-zÀ-ỹ]{3,}", value))
     return has_cjk or has_latin_language
+
+
+
+def _pdf_native_page_text(page: Any) -> str:
+    """Extract ordered native text blocks from one PDF page."""
+    try:
+        blocks = page.get_text("blocks", sort=True)
+    except TypeError:  # older PyMuPDF
+        blocks = page.get_text("blocks")
+    values: list[str] = []
+    for block in blocks or []:
+        if len(block) < 5:
+            continue
+        value = _normalize_form_glyphs(str(block[4] or "")).strip()
+        if value:
+            values.append(value)
+    return "\n\n".join(values).strip()
+
+
+def _pdf_page_image_coverage(page: Any) -> float:
+    """Return an approximate fraction of page area occupied by raster images."""
+    page_area = max(1.0, float(page.rect.width * page.rect.height))
+    covered = 0.0
+    seen: set[tuple[float, float, float, float]] = set()
+    try:
+        images = page.get_images(full=True)
+    except Exception:
+        return 0.0
+    for image in images:
+        try:
+            rects = page.get_image_rects(image[0])
+        except Exception:
+            rects = []
+        for rect in rects:
+            key = tuple(round(float(value), 2) for value in (rect.x0, rect.y0, rect.x1, rect.y1))
+            if key in seen:
+                continue
+            seen.add(key)
+            clipped = rect & page.rect
+            if not clipped.is_empty:
+                covered += max(0.0, float(clipped.width * clipped.height))
+    return min(1.0, covered / page_area)
+
+
+def _pdf_page_needs_ocr(page: Any, native_text: str) -> bool:
+    compact_length = len(re.sub(r"\s+", "", native_text or ""))
+    if compact_length < 28:
+        return True
+    coverage = _pdf_page_image_coverage(page)
+    return coverage >= 0.68 and compact_length < 180
+
+
+def _translation_chunks(text: str, max_chars: int = 1400) -> list[str]:
+    """Split page text on paragraph / line boundaries for bounded AI calls."""
+    normalized = _normalize_form_glyphs(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+    units = [item.strip() for item in re.split(r"\n\s*\n|(?<=\n)", normalized) if item.strip()]
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        if len(unit) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for start in range(0, len(unit), max_chars):
+                chunks.append(unit[start:start + max_chars])
+            continue
+        candidate = f"{current}\n{unit}".strip() if current else unit
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = unit
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _translate_pdf_page_text(text: str, client: TranslationClient | None) -> tuple[str, int, list[str]]:
+    if client is None or not text.strip():
+        return text.strip(), 0, []
+    translated_parts: list[str] = []
+    translated_count = 0
+    warnings: list[str] = []
+    for chunk_index, chunk in enumerate(_translation_chunks(text), start=1):
+        try:
+            translated_parts.append(str(client.translate(chunk) or chunk).strip())
+            translated_count += 1
+            continue
+        except Exception as chunk_error:
+            # A single malformed line must not discard every other page. Retry at
+            # line granularity and keep the source line only when both attempts
+            # fail; the job will be marked for quality review through warnings.
+            line_results: list[str] = []
+            failed_lines = 0
+            for line in chunk.splitlines():
+                if not line.strip():
+                    line_results.append("")
+                    continue
+                try:
+                    line_results.append(str(client.translate(line) or line).strip())
+                    translated_count += 1
+                except Exception:
+                    line_results.append(line)
+                    failed_lines += 1
+            translated_parts.append("\n".join(line_results).strip())
+            if failed_lines:
+                warnings.append(
+                    f"Translation chunk {chunk_index} retained {failed_lines} source line(s) after provider validation failed: {chunk_error}"
+                )
+    return "\n\n".join(part for part in translated_parts if part).strip(), translated_count, warnings
+
+
+def _paginate_translation_text(text: str) -> list[str]:
+    """Create conservative panel-sized chunks without truncating content."""
+    value = str(text or "").strip()
+    if not value:
+        return [""]
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", value))
+    # Keep companion pages readable. Dense legal / form pages are split into
+    # continuation pages instead of shrinking thousands of characters into one
+    # panel.
+    limit = 1600 if cjk_count > max(20, len(value) // 12) else 2200
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", value) if part.strip()]
+    pages: list[str] = []
+    current = ""
+    for paragraph in paragraphs or [value]:
+        if len(paragraph) > limit:
+            if current:
+                pages.append(current)
+                current = ""
+            for start in range(0, len(paragraph), limit):
+                pages.append(paragraph[start:start + limit])
+            continue
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if current and len(candidate) > limit:
+            pages.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current:
+        pages.append(current)
+    return pages or [""]
+
+
+def _pdf_translation_layout(output_options: dict[str, Any] | None, source_rect: Any) -> tuple[str, bool, bool]:
+    options = output_options or {}
+    layout = str(options.get("bilingual_layout") or "auto").strip().lower()
+    preserve_source = bool(options.get("preserve_layout", True))
+    source_first = not (layout.endswith("target-first") or str(options.get("vertical_order")) == "target-first" or str(options.get("column_order")) == "target-first")
+    if layout.startswith("columns"):
+        orientation = "columns"
+    elif layout.startswith("vertical"):
+        orientation = "vertical"
+    elif layout.startswith("inline"):
+        orientation = "vertical"
+    else:
+        orientation = "columns" if float(source_rect.width) > float(source_rect.height) else "vertical"
+    return orientation, source_first, preserve_source
+
+
+def _insert_pdf_translation_panel(page: Any, rect: Any, text: str, title: str, continuation: bool = False) -> None:
+    """Render multilingual translated text without dropping Vietnamese/CJK glyphs.
+
+    PyMuPDF's legacy ``insert_textbox`` base fonts cannot cover Vietnamese and
+    Chinese in one font. ``insert_htmlbox`` uses the package's multilingual
+    fallback fonts and preserves form symbols such as ☐ / ☑ as well.
+    """
+    margin = max(18.0, min(float(rect.width), float(rect.height)) * 0.035)
+    page.draw_rect(rect, color=(0.75, 0.80, 0.90), fill=(1, 1, 1), width=0.8)
+    inner = fitz.Rect(rect.x0 + margin, rect.y0 + margin, rect.x1 - margin, rect.y1 - margin)
+    heading = html.escape(title + (" · continued" if continuation else ""))
+    body = text.strip() or "No readable text was detected on this page. The original page has been preserved."
+    body_html = html.escape(body).replace("\n", "<br>")
+    markup = (
+        '<div class="docai-panel">'
+        f'<div class="docai-heading">{heading}</div>'
+        f'<div class="docai-body">{body_html}</div>'
+        '</div>'
+    )
+    css = """
+        * { box-sizing: border-box; }
+        .docai-panel { font-family: sans-serif; color: #141923; }
+        .docai-heading { color: #1f3b73; font-size: 11pt; font-weight: 700; margin-bottom: 9pt; }
+        .docai-body { font-size: 7.5pt; line-height: 1.28; white-space: normal; }
+    """
+    spare_height, scale = page.insert_htmlbox(inner, markup, css=css, scale_low=0.52, overlay=True)
+    if spare_height < 0 or scale < 0.52:
+        raise RuntimeError(f"Translated PDF text exceeded the safe panel capacity: {title}")
+
+
+def _translate_pdf_preserving_pages(
+    source: Path,
+    destination: Path,
+    client: TranslationClient | None,
+    callback: ProgressCallback | None,
+    use_ocr: bool,
+    output_options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Translate a mixed PDF page-by-page while preserving every source page.
+
+    Native-text pages use their embedded text. Image/scanned pages are rendered
+    and OCR'd individually. Each original page remains visually intact in a
+    source panel, with translated text in a companion panel; page-level split
+    metadata keeps one customer page together with any continuation page.
+    """
+    if fitz is None:
+        raise RuntimeError("PyMuPDF is required for layout-preserving PDF translation.")
+    source_doc = fitz.open(str(source))
+    if getattr(source_doc, "needs_pass", False):
+        source_doc.close()
+        raise RuntimeError(f"PDF 已加密或需要密码，无法处理：{source.name}")
+    page_records: list[dict[str, Any]] = []
+    ocr_characters = 0
+    ocr_page_count = 0
+    native_page_count = 0
+    warnings: list[str] = []
+    temp_path = destination.with_name(f".{destination.stem}.{os.getpid()}.{time.time_ns()}.tmp.pdf")
+    try:
+        with tempfile.TemporaryDirectory(prefix="docai_pdf_pages_") as temp_dir:
+            for page_index in range(source_doc.page_count):
+                page = source_doc.load_page(page_index)
+                native_text = _pdf_native_page_text(page)
+                text = native_text
+                used_ocr = False
+                if native_text.strip():
+                    native_page_count += 1
+                if use_ocr and _pdf_page_needs_ocr(page, native_text):
+                    try:
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+                        image_path = Path(temp_dir) / f"page_{page_index + 1:04d}.png"
+                        pix.save(str(image_path))
+                        preferred = getattr(client, "source_language_code", "auto") if client else "auto"
+                        ocr_text = extract_text_from_image(image_path, preferred)
+                        if ocr_text.strip():
+                            used_ocr = True
+                            ocr_page_count += 1
+                            ocr_characters += len(ocr_text)
+                            # On mixed pages retain native text and add OCR text
+                            # only when it contributes substantial new content.
+                            if len(re.sub(r"\s+", "", native_text)) < 80:
+                                text = ocr_text
+                            elif ocr_text not in native_text:
+                                text = f"{native_text}\n\n{ocr_text}"
+                    except Exception as exc:
+                        warnings.append(f"Page {page_index + 1} OCR warning: {exc}")
+                    _update(callback, 25 + int((page_index + 1) / max(1, source_doc.page_count) * 20), "ocr", f"OCR page {page_index + 1}/{source_doc.page_count}")
+                page_records.append({"text": _normalize_form_glyphs(text), "used_ocr": used_ocr})
+
+            output_doc = fitz.open()
+            logical_page_groups: list[list[int]] = []
+            translated_items = 0
+            orientation, source_first, preserve_source = _pdf_translation_layout(output_options, source_doc[0].rect if source_doc.page_count else fitz.Rect(0, 0, 595, 842))
+            target_code = getattr(client, "target_language_code", "") if client else ""
+            target_label = target_code or "OCR"
+            for page_index, record in enumerate(page_records):
+                source_page = source_doc.load_page(page_index)
+                translated_text, count, page_warnings = _translate_pdf_page_text(record["text"], client)
+                translated_items += count
+                warnings.extend(f"Page {page_index + 1}: {warning}" for warning in page_warnings)
+                text_pages = _paginate_translation_text(translated_text)
+                physical_pages: list[int] = []
+                source_rect = source_page.rect
+                gap = max(10.0, min(float(source_rect.width), float(source_rect.height)) * 0.02)
+                first_text = text_pages[0]
+                if preserve_source:
+                    if orientation == "columns":
+                        page_width, page_height = source_rect.width * 2 + gap, source_rect.height
+                        left = fitz.Rect(0, 0, source_rect.width, source_rect.height)
+                        right = fitz.Rect(source_rect.width + gap, 0, page_width, page_height)
+                        source_panel, target_panel = (left, right) if source_first else (right, left)
+                    else:
+                        page_width, page_height = source_rect.width, source_rect.height * 2 + gap
+                        top = fitz.Rect(0, 0, source_rect.width, source_rect.height)
+                        bottom = fitz.Rect(0, source_rect.height + gap, page_width, page_height)
+                        source_panel, target_panel = (top, bottom) if source_first else (bottom, top)
+                    output_page = output_doc.new_page(width=page_width, height=page_height)
+                    output_page.show_pdf_page(source_panel, source_doc, page_index, keep_proportion=True)
+                else:
+                    output_page = output_doc.new_page(width=source_rect.width, height=source_rect.height)
+                    target_panel = output_page.rect
+                _insert_pdf_translation_panel(
+                    output_page,
+                    target_panel,
+                    first_text,
+                    f"Page {page_index + 1} · {target_label}",
+                )
+                physical_pages.append(output_page.number)
+                for continuation_index, continuation_text in enumerate(text_pages[1:], start=2):
+                    continuation_page = output_doc.new_page(width=source_rect.width, height=source_rect.height)
+                    _insert_pdf_translation_panel(
+                        continuation_page,
+                        continuation_page.rect,
+                        continuation_text,
+                        f"Page {page_index + 1} · {target_label}",
+                        continuation=True,
+                    )
+                    physical_pages.append(continuation_page.number)
+                logical_page_groups.append(physical_pages)
+                _update(callback, 50 + int((page_index + 1) / max(1, source_doc.page_count) * 30), "translation", f"Translated PDF page {page_index + 1}/{source_doc.page_count}")
+
+            metadata = dict(source_doc.metadata or {})
+            metadata["title"] = f"{source.stem} translated"
+            metadata["producer"] = "Document Automation AI page-preserving PDF pipeline"
+            output_doc.set_metadata(metadata)
+            output_doc.save(str(temp_path), garbage=4, deflate=True, clean=True)
+            output_doc.close()
+        validation = fitz.open(str(temp_path))
+        try:
+            if validation.page_count < source_doc.page_count:
+                raise RuntimeError("Translated PDF page validation failed.")
+        finally:
+            validation.close()
+        _replace_with_retry(temp_path, destination)
+        return {
+            "translated_items": translated_items,
+            "ocr_characters": ocr_characters,
+            "ocr_page_count": ocr_page_count,
+            "native_text_page_count": native_page_count,
+            "source_page_count": source_doc.page_count,
+            "pdf_logical_page_groups": logical_page_groups,
+            "quality_warnings": warnings,
+            "mode": "pdf_page_preserving_translation" if client else "pdf_page_preserving_ocr",
+            "validation": {"pages": sum(len(group) for group in logical_page_groups), "logical_pages": len(logical_page_groups)},
+        }
+    finally:
+        source_doc.close()
+        _unlink_with_retry(temp_path, attempts=2)
 
 
 def _translate_pdf_to_docx(source: Path, destination: Path, client: TranslationClient, callback: ProgressCallback | None) -> int:
@@ -3709,18 +4070,14 @@ def _process_file(original_name: str, stored_path: str, output_dir: Path, client
         destination = output_dir / f"{safe_stem}_{suffix_label}.xlsx"
         count = _translate_xlsx(source, destination, client, callback, output_options)
     elif suffix == ".pdf":
-        destination = output_dir / f"{safe_stem}_{suffix_label}.docx"
-        if use_ocr:
-            # First try native PDF text. If it is effectively empty, render pages and OCR them.
-            reader = PdfReader(source)
-            native_text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
-            if len(native_text) < 20:
-                details = _scanned_pdf_to_docx(source, destination, client, callback)
-                count = int(details.get("translated_items") or details.get("ocr_text_blocks") or 0)
-            else:
-                count = _translate_pdf_to_docx(source, destination, client, callback)
-        else:
-            count = _translate_pdf_to_docx(source, destination, client, callback)
+        # Preserve every customer page and process native/scanned pages
+        # individually. The old PDF -> plain DOCX -> PDF chain discarded scans,
+        # signatures, stamps, tables and page boundaries.
+        destination = output_dir / f"{safe_stem}_{suffix_label}.pdf"
+        details = _translate_pdf_preserving_pages(
+            source, destination, client, callback, use_ocr=use_ocr, output_options=output_options,
+        )
+        count = int(details.get("translated_items") or details.get("ocr_text_blocks") or 0)
     else:
         destination = output_dir / Path(original_name).name
         shutil.copy2(source, destination)
@@ -3912,6 +4269,14 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                 output_options=output_options,
             )
             primary_path = Path(primary["path"])
+            for warning in primary.get("quality_warnings", []) or []:
+                file_failures.append({
+                    "source_name": original_name,
+                    "format": "translation_quality",
+                    "status": "failed",
+                    "step": "translation",
+                    "error": str(warning),
+                })
             source_suffix = Path(original_name).suffix.lower().lstrip('.')
             source_is_pdf = source_suffix == "pdf"
             split_this_file = pdf_split_enabled and source_is_pdf
@@ -3968,10 +4333,14 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                     # prior translation/conversion stage.
                     split_delivery_stem = Path(original_name).stem
                     try:
+                        split_settings = dict(pdf_split_options)
+                        logical_groups = primary.get("pdf_logical_page_groups")
+                        if logical_groups and converted_path.resolve() == primary_path.resolve():
+                            split_settings["logical_page_groups"] = logical_groups
                         split_paths, split_records = _split_pdf_delivery(
                             converted_path,
                             output_dir,
-                            pdf_split_options,
+                            split_settings,
                             delivery_stem=split_delivery_stem,
                             progress_callback=split_progress,
                         )
@@ -4043,7 +4412,8 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                 index, original_name, time.monotonic() - started_at,
             )
             file_failures.append({
-                "source_name": original_name, "format": "processing", "status": "failed", "error": str(exc)
+                "source_name": original_name, "format": "processing", "status": "failed",
+                "step": failure_step, "error": str(exc)
             })
             return index, [], file_failures, (client.usage_summary() if client is not None else None)
 
@@ -4058,7 +4428,8 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
             if usage:
                 usage_rows.append(usage)
             completed_count += 1
-            report_file_progress(index, original_name, 100, "conversion" if "conversion" in services else "translation", f"已完成文件 {completed_count}/{total}")
+            if output:
+                report_file_progress(index, original_name, 100, "conversion" if "conversion" in services else "translation", f"已完成文件 {completed_count}/{total}")
     else:
         manifest["batch"].update({"mode": "parallel", "max_workers": max_workers})
         _update(progress_callback, 32, "conversion" if "conversion" in services else "translation", f"并行批处理已启动：{total} 个文件，{max_workers} 个工作线程")
@@ -4076,7 +4447,8 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                     usage_rows.append(usage)
                 with progress_lock:
                     completed_count += 1
-                report_file_progress(index, original_name, 100, "conversion" if "conversion" in services else "translation", f"已完成文件 {completed_count}/{total}")
+                if output:
+                    report_file_progress(index, original_name, 100, "conversion" if "conversion" in services else "translation", f"已完成文件 {completed_count}/{total}")
 
     outputs = [item for i in range(total) for item in outputs_by_index.get(i, [])]
     aggregate_usage = None
@@ -4104,9 +4476,10 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
         if failure_count == 0
         else f"质量检查完成：{successful_output_count} 个文件可交付，{failure_count} 项失败"
     )
-    _update(progress_callback, 88, "quality", quality_message)
     if successful_output_count > 0:
+        _update(progress_callback, 88, "quality", quality_message)
         _update(progress_callback, 95, "export", f"已准备 {successful_output_count} 个交付文件")
+    failed_step = next((str(item.get("step") or "") for item in failure_rows if item.get("step")), "failed")
 
     manifest["requested_output_formats"] = requested_formats
     manifest["outputs"] = outputs
@@ -4120,7 +4493,7 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     _update(progress_callback, 100, state, completion_message)
     return {
-        "state": state, "progress": 100, "current_step": state, "plan": plan, "blockers": [],
+        "state": state, "progress": 100, "current_step": failed_step if state == "failed" else state, "plan": plan, "blockers": [],
         "manifest_path": str(manifest_path), "outputs": outputs, "translation_usage": aggregate_usage,
         "failures": failure_rows, "partial_success": state == "partial_completed",
         "successful_output_count": successful_output_count,
@@ -4216,8 +4589,9 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     if progress_callback is not None:
         progress_callback(100, state, completion_message)
+    failed_step = next((str(item.get("step") or "") for item in failures if item.get("step")), "failed")
     return {
-        "state": state, "progress": 100, "current_step": state,
+        "state": state, "progress": 100, "current_step": failed_step if state == "failed" else state,
         "plan": build_plan(order), "blockers": [], "manifest_path": str(manifest_path),
         "outputs": outputs, "translation_usage": aggregate_usage, "failures": failures,
         "partial_success": state == "partial_completed", "successful_output_count": len(outputs),

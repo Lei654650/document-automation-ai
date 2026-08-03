@@ -99,10 +99,14 @@ const OUTPUT_CATEGORIES = [
 
 function SwitchRow({ checked, label, onChange }) {
   return (
-    <label className="plan-switch-row-v44">
-      <input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} />
+    <button
+      type="button"
+      className={`plan-switch-row-v44 ${checked ? 'active' : ''}`}
+      aria-pressed={checked}
+      onClick={() => onChange(!checked)}
+    >
       <span><i />{label}</span>
-    </label>
+    </button>
   );
 }
 
@@ -344,13 +348,24 @@ export default function ProcessingPlanPanel({
   };
 
   const updatePdfSplit = patch => {
-    const next = { ...pdfSplit, ...patch };
-    setOutputOptions(current => ({
-      ...current,
-      ...(next.enabled ? { output_strategy: 'preserve', primary_format: 'original', additional_formats: [] } : {}),
-      pdf_split: next,
-    }));
-    if (next.enabled) {
+    const nextEnabled = Object.prototype.hasOwnProperty.call(patch, 'enabled')
+      ? Boolean(patch.enabled)
+      : pdfSplit.enabled;
+    setOutputOptions(current => {
+      const currentSplit = {
+        enabled: !!current.pdf_split?.enabled,
+        mode: current.pdf_split?.mode === 'ranges' ? 'ranges' : 'each_page',
+        ranges: String(current.pdf_split?.ranges || ''),
+        keep_original: !!current.pdf_split?.keep_original,
+      };
+      const next = { ...currentSplit, ...patch, enabled: nextEnabled };
+      return {
+        ...current,
+        ...(next.enabled ? { output_strategy: 'preserve', primary_format: 'original', additional_formats: [] } : {}),
+        pdf_split: next,
+      };
+    });
+    if (nextEnabled) {
       setServices(current => [...new Set([...current, 'conversion'])]);
       setOutputFormats(['original']);
     }
@@ -391,11 +406,12 @@ export default function ProcessingPlanPanel({
     : outputStrategy === 'convert'
       ? `${isZh ? '转换为' : 'Convert to'} ${OUTPUT_META[primaryFormat]?.[isZh ? 'zh' : 'en'] || primaryFormat}`
       : `${isZh ? '保留原格式，并附加' : 'Preserve source plus'} ${additionalFormats.map(id => OUTPUT_META[id]?.[isZh ? 'zh' : 'en'] || id).join(' / ')}`;
+  const splitBaseText = pdfSplit.mode === 'each_page'
+    ? (isZh ? '每页生成一个 PDF' : 'One PDF per page')
+    : `${isZh ? '按范围拆分' : 'Split by ranges'}：${pdfSplit.ranges || '—'}`;
   const splitText = !pdfSplit.enabled
     ? (isZh ? '不拆分' : 'No splitting')
-    : pdfSplit.mode === 'each_page'
-      ? (isZh ? '每页生成一个 PDF' : 'One PDF per page')
-      : `${isZh ? '按范围拆分' : 'Split by ranges'}：${pdfSplit.ranges || '—'}`;
+    : `${splitBaseText}${pdfSplit.keep_original ? (isZh ? '；同时保留完整 PDF' : '; keep complete PDF') : ''}`;
 
   const instructionTemplates = isZh
     ? [

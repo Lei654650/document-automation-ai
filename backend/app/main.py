@@ -3920,7 +3920,36 @@ def _run_processing_worker(job_id: int, order_id: int, order: dict, source_paths
                 db.execute("UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key='quality'", (finished_at, result.get('completion_message','部分文件未通过质量检查'), result.get('completion_message','部分文件未通过质量检查'), job_id))
                 db.execute("UPDATE processing_steps SET status='completed', progress=100, finished_at=?, message=? WHERE job_id=? AND step_key='export'", (finished_at, f"已准备 {result.get('successful_output_count',0)} 个成功文件", job_id))
             elif result["state"] == "failed":
-                db.execute("UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key IN ('quality','export')", (finished_at, result.get('completion_message','处理失败'), result.get('completion_message','处理失败'), job_id))
+                failure_steps = []
+                for failure in result.get("failures", []):
+                    step_key = str(failure.get("step") or "").strip()
+                    if step_key and step_key not in failure_steps:
+                        failure_steps.append(step_key)
+                failed_step = failure_steps[0] if failure_steps else str(result.get("current_step") or "failed")
+                target = db.execute(
+                    "SELECT position FROM processing_steps WHERE job_id=? AND step_key=?",
+                    (job_id, failed_step),
+                ).fetchone()
+                if target is not None:
+                    target_position = int(target["position"])
+                    failure_message = next((
+                        str(item.get("error") or item.get("message") or "")
+                        for item in result.get("failures", [])
+                        if str(item.get("step") or "") == failed_step
+                    ), result.get('completion_message', '处理失败'))
+                    db.execute(
+                        "UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key=?",
+                        (finished_at, failure_message, failure_message, job_id, failed_step),
+                    )
+                    db.execute(
+                        "UPDATE processing_steps SET status='pending', progress=0, started_at='', finished_at='', duration_ms=0, message='因前序步骤失败未执行', error='' WHERE job_id=? AND position>?",
+                        (job_id, target_position),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE processing_steps SET status='failed', progress=100, finished_at=?, message=?, error=? WHERE job_id=? AND step_key IN ('quality','export')",
+                        (finished_at, result.get('completion_message','处理失败'), result.get('completion_message','处理失败'), job_id),
+                    )
                 db.execute("UPDATE processing_steps SET status='pending', progress=0 WHERE job_id=? AND status='running'", (job_id,))
             elif result["state"] == "waiting_configuration":
                 # Preserve completed validation/analysis steps and leave remaining work pending.
