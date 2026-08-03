@@ -2091,41 +2091,73 @@ def _extract_7z(path: Path, destination: Path) -> list[Path]:
     except HTTPException: raise
     except Exception as exc: raise HTTPException(status_code=400, detail="7Z 压缩包已损坏、加密或格式无效。") from exc
 
-def _find_rar_extractor() -> tuple[str, str] | None:
-    """Return (kind, executable) for an available RAR-capable extractor."""
-    candidates: list[tuple[str, str]] = []
+def _classify_rar_extractor(executable: str) -> str | None:
+    """Classify only executables that are known to support RAR extraction."""
+    name = Path(executable).name.lower()
+    if name in {"7z", "7z.exe", "7zz", "7zz.exe"} or name.startswith("7z"):
+        return "7z"
+    if "winrar" in name:
+        return "winrar"
+    if name in {"unrar", "unrar.exe", "rar", "rar.exe"}:
+        return "unrar"
+    if name in {"unar", "unar.exe"}:
+        return "unar"
+    if name in {"bsdtar", "bsdtar.exe"}:
+        return "bsdtar"
+    return None
+
+
+def _find_rar_extractors() -> list[tuple[str, str]]:
+    """Return all verified RAR-capable extractors; never include plain tar."""
+    candidates: list[tuple[str | None, str]] = []
     env_candidates = [
+        os.getenv("DAI_UNRAR_PATH", ""), os.getenv("DAI_UNAR_PATH", ""),
         os.getenv("DAI_7ZIP_PATH", ""), os.getenv("SEVENZIP_PATH", ""),
         os.getenv("DAI_WINRAR_PATH", ""), os.getenv("WINRAR_PATH", ""),
-        os.getenv("DAI_UNRAR_PATH", ""),
     ]
     for value in env_candidates:
         if value:
-            candidates.append(("auto", value))
+            candidates.append((None, value))
     if os.name == "nt":
-        roots = [os.getenv("ProgramFiles", ""), os.getenv("ProgramFiles(x86)", ""), os.getenv("SystemRoot", "")]
+        roots = [os.getenv("ProgramFiles", ""), os.getenv("ProgramFiles(x86)", "")]
         candidates += [
             ("7z", str(Path(roots[0]) / "7-Zip" / "7z.exe")) if roots[0] else ("7z", ""),
             ("7z", str(Path(roots[1]) / "7-Zip" / "7z.exe")) if roots[1] else ("7z", ""),
             ("winrar", str(Path(roots[0]) / "WinRAR" / "WinRAR.exe")) if roots[0] else ("winrar", ""),
             ("winrar", str(Path(roots[1]) / "WinRAR" / "WinRAR.exe")) if roots[1] else ("winrar", ""),
-            ("tar", str(Path(roots[2]) / "System32" / "tar.exe")) if roots[2] else ("tar", ""),
         ]
-    for name, kind in (("7z", "7z"), ("7zz", "7z"), ("unrar", "unrar"), ("rar", "unrar"), ("bsdtar", "tar"), ("tar", "tar")):
+    for name, kind in (
+        ("unrar", "unrar"), ("unar", "unar"),
+        ("7z", "7z"), ("7zz", "7z"),
+        ("rar", "unrar"), ("bsdtar", "bsdtar"),
+    ):
         found = shutil.which(name)
         if found:
             candidates.append((kind, found))
-    for kind, executable in candidates:
+
+    extractors: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for declared_kind, executable in candidates:
         if not executable:
             continue
         resolved = shutil.which(executable) or (executable if Path(executable).exists() else None)
         if not resolved:
             continue
-        lower = Path(resolved).name.lower()
-        if kind == "auto":
-            kind = "7z" if lower.startswith("7z") else "winrar" if "winrar" in lower else "unrar" if "unrar" in lower or lower == "rar.exe" else "tar"
-        return kind, str(resolved)
-    return None
+        resolved_text = str(Path(resolved).resolve())
+        if resolved_text in seen:
+            continue
+        detected_kind = _classify_rar_extractor(resolved_text)
+        kind = declared_kind or detected_kind
+        if detected_kind is None or kind not in {"7z", "winrar", "unrar", "unar", "bsdtar"}:
+            continue
+        seen.add(resolved_text)
+        extractors.append((kind, resolved_text))
+    return extractors
+
+
+def _find_rar_extractor() -> tuple[str, str] | None:
+    extractors = _find_rar_extractors()
+    return extractors[0] if extractors else None
 
 
 def _copy_validated_extraction(staging: Path, destination: Path) -> list[Path]:
@@ -2144,34 +2176,67 @@ def _copy_validated_extraction(staging: Path, destination: Path) -> list[Path]:
     return output
 
 
+def _rar_failure_detail(message: str) -> str:
+    normalized = message.lower()
+    if any(token in normalized for token in ("password", "encrypted", "wrong password")):
+        return "RAR 压缩包已加密，当前版本暂不支持密码压缩包。"
+    if any(token in normalized for token in ("checksum", "crc failed", "unexpected end", "damaged", "corrupt")):
+        return "RAR 压缩包已损坏或内容不完整。"
+    if any(token in normalized for token in ("unsupported", "not supported", "unknown method")):
+        return "当前 RAR 格式或压缩算法不受服务器解压组件支持。"
+    detail = message.strip()[:160]
+    return f"RAR 解压失败。{(' ' + detail) if detail else ''}"
+
+
+def _rar_extract_command(kind: str, executable: str, path: Path, staging: Path) -> list[str]:
+    if kind == "7z":
+        return [executable, "x", "-y", f"-o{staging}", str(path)]
+    if kind == "winrar":
+        return [executable, "x", "-ibck", "-y", str(path), str(staging) + os.sep]
+    if kind == "unrar":
+        return [executable, "x", "-o+", "-y", str(path), str(staging) + os.sep]
+    if kind == "unar":
+        return [executable, "-f", "-D", "-o", str(staging), str(path)]
+    if kind == "bsdtar":
+        return [executable, "-xf", str(path), "-C", str(staging)]
+    raise HTTPException(status_code=500, detail="服务器 RAR 解压组件配置无效，请联系管理员。")
+
+
 def _extract_rar_external(path: Path, destination: Path) -> list[Path]:
-    extractor = _find_rar_extractor()
-    if not extractor:
-        raise HTTPException(status_code=500, detail="RAR 解压组件不可用。请安装 7-Zip 或 WinRAR；Windows 11 用户也可启用系统压缩包支持后重试。")
-    kind, executable = extractor
-    staging = Path(tempfile.mkdtemp(prefix="dai_rar_"))
-    try:
-        if kind == "7z":
-            command = [executable, "x", "-y", f"-o{staging}", str(path)]
-        elif kind == "winrar":
-            command = [executable, "x", "-ibck", "-y", str(path), str(staging) + os.sep]
-        elif kind == "unrar":
-            command = [executable, "x", "-o+", "-y", str(path), str(staging) + os.sep]
-        else:
-            command = [executable, "-xf", str(path), "-C", str(staging)]
-        completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180, creationflags=(0x08000000 if os.name == "nt" else 0))
-        if completed.returncode != 0:
+    extractors = _find_rar_extractors()
+    if not extractors:
+        raise HTTPException(status_code=500, detail="服务器未安装可用的 RAR 解压组件，请联系管理员。")
+
+    failure_messages: list[str] = []
+    for kind, executable in extractors:
+        staging = Path(tempfile.mkdtemp(prefix="dai_rar_"))
+        try:
+            command = _rar_extract_command(kind, executable, path, staging)
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=180,
+                creationflags=(0x08000000 if os.name == "nt" else 0),
+            )
+            if completed.returncode == 0:
+                return _copy_validated_extraction(staging, destination)
             message = (completed.stderr or completed.stdout or "").strip()
-            raise HTTPException(status_code=400, detail=f"RAR 压缩包无法解压，可能已损坏、加密或格式不受当前解压器支持。{(' ' + message[:160]) if message else ''}")
-        return _copy_validated_extraction(staging, destination)
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=408, detail="RAR 解压超时，请检查压缩包大小或是否损坏。") from exc
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+            failure_messages.append(message or f"{kind} exited with code {completed.returncode}")
+        except subprocess.TimeoutExpired:
+            failure_messages.append(f"{kind} extraction timed out")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    combined = " | ".join(message for message in failure_messages if message)
+    if any("timed out" in message.lower() for message in failure_messages):
+        raise HTTPException(status_code=408, detail="RAR 解压超时，请检查压缩包大小或是否损坏。")
+    raise HTTPException(status_code=400, detail=_rar_failure_detail(combined))
 
 
 def _extract_rar(path: Path, destination: Path) -> list[Path]:
-    """Extract RAR with rarfile first, then fall back to Windows/7-Zip/WinRAR tools."""
+    """Extract RAR with rarfile first, then fall back to a verified RAR-capable tool."""
     try:
         import rarfile
         extractor = _find_rar_extractor()
@@ -2182,7 +2247,9 @@ def _extract_rar(path: Path, destination: Path) -> list[Path]:
                 rarfile.SEVENZIP_TOOL = executable
             elif kind == "unrar":
                 rarfile.UNRAR_TOOL = executable
-            elif kind == "bsdtar" or kind == "tar":
+            elif kind == "unar":
+                rarfile.UNAR_TOOL = executable
+            elif kind == "bsdtar":
                 rarfile.BSDTAR_TOOL = executable
         with rarfile.RarFile(path) as archive:
             members = [member for member in archive.infolist() if not member.isdir()]
@@ -2335,7 +2402,7 @@ def _archive_capabilities() -> dict:
         import rarfile  # noqa: F401
         capabilities["rar"] = _find_rar_extractor() is not None
         if not capabilities["rar"]:
-            errors["rar"] = "RAR library is installed but no extractor (7-Zip/WinRAR/bsdtar) was found."
+            errors["rar"] = "RAR library is installed but no verified extractor (UnRAR/unar/7-Zip/WinRAR/bsdtar) was found."
     except Exception as exc:
         errors["rar"] = str(exc)
     return {

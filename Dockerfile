@@ -14,7 +14,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CLOUD_MODE=true \
     APP_DATA_DIR=/data
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 unar libarchive-tools \
+    && command -v unar >/dev/null \
+    && command -v bsdtar >/dev/null \
+    && rm -rf /var/lib/apt/lists/*
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY backend/ ./backend/
