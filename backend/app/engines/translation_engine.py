@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 import sqlite3
 import hashlib
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -38,7 +39,7 @@ TRANSLATION_MEMORY_PATH = PERSISTENT_ROOT / "data" / "translation_memory.db"
 # Cache namespace is intentionally versioned. V36.0 could persist source-echoed or
 # mixed-language output; changing this value makes those rows unreachable without
 # deleting customer data or blocking startup on a migration.
-TRANSLATION_CACHE_NAMESPACE = "v40.0-watchdog-speed-r1"
+TRANSLATION_CACHE_NAMESPACE = "v45.0.5-language-quality-r1"
 # Backward-compatible watchdog setting retained for diagnostics/tests.
 # Sequential V40.5 hotfix uses TRANSLATION_FILE_AI_BUDGET_SECONDS as the actual
 # per-file limit and does not queue futures behind this watchdog.
@@ -713,6 +714,13 @@ def _translation_quality_ok(source: str, translated: str, target_code: str = "")
     value = _normalize_form_glyphs(translated).strip()
     if not value or value == source_text:
         return False
+    source_compact = re.sub(r"\s+", "", source_text).casefold()
+    value_compact = re.sub(r"\s+", "", value).casefold()
+    # Whitespace/punctuation-only provider changes are still untranslated source.
+    if min(len(source_compact), len(value_compact)) >= 18:
+        similarity = SequenceMatcher(None, source_compact, value_compact, autojunk=False).ratio()
+        if similarity >= 0.92:
+            return False
     lowered = value.casefold()
     bad_fragments = (
         "cần xác nhận", "待确认", "translation pending",
@@ -724,6 +732,14 @@ def _translation_quality_ok(source: str, translated: str, target_code: str = "")
     # and punctuation remain valid because they are not CJK characters.
     if target_code in {"vi", "vn"} and re.search(r"[\u3400-\u9fff]", value):
         return False
+    # Normal Vietnamese/English prose translated to Chinese must contain an
+    # actual Chinese signal. Uppercase names and identifiers may stay unchanged.
+    normalized_target = str(target_code or "").strip().lower().replace("_", "-")
+    if normalized_target in {"zh", "zh-cn", "zh-hans", "zh-tw", "zh-hant"}:
+        source_words = re.findall(r"[A-Za-zÀ-ỹ]{3,}", source_text)
+        prose_words = [word for word in source_words if not word.isupper()]
+        if len(prose_words) >= 2 and not re.search(r"[\u3400-\u9fff]", value):
+            return False
     # Reject duplicated leading PLC/HMI identifiers (e.g. X1040 ... X1040).
     prefix = re.match(r"^\s*([A-Z]{1,8}\d+[A-Za-z0-9_.:/-]*)\b", source_text, re.I)
     if prefix and len(re.findall(rf"(?<![A-Za-z0-9_]){re.escape(prefix.group(1))}(?![A-Za-z0-9_])", value, re.I)) > 1:
@@ -934,18 +950,18 @@ class TranslationClient:
         else:
             masked, token_map = _mask_protected_tokens(text)
             translated = _restore_protected_tokens(self._request(masked), token_map)
-        self._validate_translation(translated, source=text)
+        self._validate_translation(translated, source=text, target_code=self.target_language_code)
         self.cache[text] = translated
         _memory_put_many(self.source_language_code, self.target_language_code, {text: translated}, self.settings["provider"], self.settings["model"])
         return translated
 
     @staticmethod
-    def _validate_translation(translated: str, source: str = "") -> None:
+    def _validate_translation(translated: str, source: str = "", target_code: str = "") -> None:
         if _has_invalid_replacement_glyphs(source, translated):
             raise RuntimeError("The AI provider returned invalid replacement glyphs. Translation was rejected.")
         if "Cần xác nhận bản dịch" in translated or "待确认翻译" in translated:
             raise RuntimeError("Translation provider returned a pending-review placeholder.")
-        if source and not _translation_quality_ok(source, translated):
+        if source and not _translation_quality_ok(source, translated, target_code):
             raise RuntimeError("Translation provider returned source-echoed or polluted mixed-language output.")
         if source and not _placeholder_sequence_satisfied(source, translated):
             raise RuntimeError(
@@ -1175,7 +1191,7 @@ class TranslationClient:
                     )
 
             for source, value in translated_rows.items():
-                self._validate_translation(value, source=source)
+                self._validate_translation(value, source=source, target_code=self.target_language_code)
             if translated_rows:
                 self.cache.update(translated_rows)
                 _memory_put_many(

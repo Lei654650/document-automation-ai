@@ -1812,3 +1812,84 @@
   .output-format-groups-v45 > section { grid-template-columns: 1fr; }
   .output-format-groups-v45 > section > small { padding-top: 0; }
 }
+
+/* V45.0.5 accessibility and web-delivery hardening */
+:root {
+  --v44-muted: #53627a;
+}
+
+.ew-dashboard-v50 .ew-home-return {
+  order: -999;
+  margin-right: auto;
+  flex: 0 0 auto;
+}
+
+.order-center-v3014 .processing-home-link-v45 {
+  position: static;
+  top: auto;
+  align-self: flex-start;
+  margin: 0 0 16px;
+}
+
+.order-center-v3014 {
+  color: #273750;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.order-center-v3014 :where(p, small, label, button, input, select, textarea, li, td, th, time),
+.processing-journey-v44 :where(p, small, button),
+.processing-plan-v44 :where(p, small, label, button, input, select, textarea) {
+  font-size: 14px !important;
+  line-height: 1.55;
+}
+
+.order-center-v3014 :where(small, time),
+.processing-journey-v44 small,
+.processing-plan-v44 small {
+  color: #53627a !important;
+}
+
+.order-center-v3014 :where(h1, h2, h3, b, strong),
+.processing-journey-v44 b,
+.processing-plan-v44 b {
+  color: #172944;
+  font-weight: 750;
+}
+
+.processing-plan-head-v44 h2 { font-size: 22px !important; }
+.plan-block-v44 > header b,
+.ai-analysis-panel-v44 > header b,
+.pdf-split-card-v45 > header b,
+.plan-final-summary-v45 > header b { font-size: 16px !important; }
+
+.order-center-v3014 :where(button, input, select) { min-height: 40px; }
+.order-center-v3014 :where(.status-success, .is-success, .completed, .success) { color: #087452 !important; }
+.order-center-v3014 :where(.status-warning, .is-warning, .warning) { color: #985508 !important; }
+.order-center-v3014 :where(.status-error, .is-error, .failed, .error) { color: #b32929 !important; }
+
+/* A browser SaaS cannot open Windows Explorer. Hide legacy web controls if an
+   older shell still renders them; download/copy/detail actions remain visible. */
+.order-center-v3014 :where(.open-folder-button, [data-action="open-folder"], [data-testid="open-folder"]) {
+  display: none !important;
+}
+
+.delivery-package-progress-v45 {
+  min-height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe6f1;
+}
+
+.delivery-package-progress-v45 > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #3157d8;
+  transition: width .2s ease;
+}
+
+@media (min-resolution: 1.25dppx) {
+  .order-center-v3014,
+  .processing-plan-v44 { letter-spacing: .005em; }
+}

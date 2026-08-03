@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -144,6 +144,27 @@ export default function ProcessingPlanPanel({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advancedSection, setAdvancedSection] = useState('document');
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, []);
+
+  const syncTranslationForm = (enabled, targets = translationTargets, mode = outputOptions.language_mode || 'single') => {
+    const normalizedTargets = enabled ? targets.filter(Boolean) : [];
+    setForm(current => ({
+      ...current,
+      translation_enabled: enabled,
+      target_language: normalizedTargets[0] || '',
+      translation: {
+        ...(current.translation || {}),
+        enabled,
+        translation_enabled: enabled,
+        target_language: normalizedTargets[0] || '',
+        targets: normalizedTargets,
+        language_mode: enabled ? mode : 'none',
+      },
+    }));
+  };
+
   const markChanged = () => setPlanConfirmed(false);
   const setOption = (key, value) => {
     setOutputOptions(current => ({ ...current, [key]: value }));
@@ -286,6 +307,7 @@ export default function ProcessingPlanPanel({
         bilingual_layout: current.bilingual_layout && current.bilingual_layout !== 'none' ? current.bilingual_layout : 'target-only',
       }));
     }
+    syncTranslationForm(enabled, enabled ? translationTargets : [], enabled ? (outputOptions.language_mode || 'single') : 'none');
     markChanged();
   };
 
@@ -300,15 +322,24 @@ export default function ProcessingPlanPanel({
       column_order: current.column_order || 'source-first',
       inline_order: current.inline_order || 'source-first',
     }));
-    if (mode !== 'multiple') setTranslationTargets(current => current.slice(0, 1));
+    if (mode !== 'multiple') {
+      const next = translationTargets.slice(0, 1);
+      setTranslationTargets(next);
+      syncTranslationForm(true, next, mode);
+    } else {
+      syncTranslationForm(true, translationTargets, mode);
+    }
     markChanged();
   };
 
   const selectTarget = id => {
     if (languageMode === 'multiple') {
-      setTranslationTargets(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
+      const next = translationTargets.includes(id) ? translationTargets.filter(item => item !== id) : [...translationTargets, id];
+      setTranslationTargets(next);
+      syncTranslationForm(true, next, languageMode);
     } else {
       setTranslationTargets([id]);
+      syncTranslationForm(true, [id], languageMode);
     }
     markChanged();
   };
@@ -672,7 +703,7 @@ export default function ProcessingPlanPanel({
 
       <section className="plan-confirm-v44">
         <div className="plan-confirm-actions-v45">
-          <button type="button" className="plan-back-button-v45" onClick={onBack}><ArrowLeft />{isZh ? '返回分析报告' : 'Back to analysis'}</button>
+          <button type="button" className="plan-back-button-v45" onClick={() => { window.scrollTo({ top: 0, left: 0, behavior: 'auto' }); onBack(); }}><ArrowLeft />{isZh ? '返回分析报告' : 'Back to analysis'}</button>
           <button type="button" className={planConfirmed ? 'confirmed' : ''} disabled={!canConfirm} onClick={() => setPlanConfirmed(value => !value)}>
             {planConfirmed ? <CircleCheck /> : <Check />}
             {planConfirmed ? (isZh ? '方案已确认，可以创建任务' : 'Plan confirmed — ready to create') : (isZh ? '确认以上方案' : 'Confirm this plan')}

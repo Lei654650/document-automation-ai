@@ -106,7 +106,7 @@ def _load_project_env() -> None:
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "45.0.0"
+APP_VERSION = "45.0.5"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
@@ -224,6 +224,12 @@ _JOB_EXECUTOR = ThreadPoolExecutor(
 )
 _JOB_FUTURES: dict[int, Future] = {}
 _JOB_FUTURES_LOCK = threading.Lock()
+_DELIVERY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(3, int(os.getenv("DELIVERY_PACKAGE_WORKERS", "2")))),
+    thread_name_prefix="delivery-package",
+)
+_DELIVERY_FUTURES: dict[int, Future] = {}
+_DELIVERY_FUTURES_LOCK = threading.Lock()
 
 def _job_control(job_id: int) -> dict[str, threading.Event]:
     with _JOB_CONTROLS_LOCK:
@@ -674,6 +680,9 @@ def public_order(order_number: str, email: str) -> dict:
         if row is None:
             raise HTTPException(status_code=404, detail="Order number or email is incorrect.")
         data = row_to_order(db, row)
+        delivery_package = _delivery_package_payload(int(row["id"]))
+        if delivery_package.get("status") == "completed":
+            delivery_package["download_url"] = "/api/track/delivery/download-all"
         return {
             "order_number": data["order_number"], "status": data["status"],
             "quote_amount": data["quote_amount"], "quote_currency": data["quote_currency"],
@@ -682,6 +691,7 @@ def public_order(order_number: str, email: str) -> dict:
             "translation": data["translation"], "conversion": data["conversion"],
             "files": data["files"], "output_files": data["output_files"],
             "processing_job": data["processing_job"],
+            "delivery_package": delivery_package,
         }
 
 def utc_now() -> str:
@@ -821,6 +831,22 @@ def initialize_db() -> None:
                 error TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(job_id) REFERENCES processing_jobs(id) ON DELETE CASCADE,
                 UNIQUE(job_id, step_key)
+            );
+            CREATE TABLE IF NOT EXISTS delivery_packages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL UNIQUE,
+                original_name TEXT NOT NULL DEFAULT '',
+                stored_path TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                source_fingerprint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                progress INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
             );
             """
         )
@@ -1851,7 +1877,16 @@ def file_rows(db: sqlite3.Connection, table: str, order_id: int) -> list[dict]:
         f"FROM {table} WHERE order_id = ? ORDER BY id",
         (order_id,),
     ).fetchall()
-    return [dict(item) for item in rows]
+    result = []
+    for item in rows:
+        row = dict(item)
+        row.update({
+            "file_id": row["id"],
+            "filename": row["original_name"],
+            "mime_type": row["content_type"] or mimetypes.guess_type(row["original_name"])[0] or "application/octet-stream",
+        })
+        result.append(row)
+    return result
 
 
 def row_to_order(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -2368,6 +2403,12 @@ _LANGUAGE_CODE_ALIASES = {
     "zh-cn": "zh", "zh_cn": "zh", "zh-hans": "zh",
     "zh-tw": "zh_tw", "zh_tw": "zh_tw", "zh-hant": "zh_tw",
     "zh-en": "en", "zh-vi": "vi",
+    "中文": "zh", "中文简体": "zh", "简体中文": "zh", "中文（简体）": "zh", "中文(简体)": "zh",
+    "chinese": "zh", "simplifiedchinese": "zh", "chinese(simplified)": "zh",
+    "中文繁体": "zh_tw", "繁体中文": "zh_tw", "中文（繁体）": "zh_tw", "中文(繁体)": "zh_tw",
+    "traditionalchinese": "zh_tw", "chinese(traditional)": "zh_tw",
+    "英文": "en", "英语": "en", "english": "en",
+    "越南语": "vi", "越文": "vi", "vietnamese": "vi", "tiếngviệt": "vi",
 }
 _ALLOWED_TRANSLATION_MODES = {"single", "multiple", "bilingual"}
 _ALLOWED_BILINGUAL_LAYOUTS = {
@@ -2392,24 +2433,35 @@ def normalize_translation_request(services: list[str], translation: dict | None)
     """Make the translation decision authoritative across UI and workers."""
     normalized_services = list(dict.fromkeys(str(item).strip().lower() for item in services if str(item).strip()))
     payload = dict(translation or {})
-    enabled = "translation" in normalized_services and payload.get("enabled", True) is not False
+    explicit_enabled = payload.get("enabled")
+    if explicit_enabled is None:
+        explicit_enabled = payload.get("translation_enabled")
+    has_target = bool(
+        payload.get("targets") or payload.get("target_language")
+        or payload.get("targetLanguage") or payload.get("target_language_code")
+    )
+    enabled = bool(explicit_enabled) if explicit_enabled is not None else ("translation" in normalized_services or has_target)
     if not enabled:
         normalized_services = [item for item in normalized_services if item != "translation"]
         return normalized_services, {
-            "enabled": False,
+            "enabled": False, "translation_enabled": False,
             "source_language": "auto",
             "target_language": "",
             "targets": [],
             "language_mode": "none",
             "bilingual_layout": "none",
         }
+    if "translation" not in normalized_services:
+        normalized_services.append("translation")
 
     mode = str(payload.get("language_mode") or "single").strip().lower()
     if mode not in _ALLOWED_TRANSLATION_MODES:
         mode = "single"
     raw_targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
-    if not raw_targets and payload.get("target_language"):
-        raw_targets = [payload.get("target_language")]
+    if not raw_targets:
+        fallback_target = payload.get("target_language") or payload.get("targetLanguage") or payload.get("target_language_code")
+        if fallback_target:
+            raw_targets = [fallback_target]
     targets = [_normalize_language_code(item) for item in raw_targets]
     targets = [item for item in dict.fromkeys(targets) if item and item not in {"auto", "none"}]
     if mode in {"single", "bilingual"}:
@@ -2450,7 +2502,7 @@ def normalize_translation_request(services: list[str], translation: dict | None)
     if inline_style not in _ALLOWED_INLINE_STYLES:
         inline_style = "dash"
     return normalized_services, {
-        "enabled": True,
+        "enabled": True, "translation_enabled": True,
         "source_language": _normalize_language_code(payload.get("source_language"), "auto"),
         "target_language": targets[0],
         "targets": targets,
@@ -3178,6 +3230,7 @@ def _project_payload(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
         "status_kind": _project_status_kind(order["status"]), "progress": progress,
         "file_count": order.get("file_count", 0), "files": order.get("files", []),
         "outputs": [{**f, "download_url": f"/api/processing-center/outputs/{f['id']}/download"} for f in order.get("output_files", [])],
+        "delivery_package": _delivery_package_payload(int(row["id"])),
         "services": order.get("services", []), "credits_used": estimated_credits,
         "current_step": job.get("current_step", order["status"]), "steps": job.get("steps", []),
         "events": (job.get("events") or [])[-50:], "created_at": row["created_at"],
@@ -3346,6 +3399,8 @@ def processing_center_jobs(view: str = "active", user: dict = Depends(require_us
         duration_seconds = max(0, int(elapsed_ms / 1000)) if elapsed_ms else None
         ai_provider = str(translation.get("provider") or result.get("provider") or "").strip()
         ai_model = str(translation.get("model") or result.get("model") or "").strip()
+        translation_usage = result.get("translation_usage") if isinstance(result.get("translation_usage"), dict) else {}
+        translation_summary = result.get("translation_summary") if isinstance(result.get("translation_summary"), dict) else {}
         job_progress = int(job.get("progress") or (100 if order["status"] in completed_states else 0))
         estimated_remaining = max(0, int(avg_ms * remaining_steps / 1000))
         if 0 < job_progress < 100 and started_at:
@@ -3364,16 +3419,18 @@ def processing_center_jobs(view: str = "active", user: dict = Depends(require_us
             "duration_seconds": duration_seconds,
             "credits_used": int(analysis.get("estimated_credits") or 0),
             "processor_name": order.get("name") or user.get("name") or "System automation",
-            "ai_provider": ai_provider,
-            "ai_model": ai_model,
+            "ai_provider": ai_provider or str(translation_usage.get("provider") or ""),
+            "ai_model": ai_model or str(translation_usage.get("model") or ""),
             "created_at": order["created_at"],
             "updated_at": order["updated_at"],
             "services": order["services"],
             "files": order["files"],
             "output_files": [
-                {**item, "download_url": f"/api/processing-center/outputs/{item['id']}/download"}
+                {**item, "download_url": f"/api/processing-center/outputs/{item['id']}/download", "download_method": "GET"}
                 for item in order["output_files"]
             ],
+            "delivery_package": _delivery_package_payload(order["id"]),
+            "translation_summary": translation_summary,
             "job": {
                 "id": job.get("id"),
                 "state": job.get("state", order["status"]),
@@ -3386,6 +3443,173 @@ def processing_center_jobs(view: str = "active", user: dict = Depends(require_us
             },
         })
     return {"version": APP_VERSION, "summary": summary, "jobs": items}
+
+
+def _delivery_output_rows(db: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
+    return db.execute(
+        """SELECT id, original_name, stored_path, content_type, size_bytes, created_at
+           FROM output_files WHERE order_id=? ORDER BY id""",
+        (order_id,),
+    ).fetchall()
+
+
+def _delivery_source_fingerprint(rows: list[sqlite3.Row]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        path = Path(row["stored_path"])
+        stat_size = path.stat().st_size if path.exists() and path.is_file() else -1
+        stat_mtime = path.stat().st_mtime_ns if path.exists() and path.is_file() else -1
+        digest.update(f"{row['id']}|{row['original_name']}|{stat_size}|{stat_mtime}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _delivery_package_payload(order_id: int) -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM delivery_packages WHERE order_id=?", (order_id,)).fetchone()
+    if row is None:
+        return {
+            "status": "not_generated", "progress": 0, "file_count": 0,
+            "message": "交付包尚未生成", "error": "", "download_url": "",
+        }
+    path = Path(row["stored_path"]) if row["stored_path"] else None
+    status = str(row["status"] or "pending")
+    error = str(row["error"] or "")
+    if status == "completed" and (path is None or not path.exists()):
+        status = "failed"
+        error = "已生成的交付包文件不存在，请重新生成。"
+    return {
+        "id": row["id"], "status": status, "progress": int(row["progress"] or 0),
+        "file_count": int(row["file_count"] or 0), "filename": row["original_name"],
+        "size_bytes": int(row["size_bytes"] or 0), "message": row["message"] or "",
+        "error": error, "updated_at": row["updated_at"],
+        "download_url": f"/api/processing-center/orders/{order_id}/delivery-package/download" if status == "completed" else "",
+    }
+
+
+def _prepare_delivery_package(order_id: int) -> tuple[dict, bool]:
+    now = utc_now()
+    with get_db() as db:
+        order = db.execute("SELECT order_number,status FROM orders WHERE id=?", (order_id,)).fetchone()
+        if order is None:
+            raise HTTPException(status_code=404, detail="Processing order not found.")
+        rows = _delivery_output_rows(db, order_id)
+        if not rows:
+            raise HTTPException(status_code=409, detail="当前任务没有可交付文件，请先完成文档处理。")
+        missing = [row["original_name"] for row in rows if not Path(row["stored_path"]).is_file()]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"交付文件不存在：{missing[0]}")
+        fingerprint = _delivery_source_fingerprint(rows)
+        current = db.execute("SELECT * FROM delivery_packages WHERE order_id=?", (order_id,)).fetchone()
+        current_path = Path(current["stored_path"]) if current and current["stored_path"] else None
+        if (
+            current is not None and current["status"] == "completed"
+            and current["source_fingerprint"] == fingerprint
+            and current_path is not None and current_path.is_file()
+        ):
+            return _delivery_package_payload(order_id), True
+        package_name = f"{order['order_number']}_delivery.zip"
+        package_path = OUTPUT_DIR / order["order_number"] / "delivery_packages" / package_name
+        if current is not None and current["status"] == "building" and current["source_fingerprint"] == fingerprint:
+            return _delivery_package_payload(order_id), False
+        db.execute(
+            """INSERT INTO delivery_packages(
+                   order_id,original_name,stored_path,size_bytes,file_count,source_fingerprint,
+                   status,progress,message,error,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,'pending',0,?,'',?,?)
+               ON CONFLICT(order_id) DO UPDATE SET
+                   original_name=excluded.original_name,stored_path=excluded.stored_path,size_bytes=0,
+                   file_count=excluded.file_count,source_fingerprint=excluded.source_fingerprint,
+                   status='pending',progress=0,message=excluded.message,error='',updated_at=excluded.updated_at""",
+            (
+                order_id, package_name, str(package_path), 0, len(rows), fingerprint,
+                f"准备整理 {len(rows)} 个交付文件", now, now,
+            ),
+        )
+        db.commit()
+    return _delivery_package_payload(order_id), False
+
+
+def _generate_delivery_package_worker(order_id: int) -> None:
+    temp_path: Path | None = None
+    try:
+        with get_db() as db:
+            package = db.execute("SELECT * FROM delivery_packages WHERE order_id=?", (order_id,)).fetchone()
+            rows = _delivery_output_rows(db, order_id)
+            if package is None or not rows:
+                raise RuntimeError("当前任务没有可生成交付包的文件。")
+            package_path = Path(package["stored_path"])
+            fingerprint = _delivery_source_fingerprint(rows)
+            if fingerprint != package["source_fingerprint"]:
+                raise RuntimeError("交付文件列表已变化，请重新生成交付包。")
+            db.execute(
+                "UPDATE delivery_packages SET status='building',progress=1,message=?,error='',updated_at=? WHERE order_id=?",
+                (f"正在整理 {len(rows)} 个文件", utc_now(), order_id),
+            )
+            db.commit()
+        package_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = package_path.with_name(f".{package_path.name}.{uuid.uuid4().hex}.tmp")
+        used_names: set[str] = set()
+        with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+            for index, row in enumerate(rows, start=1):
+                source = Path(row["stored_path"])
+                if not source.is_file():
+                    raise RuntimeError(f"交付文件不存在：{row['original_name']}")
+                name = Path(row["original_name"]).name or source.name
+                if name in used_names:
+                    name = f"{Path(name).stem}_{row['id']}{Path(name).suffix}"
+                used_names.add(name)
+                archive.write(source, arcname=name)
+                progress = min(98, 5 + int(index / max(1, len(rows)) * 92))
+                with get_db() as db:
+                    db.execute(
+                        "UPDATE delivery_packages SET progress=?,message=?,updated_at=? WHERE order_id=?",
+                        (progress, f"正在整理第 {index}/{len(rows)} 个文件：{name}", utc_now(), order_id),
+                    )
+                    db.commit()
+        os.replace(temp_path, package_path)
+        temp_path = None
+        with get_db() as db:
+            db.execute(
+                """UPDATE delivery_packages SET status='completed',progress=100,size_bytes=?,
+                   message=?,error='',updated_at=? WHERE order_id=?""",
+                (package_path.stat().st_size, f"交付包已生成，共 {len(rows)} 个文件", utc_now(), order_id),
+            )
+            db.commit()
+    except Exception as exc:
+        logger.exception("Delivery package generation failed order_id=%s", order_id)
+        with get_db() as db:
+            db.execute(
+                "UPDATE delivery_packages SET status='failed',progress=100,message='交付包生成失败',error=?,updated_at=? WHERE order_id=?",
+                (str(exc), utc_now(), order_id),
+            )
+            db.commit()
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _submit_delivery_package(order_id: int) -> Future:
+    with _DELIVERY_FUTURES_LOCK:
+        current = _DELIVERY_FUTURES.get(order_id)
+        if current is not None and not current.done():
+            return current
+        future = _DELIVERY_EXECUTOR.submit(_generate_delivery_package_worker, order_id)
+        _DELIVERY_FUTURES[order_id] = future
+
+    def release(done: Future) -> None:
+        with _DELIVERY_FUTURES_LOCK:
+            if _DELIVERY_FUTURES.get(order_id) is done:
+                _DELIVERY_FUTURES.pop(order_id, None)
+        try:
+            done.result()
+        except Exception:
+            logger.exception("Unhandled delivery package future failure order_id=%s", order_id)
+
+    future.add_done_callback(release)
+    return future
 
 
 @app.post("/api/processing-center/orders/{order_id}/retry")
@@ -3413,6 +3637,46 @@ def download_owned_output(file_id: int, user: dict = Depends(require_user)) -> F
         if row is None:
             raise HTTPException(status_code=404, detail="Delivery file not found.")
     return _download_from_table("output_files", file_id)
+
+
+@app.post("/api/processing-center/orders/{order_id}/delivery-package")
+def generate_owned_delivery_package(order_id: int, user: dict = Depends(require_user)) -> dict:
+    """Start one idempotent ZIP build without rerunning processing or charging."""
+    with get_db() as db:
+        _owned_order(db, order_id, user)
+    package, ready = _prepare_delivery_package(order_id)
+    if not ready:
+        _submit_delivery_package(order_id)
+        package = _delivery_package_payload(order_id)
+    return {"success": True, "already_generated": ready, "delivery_package": package}
+
+
+@app.get("/api/processing-center/orders/{order_id}/delivery-package")
+def owned_delivery_package_status(order_id: int, user: dict = Depends(require_user)) -> dict:
+    with get_db() as db:
+        _owned_order(db, order_id, user)
+    return {"success": True, "delivery_package": _delivery_package_payload(order_id)}
+
+
+@app.get("/api/processing-center/orders/{order_id}/delivery-package/download")
+@app.get("/api/processing-center/orders/{order_id}/download-all")
+def download_owned_delivery_package(order_id: int, user: dict = Depends(require_user)) -> FileResponse:
+    with get_db() as db:
+        _owned_order(db, order_id, user)
+    package, ready = _prepare_delivery_package(order_id)
+    if not ready:
+        _submit_delivery_package(order_id).result(timeout=300)
+        package = _delivery_package_payload(order_id)
+    if package.get("status") != "completed":
+        raise HTTPException(status_code=409, detail=package.get("error") or package.get("message") or "交付包尚未生成完成。")
+    with get_db() as db:
+        row = db.execute("SELECT original_name,stored_path FROM delivery_packages WHERE order_id=?", (order_id,)).fetchone()
+    if row is None or not Path(row["stored_path"]).is_file():
+        raise HTTPException(status_code=404, detail="已生成的交付包文件不存在，请重新生成。")
+    return FileResponse(
+        path=Path(row["stored_path"]), filename=row["original_name"], media_type="application/zip",
+        headers={"Cache-Control": "private, no-store", "X-Delivery-File-Count": str(package.get("file_count") or 0)},
+    )
 
 
 @app.get("/api/dashboard/recent-orders")
@@ -4242,10 +4506,12 @@ def _download_from_table(table: Literal["order_files", "output_files"], file_id:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Stored file is missing.")
 
+    media_type = "application/pdf" if path.suffix.lower() == ".pdf" else (row["content_type"] or mimetypes.guess_type(path.name)[0] or "application/octet-stream")
     return FileResponse(
         path=path,
         filename=row["original_name"],
-        media_type=row["content_type"] or "application/octet-stream",
+        media_type=media_type,
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
@@ -4265,37 +4531,67 @@ def _verified_output_rows(order_number: str, email: str) -> tuple[dict, list[sql
 
 
 @app.get("/api/track/delivery/download-all")
-def public_delivery_zip(order_number: str = Query(...), email: str = Query(...)) -> StreamingResponse:
-    """Stream a delivery ZIP without creating a persistent copy on C: or in outputs.
+def public_delivery_zip(order_number: str = Query(...), email: str = Query(...)) -> FileResponse:
+    """Return the persistent idempotent ZIP for the verified customer order."""
+    _verified_output_rows(order_number, email)
+    with get_db() as db:
+        order = db.execute(
+            "SELECT id FROM orders WHERE upper(order_number)=upper(?) AND lower(email)=lower(?)",
+            (order_number.strip(), email.strip()),
+        ).fetchone()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order number or email is incorrect.")
+    order_id = int(order["id"])
+    package, ready = _prepare_delivery_package(order_id)
+    if not ready:
+        _submit_delivery_package(order_id).result(timeout=300)
+        package = _delivery_package_payload(order_id)
+    if package.get("status") != "completed":
+        raise HTTPException(status_code=409, detail=package.get("error") or package.get("message") or "交付包生成失败。")
+    with get_db() as db:
+        package_row = db.execute("SELECT original_name,stored_path FROM delivery_packages WHERE order_id=?", (order_id,)).fetchone()
+    if package_row is None or not Path(package_row["stored_path"]).is_file():
+        raise HTTPException(status_code=404, detail="已生成的交付包文件不存在，请重新生成。")
+    return FileResponse(
+        path=Path(package_row["stored_path"]), filename=package_row["original_name"], media_type="application/zip",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Delivery-File-Count": str(package.get("file_count") or 0),
+            "X-Delivery-Storage": "persistent-server-package",
+        },
+    )
 
-    The browser receives the archive and writes it only to the path explicitly
-    selected by the user through the system Save As dialog.
-    """
-    data, rows = _verified_output_rows(order_number, email)
-    package = io.BytesIO()
-    valid_count = 0
-    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        used_names: set[str] = set()
-        for row in rows:
-            source = Path(row["stored_path"])
-            if not source.exists() or not source.is_file():
-                continue
-            name = Path(row["original_name"]).name
-            if name in used_names:
-                name = f"{source.stem}_{row['id']}{source.suffix}"
-            used_names.add(name)
-            archive.write(source, arcname=name)
-            valid_count += 1
-    if not valid_count:
-        raise HTTPException(status_code=404, detail="No valid delivery files were found.")
-    package.seek(0)
-    filename = f"{data['order_number']}_delivery.zip"
-    headers = {
-        "Content-Disposition": f"attachment; filename={filename}",
-        "Cache-Control": "no-store",
-        "X-Delivery-Storage": "browser-selected-location-only",
-    }
-    return StreamingResponse(package, media_type="application/zip", headers=headers)
+
+@app.post("/api/track/delivery/generate")
+def public_generate_delivery_package(order_number: str = Query(...), email: str = Query(...)) -> dict:
+    data = public_order(order_number, email)
+    with get_db() as db:
+        order = db.execute(
+            "SELECT id FROM orders WHERE upper(order_number)=upper(?) AND lower(email)=lower(?)",
+            (order_number.strip(), email.strip()),
+        ).fetchone()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order number or email is incorrect.")
+    order_id = int(order["id"])
+    package, ready = _prepare_delivery_package(order_id)
+    if not ready:
+        _submit_delivery_package(order_id)
+        package = _delivery_package_payload(order_id)
+    package["download_url"] = "/api/track/delivery/download-all" if package.get("status") == "completed" else ""
+    return {"success": True, "order_number": data["order_number"], "already_generated": ready, "delivery_package": package}
+
+
+@app.get("/api/track/delivery/status")
+def public_delivery_package_status(order_number: str = Query(...), email: str = Query(...)) -> dict:
+    public_order(order_number, email)
+    with get_db() as db:
+        order = db.execute(
+            "SELECT id FROM orders WHERE upper(order_number)=upper(?) AND lower(email)=lower(?)",
+            (order_number.strip(), email.strip()),
+        ).fetchone()
+    package = _delivery_package_payload(int(order["id"]))
+    package["download_url"] = "/api/track/delivery/download-all" if package.get("status") == "completed" else ""
+    return {"success": True, "delivery_package": package}
 
 
 @app.post("/api/track/delivery/open-folder")
@@ -4721,7 +5017,7 @@ def activate_license(license_key: str, device_id: str = Query(...), customer_ema
 def run_enterprise_acceptance() -> dict:
     checks=[]
     def add(cid,name,ok,detail): checks.append({"id":cid,"name":name,"status":"PASS" if ok else "FAIL","detail":detail})
-    add("V28-001","版本信息",APP_VERSION=="45.0.0",f"Backend version {APP_VERSION}")
+    add("V28-001","版本信息",APP_VERSION=="45.0.5",f"Backend version {APP_VERSION}")
     try:
         with get_db() as db:
             tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}

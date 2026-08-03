@@ -37,6 +37,8 @@ from .translation_engine import (
     TranslationClient,
     _canonicalize_technical_placeholders,
     _normalize_form_glyphs,
+    _should_translate as _should_translate_text,
+    _translation_quality_ok,
     capability as translation_capability,
 )
 from .conversion_engine import convert_outputs
@@ -2107,20 +2109,28 @@ def _should_translate_excel_text(text: str) -> bool:
 
 
 
-def _pdf_native_page_text(page: Any) -> str:
-    """Extract ordered native text blocks from one PDF page."""
+def _pdf_native_text_blocks(page: Any) -> list[dict[str, Any]]:
+    """Extract ordered native text blocks and their page coordinates."""
     try:
         blocks = page.get_text("blocks", sort=True)
     except TypeError:  # older PyMuPDF
         blocks = page.get_text("blocks")
-    values: list[str] = []
+    values: list[dict[str, Any]] = []
     for block in blocks or []:
         if len(block) < 5:
             continue
         value = _normalize_form_glyphs(str(block[4] or "")).strip()
         if value:
-            values.append(value)
-    return "\n\n".join(values).strip()
+            values.append({
+                "rect": tuple(float(number) for number in block[:4]),
+                "text": value,
+            })
+    return values
+
+
+def _pdf_native_page_text(page: Any) -> str:
+    """Extract ordered native text blocks from one PDF page."""
+    return "\n\n".join(item["text"] for item in _pdf_native_text_blocks(page)).strip()
 
 
 def _pdf_page_image_coverage(page: Any) -> float:
@@ -2183,6 +2193,17 @@ def _translation_chunks(text: str, max_chars: int = 1400) -> list[str]:
     return chunks
 
 
+def _pdf_text_requires_translation(text: str) -> bool:
+    value = str(text or "").strip()
+    if not _should_translate_text(value):
+        return False
+    # Standalone uppercase names/company labels and identifiers stay unchanged.
+    words = re.findall(r"[A-Za-zÀ-ỹ][A-Za-zÀ-ỹ.'&/-]*", value)
+    if words and len(value) <= 100 and all(word.isupper() for word in words):
+        return False
+    return True
+
+
 def _translate_pdf_page_text(text: str, client: TranslationClient | None) -> tuple[str, int, list[str]]:
     if client is None or not text.strip():
         return text.strip(), 0, []
@@ -2190,8 +2211,14 @@ def _translate_pdf_page_text(text: str, client: TranslationClient | None) -> tup
     translated_count = 0
     warnings: list[str] = []
     for chunk_index, chunk in enumerate(_translation_chunks(text), start=1):
+        if not _pdf_text_requires_translation(chunk):
+            translated_parts.append(chunk.strip())
+            continue
         try:
-            translated_parts.append(str(client.translate(chunk) or chunk).strip())
+            translated = str(client.translate(chunk) or "").strip()
+            if not _translation_quality_ok(chunk, translated, client.target_language_code):
+                raise RuntimeError("译文为空、与原文高度相同，或不符合目标语言")
+            translated_parts.append(translated)
             translated_count += 1
             continue
         except Exception as chunk_error:
@@ -2204,8 +2231,14 @@ def _translate_pdf_page_text(text: str, client: TranslationClient | None) -> tup
                 if not line.strip():
                     line_results.append("")
                     continue
+                if not _pdf_text_requires_translation(line):
+                    line_results.append(line)
+                    continue
                 try:
-                    line_results.append(str(client.translate(line) or line).strip())
+                    translated_line = str(client.translate(line) or "").strip()
+                    if not _translation_quality_ok(line, translated_line, client.target_language_code):
+                        raise RuntimeError("译文为空、与原文高度相同，或不符合目标语言")
+                    line_results.append(translated_line)
                     translated_count += 1
                 except Exception:
                     line_results.append(line)
@@ -2213,7 +2246,7 @@ def _translate_pdf_page_text(text: str, client: TranslationClient | None) -> tup
             translated_parts.append("\n".join(line_results).strip())
             if failed_lines:
                 warnings.append(
-                    f"Translation chunk {chunk_index} retained {failed_lines} source line(s) after provider validation failed: {chunk_error}"
+                    f"第 {chunk_index} 个翻译区块有 {failed_lines} 行未通过 Provider 质量检查：{chunk_error}"
                 )
     return "\n\n".join(part for part in translated_parts if part).strip(), translated_count, warnings
 
@@ -2250,10 +2283,11 @@ def _paginate_translation_text(text: str) -> list[str]:
     return pages or [""]
 
 
-def _pdf_translation_layout(output_options: dict[str, Any] | None, source_rect: Any) -> tuple[str, bool, bool]:
+def _pdf_translation_layout(output_options: dict[str, Any] | None, source_rect: Any) -> tuple[str, bool, bool, bool]:
     options = output_options or {}
     layout = str(options.get("bilingual_layout") or "auto").strip().lower()
     preserve_source = bool(options.get("preserve_layout", True))
+    target_only = layout in {"target-only", "target_only", "single"}
     source_first = not (layout.endswith("target-first") or str(options.get("vertical_order")) == "target-first" or str(options.get("column_order")) == "target-first")
     if layout.startswith("columns"):
         orientation = "columns"
@@ -2263,7 +2297,7 @@ def _pdf_translation_layout(output_options: dict[str, Any] | None, source_rect: 
         orientation = "vertical"
     else:
         orientation = "columns" if float(source_rect.width) > float(source_rect.height) else "vertical"
-    return orientation, source_first, preserve_source
+    return orientation, source_first, preserve_source, target_only
 
 
 def _insert_pdf_translation_panel(page: Any, rect: Any, text: str, title: str, continuation: bool = False) -> None:
@@ -2296,6 +2330,26 @@ def _insert_pdf_translation_panel(page: Any, rect: Any, text: str, title: str, c
         raise RuntimeError(f"Translated PDF text exceeded the safe panel capacity: {title}")
 
 
+def _replace_pdf_text_block(page: Any, source_rect: Any, translated_text: str, page_rect: Any) -> None:
+    """Write one translated block after its native text has been redacted."""
+    padding = 2.0
+    rect = fitz.Rect(
+        max(float(page_rect.x0), float(source_rect.x0) - padding),
+        max(float(page_rect.y0), float(source_rect.y0) - padding),
+        min(float(page_rect.x1), float(source_rect.x1) + padding),
+        min(float(page_rect.y1), float(source_rect.y1) + max(5.0, padding)),
+    )
+    if rect.is_empty or rect.width < 8 or rect.height < 6:
+        raise RuntimeError("PDF 原文文本区域无效，无法安全写入译文。")
+    inner = fitz.Rect(rect.x0 + 1.5, rect.y0 + 1.0, rect.x1 - 1.5, rect.y1 - 1.0)
+    body = html.escape(str(translated_text or "").strip()).replace("\n", "<br>")
+    markup = f'<div class="docai-inline">{body}</div>'
+    css = ".docai-inline { font-family: sans-serif; color: #111827; font-size: 9.5pt; line-height: 1.22; }"
+    spare_height, scale = page.insert_htmlbox(inner, markup, css=css, scale_low=0.38, overlay=True)
+    if spare_height < 0 or scale < 0.38:
+        raise RuntimeError("中文译文无法在原正文区域内安全排版，已阻止交付。")
+
+
 def _translate_pdf_preserving_pages(
     source: Path,
     destination: Path,
@@ -2306,10 +2360,10 @@ def _translate_pdf_preserving_pages(
 ) -> dict[str, Any]:
     """Translate a mixed PDF page-by-page while preserving every source page.
 
-    Native-text pages use their embedded text. Image/scanned pages are rendered
-    and OCR'd individually. Each original page remains visually intact in a
-    source panel, with translated text in a companion panel; page-level split
-    metadata keeps one customer page together with any continuation page.
+    Target-only output replaces native text in-place and retains the page's
+    raster/vector artwork. Bilingual output keeps the original page beside a
+    translated panel. Scanned pages are OCR'd, but target-only delivery is
+    blocked when safe text coordinates are unavailable.
     """
     if fitz is None:
         raise RuntimeError("PyMuPDF is required for layout-preserving PDF translation.")
@@ -2322,12 +2376,16 @@ def _translate_pdf_preserving_pages(
     ocr_page_count = 0
     native_page_count = 0
     warnings: list[str] = []
+    translated_page_count = 0
+    translatable_page_count = 0
+    untranslated_pages: list[int] = []
     temp_path = destination.with_name(f".{destination.stem}.{os.getpid()}.{time.time_ns()}.tmp.pdf")
     try:
         with tempfile.TemporaryDirectory(prefix="docai_pdf_pages_") as temp_dir:
             for page_index in range(source_doc.page_count):
                 page = source_doc.load_page(page_index)
-                native_text = _pdf_native_page_text(page)
+                native_blocks = _pdf_native_text_blocks(page)
+                native_text = "\n\n".join(item["text"] for item in native_blocks).strip()
                 text = native_text
                 used_ocr = False
                 if native_text.strip():
@@ -2352,24 +2410,99 @@ def _translate_pdf_preserving_pages(
                     except Exception as exc:
                         warnings.append(f"Page {page_index + 1} OCR warning: {exc}")
                     _update(callback, 25 + int((page_index + 1) / max(1, source_doc.page_count) * 20), "ocr", f"OCR page {page_index + 1}/{source_doc.page_count}")
-                page_records.append({"text": _normalize_form_glyphs(text), "used_ocr": used_ocr})
+                page_records.append({
+                    "text": _normalize_form_glyphs(text),
+                    "used_ocr": used_ocr,
+                    "native_blocks": native_blocks,
+                })
 
             output_doc = fitz.open()
             logical_page_groups: list[list[int]] = []
             translated_items = 0
-            orientation, source_first, preserve_source = _pdf_translation_layout(output_options, source_doc[0].rect if source_doc.page_count else fitz.Rect(0, 0, 595, 842))
+            orientation, source_first, preserve_source, target_only = _pdf_translation_layout(
+                output_options, source_doc[0].rect if source_doc.page_count else fitz.Rect(0, 0, 595, 842),
+            )
             target_code = getattr(client, "target_language_code", "") if client else ""
             target_label = target_code or "OCR"
             for page_index, record in enumerate(page_records):
                 source_page = source_doc.load_page(page_index)
-                translated_text, count, page_warnings = _translate_pdf_page_text(record["text"], client)
+                translated_blocks: list[dict[str, Any]] = []
+                if client is not None and target_only and preserve_source:
+                    if record["used_ocr"]:
+                        output_doc.close()
+                        raise RuntimeError(
+                            f"PDF 第 {page_index + 1} 页依赖 OCR，但缺少可安全替换的文字坐标；"
+                            "无法在保留图片、签名和印章的同时生成仅译文版本，已阻止交付。"
+                        )
+                    rendered_blocks: list[str] = []
+                    count = 0
+                    page_warnings: list[str] = []
+                    for block_index, block in enumerate(record["native_blocks"], start=1):
+                        source_block_text = str(block.get("text") or "").strip()
+                        rendered_text = source_block_text
+                        if _pdf_text_requires_translation(source_block_text):
+                            rendered_text, block_count, block_warnings = _translate_pdf_page_text(
+                                source_block_text, client,
+                            )
+                            count += block_count
+                            page_warnings.extend(
+                                f"block {block_index}: {warning}" for warning in block_warnings
+                            )
+                            translated_blocks.append({
+                                "rect": fitz.Rect(*block["rect"]),
+                                "text": rendered_text,
+                            })
+                        rendered_blocks.append(rendered_text)
+                    translated_text = "\n\n".join(rendered_blocks).strip()
+                else:
+                    translated_text, count, page_warnings = _translate_pdf_page_text(record["text"], client)
                 translated_items += count
                 warnings.extend(f"Page {page_index + 1}: {warning}" for warning in page_warnings)
+                page_requires_translation = client is not None and _pdf_text_requires_translation(record["text"])
+                if page_requires_translation:
+                    translatable_page_count += 1
+                    page_valid = count > 0 and not page_warnings and _translation_quality_ok(
+                        record["text"], translated_text, target_code,
+                    )
+                    if page_valid:
+                        translated_page_count += 1
+                    else:
+                        untranslated_pages.append(page_index + 1)
                 text_pages = _paginate_translation_text(translated_text)
                 physical_pages: list[int] = []
                 source_rect = source_page.rect
                 gap = max(10.0, min(float(source_rect.width), float(source_rect.height)) * 0.02)
                 first_text = text_pages[0]
+                if client is not None and target_only and preserve_source:
+                    # Copy the original page, remove only native text objects in
+                    # translatable blocks, then write the Chinese text back into
+                    # the same coordinates. Raster images and vector artwork
+                    # (including signatures, stamps and borders) are retained.
+                    output_doc.insert_pdf(source_doc, from_page=page_index, to_page=page_index)
+                    output_page = output_doc.load_page(output_doc.page_count - 1)
+                    for translated_block in translated_blocks:
+                        output_page.add_redact_annot(
+                            translated_block["rect"],
+                            fill=None,
+                            cross_out=False,
+                        )
+                    if translated_blocks:
+                        output_page.apply_redactions(
+                            images=fitz.PDF_REDACT_IMAGE_NONE,
+                            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                            text=fitz.PDF_REDACT_TEXT_REMOVE,
+                        )
+                    for translated_block in translated_blocks:
+                        _replace_pdf_text_block(
+                            output_page,
+                            translated_block["rect"],
+                            translated_block["text"],
+                            output_page.rect,
+                        )
+                    physical_pages.append(output_page.number)
+                    logical_page_groups.append(physical_pages)
+                    _update(callback, 50 + int((page_index + 1) / max(1, source_doc.page_count) * 30), "translation", f"Translated PDF page {page_index + 1}/{source_doc.page_count}")
+                    continue
                 if preserve_source:
                     if orientation == "columns":
                         page_width, page_height = source_rect.width * 2 + gap, source_rect.height
@@ -2406,6 +2539,13 @@ def _translate_pdf_preserving_pages(
                 logical_page_groups.append(physical_pages)
                 _update(callback, 50 + int((page_index + 1) / max(1, source_doc.page_count) * 30), "translation", f"Translated PDF page {page_index + 1}/{source_doc.page_count}")
 
+            if client is not None and (translated_items <= 0 or untranslated_pages):
+                output_doc.close()
+                if untranslated_pages:
+                    pages = ", ".join(str(number) for number in untranslated_pages[:20])
+                    raise RuntimeError(f"PDF 翻译质量检查失败：第 {pages} 页没有生成有效的 {target_label} 译文，已阻止交付。")
+                raise RuntimeError(f"PDF 未生成任何有效的 {target_label} 译文，已阻止交付。")
+
             metadata = dict(source_doc.metadata or {})
             metadata["title"] = f"{source.stem} translated"
             metadata["producer"] = "Document Automation AI page-preserving PDF pipeline"
@@ -2425,9 +2565,20 @@ def _translate_pdf_preserving_pages(
             "ocr_page_count": ocr_page_count,
             "native_text_page_count": native_page_count,
             "source_page_count": source_doc.page_count,
+            "target_language": target_code,
+            "translated_page_count": translated_page_count,
+            "translatable_page_count": translatable_page_count,
+            "untranslated_page_count": len(untranslated_pages),
+            "untranslated_pages": untranslated_pages,
             "pdf_logical_page_groups": logical_page_groups,
             "quality_warnings": warnings,
             "mode": "pdf_page_preserving_translation" if client else "pdf_page_preserving_ocr",
+            "translation_validation": {
+                "passed": client is None or (translated_items > 0 and not untranslated_pages),
+                "target_language": target_code,
+                "translated_pages": translated_page_count,
+                "untranslated_pages": len(untranslated_pages),
+            },
             "validation": {"pages": sum(len(group) for group in logical_page_groups), "logical_pages": len(logical_page_groups)},
         }
     finally:
@@ -4269,6 +4420,18 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                 output_options=output_options,
             )
             primary_path = Path(primary["path"])
+            if "translation" in services and Path(original_name).suffix.lower() == ".pdf":
+                validation = primary.get("translation_validation") or {}
+                if not validation.get("passed"):
+                    raise RuntimeError(f"PDF 翻译未通过质量检查，已阻止交付：{original_name}")
+                LOGGER.info(
+                    "PDF translation verified: file=%s target=%s translated_pages=%s untranslated_pages=%s provider=%s",
+                    original_name,
+                    validation.get("target_language") or translation_data.get("target_language"),
+                    validation.get("translated_pages", 0),
+                    validation.get("untranslated_pages", 0),
+                    client.settings.get("provider") if client is not None else "none",
+                )
             for warning in primary.get("quality_warnings", []) or []:
                 file_failures.append({
                     "source_name": original_name,
@@ -4300,6 +4463,12 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
                     output_dir,
                     progress_callback=conversion_progress,
                 )
+                # PDF splitting is always sourced from the processed/translated
+                # PDF. A conversion helper must never substitute the upload path.
+                if split_this_file and primary_path.suffix.lower() == ".pdf" and primary_path.is_file():
+                    converted_paths = [
+                        Path(item) for item in converted_paths if Path(item).suffix.lower() != ".pdf"
+                    ] + [primary_path]
             else:
                 # Translation/OCR/organization-only orders keep the processed file
                 # directly. Do not create a fake conversion stage or complete the
@@ -4453,7 +4622,16 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
     outputs = [item for i in range(total) for item in outputs_by_index.get(i, [])]
     aggregate_usage = None
     if usage_rows:
+        providers_used = [provider for row in usage_rows for provider in (row.get("providers_used") or [])]
+        effective_provider = next((str(row.get("provider") or "") for row in usage_rows if row.get("provider")), "")
+        effective_model = next((str(row.get("model") or "") for row in usage_rows if row.get("model")), "")
         aggregate_usage = {
+            "provider": effective_provider,
+            "model": effective_model,
+            "providers_used": providers_used,
+            "provider_chain": list(dict.fromkeys(
+                provider for row in usage_rows for provider in (row.get("provider_chain") or [])
+            )),
             "input_tokens": sum(int(r.get("input_tokens") or 0) for r in usage_rows),
             "output_tokens": sum(int(r.get("output_tokens") or 0) for r in usage_rows),
             "total_tokens": sum(int(r.get("total_tokens") or 0) for r in usage_rows),
@@ -4462,6 +4640,25 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
             "memory_cache_hits": sum(int(r.get("memory_cache_hits") or 0) for r in usage_rows),
             "session_cache_hits": sum(int(r.get("session_cache_hits") or 0) for r in usage_rows),
         }
+
+    translation_quality_rows: dict[str, dict[str, Any]] = {}
+    for item in outputs:
+        validation = item.get("translation_validation")
+        source_name = str(item.get("source_name") or item.get("name") or "")
+        if isinstance(validation, dict) and source_name and source_name not in translation_quality_rows:
+            translation_quality_rows[source_name] = validation
+    translation_summary = {
+        "enabled": translation_enabled,
+        "target_language": translation_data.get("target_language") if translation_enabled else "",
+        "translated_pages": sum(int(row.get("translated_pages") or 0) for row in translation_quality_rows.values()),
+        "untranslated_pages": sum(int(row.get("untranslated_pages") or 0) for row in translation_quality_rows.values()),
+        "validated_files": len(translation_quality_rows),
+        "provider": (aggregate_usage or {}).get("provider", ""),
+        "model": (aggregate_usage or {}).get("model", ""),
+        "passed": not translation_enabled or (
+            not failure_rows and all(row.get("passed") for row in translation_quality_rows.values())
+        ),
+    }
 
     successful_output_count = len(outputs)
     failure_count = len(failure_rows)
@@ -4484,6 +4681,7 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
     manifest["requested_output_formats"] = requested_formats
     manifest["outputs"] = outputs
     manifest["translation_usage"] = aggregate_usage
+    manifest["translation_summary"] = translation_summary
     manifest["failures"] = failure_rows
     manifest["partial_success"] = state == "partial_completed"
     manifest["successful_output_count"] = successful_output_count
@@ -4495,6 +4693,7 @@ def _run_local_job_single_target(order: dict[str, Any], source_paths: list[tuple
     return {
         "state": state, "progress": 100, "current_step": failed_step if state == "failed" else state, "plan": plan, "blockers": [],
         "manifest_path": str(manifest_path), "outputs": outputs, "translation_usage": aggregate_usage,
+        "translation_summary": translation_summary,
         "failures": failure_rows, "partial_success": state == "partial_completed",
         "successful_output_count": successful_output_count,
         "failure_count": failure_count,
@@ -4569,12 +4768,24 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
         if result.get("translation_usage"):
             usage_rows.append(result["translation_usage"])
     aggregate_usage = {
+        "provider": next((str(row.get("provider") or "") for row in usage_rows if row.get("provider")), ""),
+        "model": next((str(row.get("model") or "") for row in usage_rows if row.get("model")), ""),
+        "providers_used": [provider for row in usage_rows for provider in (row.get("providers_used") or [])],
         "input_tokens": sum(int(row.get("input_tokens") or 0) for row in usage_rows),
         "output_tokens": sum(int(row.get("output_tokens") or 0) for row in usage_rows),
         "total_tokens": sum(int(row.get("total_tokens") or 0) for row in usage_rows),
         "estimated_cost_usd": round(sum(float(row.get("estimated_cost_usd") or 0) for row in usage_rows), 6),
         "languages": len(results),
     } if usage_rows else None
+    translation_summary = {
+        "enabled": True,
+        "targets": targets,
+        "translated_pages": sum(int((result.get("translation_summary") or {}).get("translated_pages") or 0) for result in results.values()),
+        "untranslated_pages": sum(int((result.get("translation_summary") or {}).get("untranslated_pages") or 0) for result in results.values()),
+        "provider": (aggregate_usage or {}).get("provider", ""),
+        "model": (aggregate_usage or {}).get("model", ""),
+        "passed": not failures and all((result.get("translation_summary") or {}).get("passed") for result in results.values()),
+    }
     state, completion_message = _resolve_job_outcome(len(outputs), len(failures), "manual_review" in services)
     manifest_path = output_dir / "processing_manifest.json"
     manifest_path.write_text(json.dumps({
@@ -4584,6 +4795,7 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
         "outputs": outputs,
         "failures": failures,
         "translation_usage": aggregate_usage,
+        "translation_summary": translation_summary,
         "terminal_state": state,
         "completed_at": now(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4593,7 +4805,7 @@ def run_local_job(order: dict[str, Any], source_paths: list[tuple[str, str]], ou
     return {
         "state": state, "progress": 100, "current_step": failed_step if state == "failed" else state,
         "plan": build_plan(order), "blockers": [], "manifest_path": str(manifest_path),
-        "outputs": outputs, "translation_usage": aggregate_usage, "failures": failures,
+        "outputs": outputs, "translation_usage": aggregate_usage, "translation_summary": translation_summary, "failures": failures,
         "partial_success": state == "partial_completed", "successful_output_count": len(outputs),
         "failure_count": len(failures), "completion_message": completion_message,
         "target_results": results,
