@@ -1,4 +1,4 @@
-from __future__ import annotations
+base6from __future__ import annotations
 
 import hashlib
 import hmac
@@ -436,7 +436,7 @@ class ChunkedOrderCreate(BaseModel):
 
 PAYMENT_PLANS = {
     "free": {"name": "Free", "kind": "subscription", "billing": "monthly", "amount_cents": 0, "currency": "usd", "credits": 500, "team_members": 1, "file_limit_mb": 10, "features": ["basic_conversion", "standard_queue"]},
-    "starter_monthly": {"name": "Starter", "kind": "subscription", "billing": "monthly", "amount_cents": 100, "currency": "usd", "credits": 2000, "team_members": 1, "file_limit_mb": 50, "features": ["ocr", "translation", "batch_10"]},
+    "starter_monthly": {"name": "Starter", "kind": "subscription", "billing": "monthly", "amount_cents": 1900, "currency": "usd", "credits": 2000, "team_members": 1, "file_limit_mb": 50, "features": ["ocr", "translation", "batch_10"]},
     "starter_yearly": {"name": "Starter", "kind": "subscription", "billing": "yearly", "amount_cents": 19000, "currency": "usd", "credits": 24000, "team_members": 1, "file_limit_mb": 50, "features": ["ocr", "translation", "batch_10"]},
     "professional_monthly": {"name": "Professional", "kind": "subscription", "billing": "monthly", "amount_cents": 5900, "currency": "usd", "credits": 8000, "team_members": 3, "file_limit_mb": 200, "features": ["advanced_ocr", "layout_preservation", "batch_100", "basic_api", "priority_queue"]},
     "professional_yearly": {"name": "Professional", "kind": "subscription", "billing": "yearly", "amount_cents": 59000, "currency": "usd", "credits": 96000, "team_members": 3, "file_limit_mb": 200, "features": ["advanced_ocr", "layout_preservation", "batch_100", "basic_api", "priority_queue"]},
