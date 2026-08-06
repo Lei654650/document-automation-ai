@@ -89,10 +89,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
-            "script-src 'self' 'unsafe-inline' https://accounts.google.com https://www.paypal.com https://www.paypalobjects.com; "
+            "script-src 'self' 'unsafe-inline' https://accounts.google.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; "
-            "connect-src 'self' https: wss:; frame-src https://accounts.google.com https://www.paypal.com; worker-src 'self' blob:"
+            "connect-src 'self' https: wss:; frame-src https://accounts.google.com; worker-src 'self' blob:"
         )
         if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"

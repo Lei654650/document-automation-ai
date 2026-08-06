@@ -1,4 +1,4 @@
-base6from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import hmac
@@ -106,13 +106,14 @@ def _load_project_env() -> None:
 _load_project_env()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("document_automation_ai")
-APP_VERSION = "45.0.5"
+APP_VERSION = "46.0.0"
 IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or Path('/var/task').exists())
 CLOUD_MODE = IS_VERCEL or os.getenv("CLOUD_MODE", "false").lower() in {"1", "true", "yes", "on"}
 APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
 LOCAL_DEVELOPMENT = APP_ENV == "development" and not CLOUD_MODE
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 OWNER_EMAIL = os.getenv("OWNER_EMAIL", "").strip().lower()
+LEGACY_ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 ADMIN_ROLES = {"owner", "admin"}
 _data_root = os.getenv("APP_DATA_DIR", "").strip()
 if IS_VERCEL:
@@ -136,32 +137,24 @@ FRONTEND_DIST = BASE_DIR / "static"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
-PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
-PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
-PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
-if PAYPAL_MODE not in {"sandbox", "live"}:
-    PAYPAL_MODE = "sandbox"
-PAYPAL_LIVE_ENABLED = os.getenv("PAYPAL_LIVE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-if PAYPAL_MODE == "live" and not PAYPAL_LIVE_ENABLED:
-    logger.warning("PAYPAL_MODE=live was ignored because PAYPAL_LIVE_ENABLED is not true; using sandbox.")
-    PAYPAL_MODE = "sandbox"
-PAYPAL_LIVE_REQUIRED = os.getenv("PAYPAL_LIVE_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
-try:
-    PAYPAL_TEST_PRICE_CENTS = max(0, int(os.getenv("PAYPAL_TEST_PRICE_CENTS", "0") or "0"))
-except ValueError:
-    PAYPAL_TEST_PRICE_CENTS = 0
-PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
-PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
-PADDLE_ENV = os.getenv("PADDLE_ENV", "sandbox").strip().lower()
-PADDLE_CHECKOUT_URL = os.getenv("PADDLE_CHECKOUT_URL", "").strip()
-try:
-    PADDLE_PRICE_MAP = json.loads(os.getenv("PADDLE_PRICE_MAP", "{}") or "{}")
-except json.JSONDecodeError:
-    PADDLE_PRICE_MAP = {}
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Stripe is the single payment processor. Alipay and WeChat Pay are presented
+# as Stripe Checkout payment methods, so the application never stores wallet,
+# bank-card or QR-code credentials itself.
+STRIPE_CARD_ENABLED = _env_enabled("STRIPE_CARD_ENABLED", True)
+STRIPE_ALIPAY_ENABLED = _env_enabled("STRIPE_ALIPAY_ENABLED", True)
+STRIPE_WECHAT_PAY_ENABLED = _env_enabled("STRIPE_WECHAT_PAY_ENABLED", True)
 PAYMENT_SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL", "").strip()
 PAYMENT_CANCEL_URL = os.getenv("PAYMENT_CANCEL_URL", "").strip()
-PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "false").lower() in {"1", "true", "yes", "on"}
+PAYMENT_TEST_MODE = _env_enabled("PAYMENT_TEST_MODE", False)
 ENFORCE_CREDITS = os.getenv("ENFORCE_CREDITS", "true").lower() in {"1", "true", "yes", "on"}
 JOB_STALE_SECONDS = max(120, int(os.getenv("JOB_STALE_SECONDS", "300")))
 AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip() or secrets.token_urlsafe(48)
@@ -345,11 +338,11 @@ class CheckoutCreate(BaseModel):
     customer_name: str = ""
     customer_email: str
     locale: str = "zh"
+    payment_method: Literal["card", "alipay", "wechat_pay"] = "card"
 
 
 class DemoPaymentConfirm(BaseModel):
     payment_number: str
-    customer_email: str
 
 
 class FreePlanActivate(BaseModel):
@@ -448,166 +441,83 @@ PAYMENT_PLANS = {
     "credits_20000": {"name": "20,000 DA Credits", "kind": "credit_pack", "billing": "one_time", "amount_cents": 19900, "currency": "usd", "credits": 20000, "valid_days": 730, "features": []},
 }
 
-# Optional server-side PayPal Live acceptance price from e592291. It is off by
-# default so the normal catalogue price remains authoritative. When enabled,
-# the same amount is returned to the UI, stored with the order and sent to
-# PayPal, avoiding a client/server price mismatch during acceptance.
-if PAYPAL_TEST_PRICE_CENTS > 0:
-    PAYMENT_PLANS["professional_monthly"] = {
-        **PAYMENT_PLANS["professional_monthly"],
-        "amount_cents": PAYPAL_TEST_PRICE_CENTS,
-        "payment_test_price": True,
-    }
+PAYMENT_METHOD_CATALOG = {
+    "card": {
+        "label": "Credit or debit card",
+        "label_zh": "银行卡",
+        "supports_recurring": True,
+        "billing_model": "recurring",
+        "description": "Visa, Mastercard and other card wallets supported by Stripe Checkout.",
+        "description_zh": "通过 Stripe Checkout 使用 Visa、Mastercard 等银行卡付款。",
+    },
+    "alipay": {
+        "label": "Alipay",
+        "label_zh": "支付宝",
+        "supports_recurring": False,
+        "billing_model": "prepaid",
+        "description": "One-time prepaid checkout. Subscription plans do not auto-renew.",
+        "description_zh": "单期预付，不自动续费；到期后可再次购买。",
+    },
+    "wechat_pay": {
+        "label": "WeChat Pay",
+        "label_zh": "微信支付",
+        "supports_recurring": False,
+        "billing_model": "prepaid",
+        "description": "One-time prepaid checkout. Availability depends on the Stripe account country and currency.",
+        "description_zh": "单期预付，不自动续费；是否可用取决于 Stripe 账户地区与结算币种。",
+    },
+}
 
 
 def payment_provider() -> str:
-    # Paddle is the preferred Merchant of Record provider for the commercial release.
-    if PADDLE_API_KEY and PADDLE_PRICE_MAP:
-        return "paddle"
-    if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
-        return "paypal"
-    if STRIPE_SECRET_KEY:
-        return "stripe"
-    return "demo"
+    return "stripe" if STRIPE_SECRET_KEY else "demo"
+
+
+def payment_methods_config() -> list[dict]:
+    configured = bool(STRIPE_SECRET_KEY)
+    toggles = {
+        "card": STRIPE_CARD_ENABLED,
+        "alipay": STRIPE_ALIPAY_ENABLED,
+        "wechat_pay": STRIPE_WECHAT_PAY_ENABLED,
+    }
+    methods = []
+    for method_id, metadata in PAYMENT_METHOD_CATALOG.items():
+        enabled = bool(toggles[method_id])
+        methods.append({
+            "id": method_id,
+            **metadata,
+            "processor": "stripe",
+            "configured": configured,
+            "enabled": enabled,
+            "available": configured and enabled,
+        })
+    return methods
 
 
 def payment_production_ready() -> bool:
-    provider = payment_provider()
-    if PAYMENT_TEST_MODE:
-        return False
-    if provider == "paypal":
-        return PAYPAL_MODE == "live" and bool(PAYPAL_WEBHOOK_ID)
-    if provider == "paddle":
-        return PADDLE_ENV == "production" and bool(PADDLE_WEBHOOK_SECRET)
-    if provider == "stripe":
-        return bool(STRIPE_WEBHOOK_SECRET)
-    return False
+    return bool(STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET and not PAYMENT_TEST_MODE)
 
 
-def paddle_api_base() -> str:
-    return "https://api.paddle.com" if PADDLE_ENV == "live" else "https://sandbox-api.paddle.com"
+def _payment_method(method_id: str) -> dict:
+    method = PAYMENT_METHOD_CATALOG.get(method_id)
+    if method is None:
+        raise HTTPException(status_code=400, detail={"code": "PAYMENT_METHOD_INVALID", "message": "Unsupported payment method."})
+    toggle = {
+        "card": STRIPE_CARD_ENABLED,
+        "alipay": STRIPE_ALIPAY_ENABLED,
+        "wechat_pay": STRIPE_WECHAT_PAY_ENABLED,
+    }[method_id]
+    if not toggle:
+        raise HTTPException(status_code=503, detail={"code": "PAYMENT_METHOD_DISABLED", "message": f"{method['label']} is disabled by the administrator."})
+    return method
 
 
-def paddle_request(path: str, method: str = "GET", payload: dict | None = None) -> dict:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(
-        paddle_api_base() + path,
-        data=data,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {PADDLE_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Paddle API error {exc.code}: {detail[:800]}") from exc
-
-
-def verify_paddle_signature(raw_body: bytes, signature_header: str) -> bool:
-    if not PADDLE_WEBHOOK_SECRET or not signature_header:
-        return False
-    parts: dict[str, list[str]] = {}
-    for item in signature_header.split(";"):
-        if "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        parts.setdefault(key.strip(), []).append(value.strip())
-    timestamp = (parts.get("ts") or [""])[0]
-    signatures = parts.get("h1") or []
-    if not timestamp or not signatures:
-        return False
-    try:
-        if abs(int(time.time()) - int(timestamp)) > 300:
-            return False
-    except ValueError:
-        return False
-    signed_payload = timestamp.encode("utf-8") + b":" + raw_body
-    expected = hmac.new(PADDLE_WEBHOOK_SECRET.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
-    return any(hmac.compare_digest(expected, candidate) for candidate in signatures)
-
-
-def _validate_paypal_credentials() -> None:
-    """Fail early with an actionable error before contacting PayPal."""
-    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
-        raise RuntimeError("PAYPAL_CLIENT_ID or PAYPAL_CLIENT_SECRET is missing in the server environment.")
-    suspicious_tokens = ("sandbox client id", "client id", "sandbox secret", "client secret", "secret key")
-    combined = f"{PAYPAL_CLIENT_ID} {PAYPAL_CLIENT_SECRET}".lower()
-    if any(token in combined for token in suspicious_tokens):
-        raise RuntimeError("PayPal credentials appear to contain copied labels. Paste only the raw Client ID and Secret values from PayPal Developer Dashboard.")
-    if len(PAYPAL_CLIENT_ID) < 20 or len(PAYPAL_CLIENT_SECRET) < 20:
-        raise RuntimeError("PayPal Client ID or Secret is unexpectedly short. Re-copy the complete Sandbox credentials.")
-
-
-def _paypal_ssl_context() -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=certifi.where())
-
-
-def paypal_api_base() -> str:
-    return "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
-
-
-def paypal_request(path: str, method: str = "GET", payload: dict | None = None, access_token: str = "") -> dict:
-    url = paypal_api_base() + path
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Content-Type": "application/json", "Accept": "application/json", "Prefer": "return=representation", "User-Agent": f"DocumentAutomationAI/{APP_VERSION}"}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
-    request = urllib.request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        logger.exception("PayPal API request failed: %s %s -> HTTP %s: %s", method, path, exc.code, detail[:1000])
-        raise RuntimeError(f"PayPal API error {exc.code}: {detail[:800]}") from exc
-    except urllib.error.URLError as exc:
-        logger.exception("PayPal API network error: %s %s", method, path)
-        raise RuntimeError(f"Unable to reach PayPal API: {exc.reason}") from exc
-
-
-def paypal_access_token() -> str:
-    _validate_paypal_credentials()
-    credentials = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode()).decode()
-    request = urllib.request.Request(
-        paypal_api_base() + "/v1/oauth2/token",
-        data=b"grant_type=client_credentials",
-        method="POST",
-        headers={
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "User-Agent": f"DocumentAutomationAI/{APP_VERSION}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30, context=_paypal_ssl_context()) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            token = str(body.get("access_token", "")).strip()
-            if not token:
-                raise RuntimeError("PayPal token response did not contain access_token.")
-            return token
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        logger.exception("PayPal authentication rejected with HTTP %s: %s", exc.code, detail[:1000])
-        if exc.code == 401:
-            raise RuntimeError("PayPal rejected the Client ID or Secret (HTTP 401). Re-copy the matching Sandbox credentials from the same REST API app.") from exc
-        raise RuntimeError(f"PayPal authentication failed with HTTP {exc.code}: {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
-        logger.exception("PayPal authentication network error: %s", exc.reason)
-        raise RuntimeError(f"Unable to reach PayPal API: {exc.reason}") from exc
-    except Exception as exc:
-        logger.exception("Unexpected PayPal authentication error")
-        raise RuntimeError(f"Unable to authenticate with PayPal: {exc}") from exc
-
-
-def mark_payment_paid(payment_number: str, provider_session_id: str = "", provider_payment_id: str = "") -> bool:
+def mark_payment_paid(
+    payment_number: str,
+    provider_session_id: str = "",
+    provider_payment_id: str = "",
+    provider_event_id: str = "",
+) -> bool:
     def operation(db):
         row = db.execute("SELECT * FROM payment_orders WHERE payment_number=?", (payment_number,)).fetchone()
         if row is None:
@@ -617,26 +527,250 @@ def mark_payment_paid(payment_number: str, provider_session_id: str = "", provid
         now = utc_now()
         plan = PAYMENT_PLANS.get(row["plan_id"], {})
         email = row["customer_email"].strip().lower()
-        db.execute("UPDATE payment_orders SET status='paid', provider_session_id=COALESCE(NULLIF(?,''),provider_session_id), provider_payment_id=COALESCE(NULLIF(?,''),provider_payment_id), paid_at=?, updated_at=? WHERE id=?", (provider_session_id, provider_payment_id, now, now, row["id"]))
+        period_end = ""
+        if plan.get("kind") == "subscription":
+            period_days = 366 if plan.get("billing") == "yearly" else 31
+            period_end = (datetime.now(timezone.utc) + timedelta(days=period_days)).isoformat()
+        db.execute(
+            "UPDATE payment_orders SET status='paid', provider_session_id=COALESCE(NULLIF(?,''),provider_session_id), provider_payment_id=COALESCE(NULLIF(?,''),provider_payment_id), paid_at=?, updated_at=? WHERE id=?",
+            (provider_session_id, provider_payment_id, now, now, row["id"]),
+        )
         wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         if wallet is None:
             db.execute("INSERT INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
-            wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
         bucket = "purchased" if plan.get("kind") == "credit_pack" else "subscription"
         column = "purchased_credits" if bucket == "purchased" else "subscription_credits"
         if plan.get("kind") == "subscription":
-            db.execute(f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', updated_at=? WHERE customer_email=?", (row["credits"], row["plan_id"], now, email))
+            db.execute(
+                f"UPDATE customer_wallets SET {column}=?, plan_id=?, plan_status='active', current_period_end=?, updated_at=? WHERE customer_email=?",
+                (row["credits"], row["plan_id"], period_end, now, email),
+            )
         else:
             db.execute(f"UPDATE customer_wallets SET {column}={column}+?, updated_at=? WHERE customer_email=?", (row["credits"], now, email))
-        balance = db.execute("SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()["total"]
-        db.execute("INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)", (email,"credit",bucket,row["credits"],balance,payment_number,"Payment credited",now))
-        db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "payment.paid", json.dumps({"provider_session_id": provider_session_id, "provider_payment_id": provider_payment_id, "wallet_balance": balance}), now))
+        balance = db.execute(
+            "SELECT subscription_credits+purchased_credits+bonus_credits AS total FROM customer_wallets WHERE customer_email=?",
+            (email,),
+        ).fetchone()["total"]
+        note = "Payment credited"
+        if row["payment_method"] in {"alipay", "wechat_pay"} and plan.get("kind") == "subscription":
+            note = "Prepaid plan credited (manual renewal)"
+        db.execute(
+            "INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (email, "credit", bucket, row["credits"], balance, payment_number, note, now),
+        )
+        db.execute(
+            "INSERT INTO payment_events (payment_order_id,provider_event_id,event_type,payload_json,created_at) VALUES (?,?,?,?,?)",
+            (row["id"], provider_event_id, "payment.paid", json.dumps({
+                "provider_session_id": provider_session_id,
+                "provider_payment_id": provider_payment_id,
+                "payment_method": row["payment_method"],
+                "billing_model": row["billing_model"],
+                "wallet_balance": balance,
+                "current_period_end": period_end,
+            }), now),
+        )
         existing_license = db.execute("SELECT id FROM licenses WHERE payment_number=?", (payment_number,)).fetchone()
         if existing_license is None and plan.get("kind") == "subscription":
             license_key = "DAI-" + "-".join([secrets.token_hex(2).upper() for _ in range(4)])
-            db.execute("INSERT INTO licenses (license_key,customer_email,plan_id,payment_number,status,created_at) VALUES (?,?,?,?,'active',?)", (license_key,email,row["plan_id"],payment_number,now))
-            db.execute("INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)", (row["id"], "license.issued", json.dumps({"license_key": license_key}), now))
+            db.execute(
+                "INSERT INTO licenses (license_key,customer_email,plan_id,payment_number,status,expires_at,created_at) VALUES (?,?,?,?,'active',?,?)",
+                (license_key, email, row["plan_id"], payment_number, period_end, now),
+            )
+            db.execute(
+                "INSERT INTO payment_events (payment_order_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
+                (row["id"], "license.issued", json.dumps({"license_key": license_key, "expires_at": period_end}), now),
+            )
         return True
+    return bool(run_db_write(operation))
+
+
+def _stripe_object_id(value: object) -> str:
+    if isinstance(value, dict):
+        return str(value.get("id") or "").strip()
+    return str(value or "").strip()
+
+
+def _stripe_subscription_id(obj: dict) -> str:
+    direct = _stripe_object_id(obj.get("subscription"))
+    if direct:
+        return direct
+    parent = obj.get("parent") or {}
+    if isinstance(parent, dict):
+        details = parent.get("subscription_details") or {}
+        if isinstance(details, dict):
+            nested = _stripe_object_id(details.get("subscription"))
+            if nested:
+                return nested
+    details = obj.get("subscription_details") or {}
+    if isinstance(details, dict):
+        return _stripe_object_id(details.get("subscription"))
+    return ""
+
+
+def _stripe_event_metadata(obj: dict) -> dict:
+    candidates = [
+        obj.get("metadata"),
+        (obj.get("subscription_details") or {}).get("metadata") if isinstance(obj.get("subscription_details"), dict) else None,
+        ((obj.get("parent") or {}).get("subscription_details") or {}).get("metadata")
+        if isinstance(obj.get("parent"), dict)
+        else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def _stripe_invoice_period_end(invoice: dict) -> str:
+    timestamps: list[int] = []
+    raw_period_end = invoice.get("period_end")
+    if isinstance(raw_period_end, (int, float)) and raw_period_end > 0:
+        timestamps.append(int(raw_period_end))
+    lines = invoice.get("lines") or {}
+    if isinstance(lines, dict):
+        for line in lines.get("data") or []:
+            if not isinstance(line, dict):
+                continue
+            period = line.get("period") or {}
+            period_end = period.get("end") if isinstance(period, dict) else None
+            if isinstance(period_end, (int, float)) and period_end > 0:
+                timestamps.append(int(period_end))
+    if not timestamps:
+        return ""
+    return datetime.fromtimestamp(max(timestamps), tz=timezone.utc).isoformat()
+
+
+def mark_subscription_cycle_paid(
+    subscription_id: str,
+    provider_event_id: str,
+    invoice_id: str = "",
+    payment_number: str = "",
+    period_end: str = "",
+) -> bool:
+    subscription_id = subscription_id.strip()
+    provider_event_id = provider_event_id.strip() or (f"invoice:{invoice_id.strip()}" if invoice_id.strip() else "")
+    payment_number = payment_number.strip()
+    if not provider_event_id or (not subscription_id and not payment_number):
+        return False
+
+    def operation(db):
+        duplicate = db.execute(
+            "SELECT id FROM payment_events WHERE provider_event_id=?",
+            (provider_event_id,),
+        ).fetchone()
+        if duplicate is not None:
+            return True
+        row = None
+        if subscription_id:
+            row = db.execute(
+                "SELECT * FROM payment_orders WHERE provider='stripe' AND billing_model='recurring' "
+                "AND provider_payment_id=? ORDER BY id DESC LIMIT 1",
+                (subscription_id,),
+            ).fetchone()
+        if row is None and payment_number:
+            row = db.execute(
+                "SELECT * FROM payment_orders WHERE payment_number=? AND provider='stripe' "
+                "AND billing_model='recurring'",
+                (payment_number,),
+            ).fetchone()
+        if row is None:
+            return False
+        plan = PAYMENT_PLANS.get(row["plan_id"], {})
+        if plan.get("kind") != "subscription":
+            return False
+
+        now = utc_now()
+        cycle_end = period_end.strip()
+        if not cycle_end:
+            period_days = 366 if plan.get("billing") == "yearly" else 31
+            cycle_end = (datetime.now(timezone.utc) + timedelta(days=period_days)).isoformat()
+        email = row["customer_email"].strip().lower()
+        wallet = db.execute("SELECT * FROM customer_wallets WHERE customer_email=?", (email,)).fetchone()
+        if wallet is None:
+            db.execute("INSERT INTO customer_wallets (customer_email,updated_at) VALUES (?,?)", (email, now))
+        db.execute(
+            "UPDATE customer_wallets SET subscription_credits=?,plan_id=?,plan_status='active',"
+            "current_period_end=?,updated_at=? WHERE customer_email=?",
+            (row["credits"], row["plan_id"], cycle_end, now, email),
+        )
+        db.execute(
+            "UPDATE payment_orders SET status='paid',provider_payment_id=COALESCE(NULLIF(?,''),provider_payment_id),"
+            "updated_at=? WHERE id=?",
+            (subscription_id, now, row["id"]),
+        )
+        db.execute(
+            "UPDATE licenses SET status='active',expires_at=? WHERE payment_number=?",
+            (cycle_end, row["payment_number"]),
+        )
+        balance = db.execute(
+            "SELECT subscription_credits+purchased_credits+bonus_credits AS total "
+            "FROM customer_wallets WHERE customer_email=?",
+            (email,),
+        ).fetchone()["total"]
+        reference = invoice_id.strip() or provider_event_id
+        db.execute(
+            "INSERT INTO credit_ledger (customer_email,transaction_type,bucket,credits,balance_after,reference,note,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (email, "credit", "subscription", row["credits"], balance, reference, "Subscription cycle credited", now),
+        )
+        db.execute(
+            "INSERT INTO payment_events (payment_order_id,provider_event_id,event_type,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (row["id"], provider_event_id, "subscription.renewed", json.dumps({
+                "subscription_id": subscription_id,
+                "invoice_id": invoice_id,
+                "wallet_balance": balance,
+                "current_period_end": cycle_end,
+            }), now),
+        )
+        return True
+
+    return bool(run_db_write(operation))
+
+
+def set_subscription_status(
+    subscription_id: str,
+    status: str,
+    provider_event_id: str,
+    payload: dict | None = None,
+) -> bool:
+    subscription_id = subscription_id.strip()
+    provider_event_id = provider_event_id.strip()
+    if not subscription_id or not provider_event_id:
+        return False
+
+    def operation(db):
+        duplicate = db.execute(
+            "SELECT id FROM payment_events WHERE provider_event_id=?",
+            (provider_event_id,),
+        ).fetchone()
+        if duplicate is not None:
+            return True
+        row = db.execute(
+            "SELECT * FROM payment_orders WHERE provider='stripe' AND billing_model='recurring' "
+            "AND provider_payment_id=? ORDER BY id DESC LIMIT 1",
+            (subscription_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        now = utc_now()
+        email = row["customer_email"].strip().lower()
+        db.execute(
+            "UPDATE customer_wallets SET plan_status=?,updated_at=? WHERE customer_email=?",
+            (status, now, email),
+        )
+        if status in {"cancelled", "expired"}:
+            db.execute(
+                "UPDATE licenses SET status=? WHERE payment_number=?",
+                (status, row["payment_number"]),
+            )
+        db.execute(
+            "INSERT INTO payment_events (payment_order_id,provider_event_id,event_type,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (row["id"], provider_event_id, f"subscription.{status}", json.dumps(payload or {}), now),
+        )
+        return True
+
     return bool(run_db_write(operation))
 
 
@@ -1036,6 +1170,8 @@ def initialize_db() -> None:
                 currency TEXT NOT NULL,
                 credits INTEGER NOT NULL,
                 provider TEXT NOT NULL,
+                payment_method TEXT NOT NULL DEFAULT 'card',
+                billing_model TEXT NOT NULL DEFAULT 'recurring',
                 provider_session_id TEXT NOT NULL DEFAULT '',
                 provider_payment_id TEXT NOT NULL DEFAULT '',
                 checkout_url TEXT NOT NULL DEFAULT '',
@@ -1047,6 +1183,7 @@ def initialize_db() -> None:
             CREATE TABLE IF NOT EXISTS payment_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 payment_order_id INTEGER,
+                provider_event_id TEXT NOT NULL DEFAULT '',
                 event_type TEXT NOT NULL,
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
@@ -1066,6 +1203,13 @@ def initialize_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses(customer_email, id DESC);
             """
+        )
+        ensure_column(db, "payment_orders", "payment_method", "TEXT NOT NULL DEFAULT 'card'")
+        ensure_column(db, "payment_orders", "billing_model", "TEXT NOT NULL DEFAULT 'recurring'")
+        ensure_column(db, "payment_events", "provider_event_id", "TEXT NOT NULL DEFAULT ''")
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_provider_event_id "
+            "ON payment_events(provider_event_id) WHERE provider_event_id <> ''"
         )
         db.executescript(
             """
@@ -1362,11 +1506,29 @@ def startup() -> None:
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 2.0)
-    # Complete tenant bootstrap during startup so the first admin request cannot fail
-    # because of a partial migration or missing default tenant rows.
-    def bootstrap_tenants(db: sqlite3.Connection) -> None:
+    # Bootstrap configured platform administrators so password recovery works on
+    # a fresh deployment before the first interactive registration. ADMIN_EMAIL
+    # remains a backward-compatible alias for earlier deployments.
+    def bootstrap_platform_admins(db: sqlite3.Connection) -> None:
+        for admin_email in {OWNER_EMAIL, LEGACY_ADMIN_EMAIL}:
+            if not admin_email or "@" not in admin_email:
+                continue
+            existing = db.execute("SELECT id FROM users WHERE LOWER(email)=LOWER(?)", (admin_email,)).fetchone()
+            if existing is None:
+                password_hash, salt = _password_hash(secrets.token_urlsafe(32))
+                now = utc_now()
+                cursor = db.execute(
+                    "INSERT INTO users (name,email,password_hash,password_salt,status,role,email_verified,created_at,last_login_at) VALUES (?,?,?,?, 'active','owner',1,?,?)",
+                    (admin_email.split("@", 1)[0] or "Administrator", admin_email, password_hash, salt, now, ""),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO user_identities (user_id,provider,provider_subject,email,created_at) VALUES (?,?,?,?,?)",
+                    (cursor.lastrowid, "email", admin_email, admin_email, now),
+                )
+            else:
+                db.execute("UPDATE users SET role='owner',status='active',email_verified=1 WHERE id=?", (existing["id"],))
         _ensure_default_tenants(db)
-    run_db_write(bootstrap_tenants)
+    run_db_write(bootstrap_platform_admins)
 
     # Jobs are stored in SQLite and are re-queued after a service restart.  The
     # former implementation marked every active task as failed on startup,
@@ -1587,8 +1749,29 @@ def login_user(payload: UserLogin) -> dict:
     expected,_=_password_hash(payload.password,base64.urlsafe_b64decode(row["password_salt"].encode()))
     if not secrets.compare_digest(expected,row["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
-    if row["status"] != "active":
-        raise HTTPException(status_code=403, detail="This account is not active.")
+    account_status = str(row["status"] or "").strip().lower()
+    if not bool(row["email_verified"]) or account_status == "pending_verification":
+        raise HTTPException(status_code=403, detail={
+            "code": "EMAIL_NOT_VERIFIED",
+            "message": "Email verification is required before sign-in.",
+            "email": email,
+            "can_resend": True,
+        })
+    if account_status == "disabled":
+        raise HTTPException(status_code=403, detail={
+            "code": "ACCOUNT_DISABLED",
+            "message": "This account has been disabled by an administrator.",
+        })
+    if account_status in {"suspended", "locked"}:
+        raise HTTPException(status_code=403, detail={
+            "code": "ACCOUNT_SUSPENDED",
+            "message": "This account is temporarily suspended.",
+        })
+    if account_status != "active":
+        raise HTTPException(status_code=403, detail={
+            "code": "ACCOUNT_UNAVAILABLE",
+            "message": "This account is currently unavailable.",
+        })
     token=_session_token();expires=int(time.time())+SESSION_TTL_SECONDS;now=utc_now()
     def operation(db):
         db.execute("UPDATE users SET last_login_at=? WHERE id=?",(now,row["id"]))
@@ -1804,7 +1987,7 @@ def public_config(request: Request) -> dict:
         "chunk_upload": True,
         "recommended_chunk_size_bytes": 2 * 1024 * 1024,
         "registration_enabled": True,
-        "real_payments_configured": payment_provider() in {"paddle","paypal","stripe"},
+        "real_payments_configured": payment_provider() == "stripe",
         "authentication": {
             "smtp_configured": bool(SMTP_HOST and SMTP_FROM_EMAIL),
             "google_configured": bool(GOOGLE_CLIENT_ID),
@@ -1817,8 +2000,9 @@ def public_config(request: Request) -> dict:
         },
         "payments": {
             "provider": payment_provider(),
-            "paypal_mode": PAYPAL_MODE,
-            "paypal_live_enabled": PAYPAL_LIVE_ENABLED,
+            "processor": "stripe" if STRIPE_SECRET_KEY else "demo",
+            "methods": payment_methods_config(),
+            "webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
             "test_mode": PAYMENT_TEST_MODE,
         },
     }
@@ -1848,7 +2032,7 @@ def health() -> dict:
         "storage": storage,
         "ocr": ocr_capability().__dict__,
         "translation": translation,
-        "payments": {"configured": payment_provider() in {"paddle", "stripe", "paypal"}, "provider": payment_provider()},
+        "payments": {"configured": payment_provider() == "stripe", "provider": payment_provider(), "methods": payment_methods_config()},
         "credits_enforced": ENFORCE_CREDITS,
         "warnings": warnings,
     }
@@ -3916,47 +4100,20 @@ def ai_provider_stats() -> dict:
 
 @app.get("/api/admin/payment-center", dependencies=[Depends(require_admin)])
 def payment_center_admin() -> dict:
-    provider = payment_provider()
+    methods = payment_methods_config()
     return {
         "title": "Payment Center",
-        "provider": provider,
-        "paypal": {"configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET), "mode": PAYPAL_MODE, "live_enabled": PAYPAL_LIVE_ENABLED, "webhook_configured": bool(PAYPAL_WEBHOOK_ID)},
-        "stripe": {"configured": bool(STRIPE_SECRET_KEY)},
-        "paddle": {"configured": bool(PADDLE_API_KEY and PADDLE_PRICE_MAP), "mode": PADDLE_ENV},
-        "checkout_available": provider in {"paypal", "stripe", "paddle"} or PAYMENT_TEST_MODE,
+        "provider": payment_provider(),
+        "stripe": {
+            "configured": bool(STRIPE_SECRET_KEY),
+            "webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
+            "methods": methods,
+        },
+        "checkout_available": any(item["available"] for item in methods) or PAYMENT_TEST_MODE,
         "production_ready": payment_production_ready(),
         "server_validation": True,
         "idempotent_entitlement": True,
     }
-
-
-@app.get("/api/payments/paypal/diagnostics")
-def paypal_public_diagnostics(user: dict = Depends(require_user)) -> dict:
-    """Safe diagnostics: never returns secrets or an access token."""
-    result = {
-        "configured": bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET),
-        "mode": PAYPAL_MODE,
-        "api_base": paypal_api_base(),
-        "version": APP_VERSION,
-    }
-    try:
-        started = time.perf_counter()
-        token = paypal_access_token()
-        result.update({"success": bool(token), "latency_ms": round((time.perf_counter() - started) * 1000)})
-    except Exception as exc:
-        logger.warning("PayPal diagnostic failed error_type=%s", type(exc).__name__)
-        result.update({"success": False, "error": "paypal_connection_failed", "error_type": type(exc).__name__})
-    return result
-
-
-@app.post("/api/admin/payment-center/paypal/test", dependencies=[Depends(require_admin)])
-def test_paypal_connection() -> dict:
-    if not (PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET):
-        raise HTTPException(status_code=400, detail="PayPal Client ID and Secret are not configured.")
-    started = time.perf_counter()
-    token = paypal_access_token()
-    elapsed = round((time.perf_counter() - started) * 1000)
-    return {"success": True, "mode": PAYPAL_MODE, "latency_ms": elapsed, "token_received": bool(token), "api_base": paypal_api_base(), "tested_at": utc_now()}
 
 
 @app.get("/api/admin/team-permissions", dependencies=[Depends(require_admin)])
@@ -4639,22 +4796,18 @@ def open_delivery_folder(
 @app.get("/api/payments/config")
 def payment_config() -> dict:
     provider = payment_provider()
+    methods = payment_methods_config()
     return {
         "provider": provider,
-        "configured": provider in {"paddle", "stripe", "paypal"},
+        "processor": "stripe" if provider == "stripe" else "demo",
+        "configured": provider == "stripe",
         "production_ready": payment_production_ready(),
         "requires_login": True,
-        "checkout_available": provider in {"paddle", "stripe", "paypal"} or (provider == "demo" and PAYMENT_TEST_MODE),
-        "provider_label": "Paddle" if provider == "paddle" else ("PayPal" if provider == "paypal" else ("Stripe" if provider == "stripe" else "Demo")),
-        "provider_mode": PADDLE_ENV if provider == "paddle" else (PAYPAL_MODE if provider == "paypal" else ""),
-        "paypal_mode": PAYPAL_MODE if provider == "paypal" else "",
-        "live_checkout": provider == "paypal" and PAYPAL_MODE == "live" and not PAYMENT_TEST_MODE,
-        "paypal_live_enabled": PAYPAL_LIVE_ENABLED,
+        "checkout_available": any(item["available"] for item in methods) or (provider == "demo" and PAYMENT_TEST_MODE),
+        "provider_label": "Stripe" if provider == "stripe" else "Demo",
+        "payment_methods": methods,
         "test_mode": PAYMENT_TEST_MODE,
-        "webhook_configured": bool(PAYPAL_WEBHOOK_ID) if provider == "paypal" else True,
-        "live_required": PAYPAL_LIVE_REQUIRED if provider == "paypal" else False,
-        "acceptance_price_active": bool(PAYPAL_TEST_PRICE_CENTS > 0),
-        "acceptance_price_cents": PAYPAL_TEST_PRICE_CENTS,
+        "webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
         "currency": "USD",
         "version": APP_VERSION,
         "plans": [{"id": key, **value} for key, value in PAYMENT_PLANS.items()],
@@ -4731,240 +4884,138 @@ def create_checkout(payload: CheckoutCreate, request: Request, user: dict = Depe
     payload.customer_name = user["name"]
     plan = PAYMENT_PLANS.get(payload.plan_id)
     if plan is None:
-        raise HTTPException(status_code=400, detail="Invalid payment plan.")
+        raise HTTPException(status_code=400, detail={"code": "PLAN_INVALID", "message": "Invalid payment plan."})
     if "@" not in payload.customer_email:
-        raise HTTPException(status_code=400, detail="A valid customer email is required.")
+        raise HTTPException(status_code=400, detail={"code": "EMAIL_INVALID", "message": "A valid customer email is required."})
+    if plan.get("kind") == "contact":
+        raise HTTPException(status_code=400, detail={"code": "SALES_REQUIRED", "message": "Enterprise plans require a sales consultation."})
+    if plan.get("amount_cents", 0) <= 0:
+        raise HTTPException(status_code=400, detail={"code": "FREE_PLAN", "message": "The Free plan does not require checkout."})
+
+    method = _payment_method(payload.payment_method)
+    provider = payment_provider()
+    if provider != "stripe" and not PAYMENT_TEST_MODE:
+        raise HTTPException(status_code=503, detail={
+            "code": "PAYMENT_NOT_CONFIGURED",
+            "message": "Stripe is not configured. Add STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET to the server environment.",
+        })
+
     payment_number = "PAY-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + secrets.token_hex(4).upper()
     base_url = PUBLIC_BASE_URL or (request.headers.get("origin") or str(request.base_url).rstrip("/"))
-    provider = payment_provider()
-    if plan.get("kind") == "contact":
-        raise HTTPException(status_code=400, detail="Enterprise plans require a sales consultation.")
-    if plan.get("amount_cents", 0) <= 0:
-        raise HTTPException(status_code=400, detail="The Free plan does not require checkout.")
-    if provider not in {"paddle", "stripe", "paypal"} and not PAYMENT_TEST_MODE:
-        raise HTTPException(status_code=503, detail="Real payment is not configured yet. Add Paddle, PayPal, or Stripe credentials in the server environment.")
     session_id = ""
-    if provider == "paddle":
-        price_id = str(PADDLE_PRICE_MAP.get(payload.plan_id, "")).strip()
-        if not price_id:
-            raise HTTPException(status_code=503, detail=f"Paddle price mapping is missing for plan: {payload.plan_id}")
-        try:
-            paddle_payload = {
-                "items": [{"price_id": price_id, "quantity": 1}],
-                "collection_mode": "automatic",
-                "custom_data": {
-                    "payment_number": payment_number,
-                    "plan_id": payload.plan_id,
-                    "customer_email": payload.customer_email.strip().lower(),
-                    "credits": plan["credits"],
-                },
-            }
-            if PADDLE_CHECKOUT_URL:
-                paddle_payload["checkout"] = {"url": PADDLE_CHECKOUT_URL}
-            response = paddle_request("/transactions", "POST", paddle_payload)
-            transaction = response.get("data") or {}
-            session_id = transaction.get("id", "")
-            checkout_url = ((transaction.get("checkout") or {}).get("url") or "").strip()
-            if not session_id or not checkout_url:
-                raise RuntimeError("Paddle did not return a transaction ID and checkout URL.")
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Paddle checkout creation failed: {exc}")
-    elif provider == "paypal":
-        try:
-            token = paypal_access_token()
-            return_url = PAYMENT_SUCCESS_URL or f"{base_url}/?payment=paypal-return&payment_number={urllib.parse.quote(payment_number)}&email={urllib.parse.quote(payload.customer_email.strip().lower())}"
-            cancel_url = PAYMENT_CANCEL_URL or f"{base_url}/?payment=cancelled"
-            paypal_order = paypal_request(
-                "/v2/checkout/orders",
-                "POST",
-                {
-                    "intent": "CAPTURE",
-                    "purchase_units": [{
-                        "reference_id": payment_number,
-                        "custom_id": payment_number,
-                        "description": f"Document Automation AI {plan['name']} · {plan['credits']:,} DA Credits",
-                        "amount": {"currency_code": plan["currency"].upper(), "value": f"{plan['amount_cents'] / 100:.2f}"},
-                    }],
-                    "payment_source": {"paypal": {"experience_context": {"brand_name": "Document Automation AI", "user_action": "PAY_NOW", "return_url": return_url, "cancel_url": cancel_url}}},
-                },
-                token,
-            )
-            session_id = paypal_order.get("id", "")
-            checkout_url = next((link.get("href", "") for link in paypal_order.get("links", []) if link.get("rel") == "payer-action"), "")
-            if not session_id or not checkout_url:
-                raise RuntimeError("PayPal did not return an approval URL.")
-        except Exception as exc:
-            logger.exception("PayPal checkout creation failed for plan=%s user=%s", payload.plan_id, payload.customer_email)
-            message = str(exc)
-            if payload.locale.lower().startswith("zh"):
-                if "HTTP 401" in message or "rejected the Client ID or Secret" in message:
-                    detail = "PayPal 凭证验证失败：请确认 Sandbox Client ID 和 Client Secret 来自同一个 REST API 应用，并重新复制到 Vercel 环境变量。"
-                else:
-                    detail = f"PayPal 创建支付订单失败：{message}"
-            elif payload.locale.lower().startswith("vi"):
-                detail = f"Không thể tạo đơn thanh toán PayPal: {message}"
-            else:
-                detail = f"PayPal checkout creation failed: {message}"
-            raise HTTPException(status_code=502, detail=detail)
-    elif provider == "stripe":
+    checkout_url = ""
+    billing_model = "recurring" if payload.payment_method == "card" and plan.get("kind") == "subscription" else "prepaid"
+
+    if provider == "stripe":
         try:
             import stripe
             stripe.api_key = STRIPE_SECRET_KEY
-            success_url = PAYMENT_SUCCESS_URL or f"{base_url}/?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
-            cancel_url = PAYMENT_CANCEL_URL or f"{base_url}/?payment=cancelled"
-            price_data = {"currency": plan["currency"], "unit_amount": plan["amount_cents"], "product_data": {"name": f"Document Automation AI {plan['name']}", "description": f"{plan['credits']:,} DA Credits"}}
-            mode = "payment"
-            if plan.get("kind") == "subscription":
-                mode = "subscription"
-                price_data["recurring"] = {"interval": "year" if plan.get("billing") == "yearly" else "month"}
-            session = stripe.checkout.Session.create(
-                mode=mode, customer_email=payload.customer_email.strip().lower(), client_reference_id=payment_number,
-                metadata={"payment_number": payment_number, "plan_id": payload.plan_id, "credits": str(plan["credits"])},
-                subscription_data={"metadata": {"payment_number": payment_number, "plan_id": payload.plan_id}} if mode == "subscription" else None,
-                line_items=[{"price_data": price_data, "quantity": 1}], success_url=success_url, cancel_url=cancel_url,
+            success_url = PAYMENT_SUCCESS_URL or (
+                f"{base_url}/?payment=success&payment_number={urllib.parse.quote(payment_number)}&session_id={{CHECKOUT_SESSION_ID}}"
             )
+            success_url = success_url.replace("{PAYMENT_NUMBER}", urllib.parse.quote(payment_number))
+            cancel_url = PAYMENT_CANCEL_URL or f"{base_url}/?payment=cancelled"
+            mode = "subscription" if billing_model == "recurring" else "payment"
+            product_description = f"{plan['credits']:,} DA Credits"
+            if billing_model == "prepaid" and plan.get("kind") == "subscription":
+                cycle = "year" if plan.get("billing") == "yearly" else "month"
+                product_description += f" · one prepaid {cycle} · manual renewal"
+            price_data = {
+                "currency": plan["currency"],
+                "unit_amount": plan["amount_cents"],
+                "product_data": {
+                    "name": f"Document Automation AI {plan['name']}",
+                    "description": product_description,
+                },
+            }
+            if mode == "subscription":
+                price_data["recurring"] = {"interval": "year" if plan.get("billing") == "yearly" else "month"}
+            metadata = {
+                "payment_number": payment_number,
+                "plan_id": payload.plan_id,
+                "credits": str(plan["credits"]),
+                "customer_email": payload.customer_email.strip().lower(),
+                "payment_method": payload.payment_method,
+                "billing_model": billing_model,
+            }
+            create_args = {
+                "mode": mode,
+                "customer_email": payload.customer_email.strip().lower(),
+                "client_reference_id": payment_number,
+                "metadata": metadata,
+                "payment_method_types": [payload.payment_method],
+                "line_items": [{"price_data": price_data, "quantity": 1}],
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+            }
+            if mode == "subscription":
+                create_args["subscription_data"] = {"metadata": metadata}
+            else:
+                create_args["payment_intent_data"] = {"metadata": metadata}
+            if payload.payment_method == "wechat_pay":
+                create_args["payment_method_options"] = {"wechat_pay": {"client": "web"}}
+            session = stripe.checkout.Session.create(**create_args)
             session_id = session.id
             checkout_url = session.url
+            if not session_id or not checkout_url:
+                raise RuntimeError("Stripe did not return a Checkout Session URL.")
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Stripe checkout creation failed: {exc}")
+            logger.exception("Stripe checkout creation failed method=%s plan=%s", payload.payment_method, payload.plan_id)
+            raise HTTPException(status_code=502, detail={
+                "code": "STRIPE_CHECKOUT_FAILED",
+                "message": f"Stripe could not create the {method['label']} checkout: {exc}",
+            }) from exc
     else:
-        checkout_url = f"{base_url}/?payment=demo&payment_number={payment_number}&email={payload.customer_email.strip().lower()}"
+        checkout_url = f"{base_url}/?payment=demo&payment_number={payment_number}"
+
     now = utc_now()
     with get_db() as db:
-        db.execute("INSERT INTO payment_orders (payment_number,plan_id,plan_name,customer_name,customer_email,amount_cents,currency,credits,provider,provider_session_id,checkout_url,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (payment_number,payload.plan_id,plan["name"],payload.customer_name.strip(),payload.customer_email.strip().lower(),plan["amount_cents"],plan["currency"].upper(),plan["credits"],provider,session_id,checkout_url,"pending",now,now))
+        db.execute(
+            "INSERT INTO payment_orders (payment_number,plan_id,plan_name,customer_name,customer_email,amount_cents,currency,credits,provider,payment_method,billing_model,provider_session_id,checkout_url,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                payment_number, payload.plan_id, plan["name"], payload.customer_name.strip(),
+                payload.customer_email.strip().lower(), plan["amount_cents"], plan["currency"].upper(),
+                plan["credits"], provider, payload.payment_method, billing_model, session_id,
+                checkout_url, "pending", now, now,
+            ),
+        )
         db.commit()
-    return {"payment_number": payment_number, "checkout_url": checkout_url, "provider": provider, "test_mode": PAYMENT_TEST_MODE}
+    return {
+        "payment_number": payment_number,
+        "checkout_url": checkout_url,
+        "provider": provider,
+        "payment_method": payload.payment_method,
+        "billing_model": billing_model,
+        "test_mode": PAYMENT_TEST_MODE,
+    }
 
 
 @app.post("/api/payments/demo-confirm")
-def confirm_demo_payment(payload: DemoPaymentConfirm) -> dict:
+def confirm_demo_payment(payload: DemoPaymentConfirm, user: dict = Depends(require_user)) -> dict:
     if payment_provider() != "demo" or not PAYMENT_TEST_MODE:
         raise HTTPException(status_code=403, detail="Demo payment confirmation is disabled.")
+    email = user["email"].strip().lower()
     with get_db() as db:
         row = db.execute("SELECT customer_email FROM payment_orders WHERE payment_number=?", (payload.payment_number,)).fetchone()
-    if row is None or row["customer_email"].lower() != payload.customer_email.strip().lower():
+    if row is None or row["customer_email"].strip().lower() != email:
         raise HTTPException(status_code=404, detail="Payment order was not found.")
     mark_payment_paid(payload.payment_number, provider_payment_id="demo_" + secrets.token_hex(6))
     return {"success": True, "payment_number": payload.payment_number, "status": "paid"}
 
 
 @app.get("/api/payments/status")
-def payment_status(payment_number: str = Query(...), email: str = Query(...)) -> dict:
+def payment_status(payment_number: str = Query(...), user: dict = Depends(require_user)) -> dict:
+    email = user["email"].strip().lower()
     with get_db() as db:
-        row = db.execute("SELECT payment_number,plan_id,plan_name,customer_email,amount_cents,currency,credits,provider,status,created_at,paid_at FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)", (payment_number.strip(),email.strip())).fetchone()
+        row = db.execute(
+            "SELECT payment_number,plan_id,plan_name,customer_email,amount_cents,currency,credits,provider,payment_method,billing_model,status,created_at,paid_at FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)",
+            (payment_number.strip(), email),
+        ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="Payment order was not found.")
+        raise HTTPException(status_code=404, detail={"code": "PAYMENT_NOT_FOUND", "message": "Payment order was not found."})
     return dict(row)
-
-
-@app.post("/api/payments/paypal/capture")
-def capture_paypal_payment(
-    order_id: str = Query(...),
-    payment_number: str = Query(default=""),
-    email: str = Query(default=""),
-) -> dict:
-    if payment_provider() != "paypal":
-        raise HTTPException(status_code=503, detail="PayPal is not configured.")
-    with get_db() as db:
-        if payment_number and email:
-            row = db.execute(
-                "SELECT * FROM payment_orders WHERE payment_number=? AND LOWER(customer_email)=LOWER(?)",
-                (payment_number.strip(), email.strip()),
-            ).fetchone()
-        else:
-            row = db.execute(
-                "SELECT * FROM payment_orders WHERE provider='paypal' AND provider_session_id=?",
-                (order_id.strip(),),
-            ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Payment order was not found for this PayPal order.")
-    payment_number = row["payment_number"]
-    if row["status"] == "paid":
-        return {
-            "success": True, "status": "paid", "payment_number": payment_number,
-            "customer_email": row["customer_email"], "plan_id": row["plan_id"],
-            "plan_name": row["plan_name"], "credits": row["credits"],
-            "provider_payment_id": row["provider_payment_id"] or "", "already_processed": True,
-        }
-    if row["provider"] != "paypal" or row["provider_session_id"] != order_id:
-        raise HTTPException(status_code=400, detail="PayPal order does not match this payment.")
-    try:
-        token = paypal_access_token()
-        result = paypal_request(f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture", "POST", {}, token)
-        status = result.get("status", "")
-        capture = (((result.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
-        capture_id = capture.get("id", "")
-        capture_status = capture.get("status", "")
-        if status != "COMPLETED" and capture_status != "COMPLETED":
-            raise RuntimeError(f"PayPal capture is not complete: {status or capture_status}")
-        mark_payment_paid(payment_number, order_id, capture_id)
-        return {
-            "success": True, "status": "paid", "payment_number": payment_number,
-            "customer_email": row["customer_email"], "plan_id": row["plan_id"],
-            "plan_name": row["plan_name"], "credits": row["credits"],
-            "provider_payment_id": capture_id, "already_processed": False,
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"PayPal capture failed: {exc}")
-
-
-@app.post("/api/payments/paypal/webhook")
-async def paypal_webhook(request: Request):
-    if payment_provider() != "paypal" or not PAYPAL_WEBHOOK_ID:
-        raise HTTPException(status_code=503, detail="PayPal webhook is not configured.")
-    event = await request.json()
-    try:
-        token = paypal_access_token()
-        verification = paypal_request("/v1/notifications/verify-webhook-signature", "POST", {
-            "auth_algo": request.headers.get("paypal-auth-algo", ""),
-            "cert_url": request.headers.get("paypal-cert-url", ""),
-            "transmission_id": request.headers.get("paypal-transmission-id", ""),
-            "transmission_sig": request.headers.get("paypal-transmission-sig", ""),
-            "transmission_time": request.headers.get("paypal-transmission-time", ""),
-            "webhook_id": PAYPAL_WEBHOOK_ID,
-            "webhook_event": event,
-        }, token)
-        if verification.get("verification_status") != "SUCCESS":
-            raise HTTPException(status_code=400, detail="Invalid PayPal webhook signature.")
-        if event.get("event_type") == "PAYMENT.CAPTURE.COMPLETED":
-            resource = event.get("resource") or {}
-            order_id = ((resource.get("supplementary_data") or {}).get("related_ids") or {}).get("order_id", "")
-            with get_db() as db:
-                row = db.execute("SELECT payment_number FROM payment_orders WHERE provider='paypal' AND provider_session_id=?", (order_id,)).fetchone()
-            if row:
-                mark_payment_paid(row["payment_number"], order_id, resource.get("id", ""))
-        return {"received": True}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"PayPal webhook processing failed: {exc}")
-
-
-@app.post("/api/payments/paddle/webhook")
-async def paddle_webhook(request: Request):
-    if payment_provider() != "paddle" or not PADDLE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=503, detail="Paddle webhook is not configured.")
-    raw_body = await request.body()
-    signature = request.headers.get("paddle-signature", "")
-    if not verify_paddle_signature(raw_body, signature):
-        raise HTTPException(status_code=400, detail="Invalid Paddle webhook signature.")
-    try:
-        event = json.loads(raw_body.decode("utf-8"))
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid Paddle webhook payload: {exc}")
-    event_type = event.get("event_type", "")
-    data = event.get("data") or {}
-    if event_type in {"transaction.completed", "transaction.paid"}:
-        custom_data = data.get("custom_data") or {}
-        payment_number = custom_data.get("payment_number", "")
-        transaction_id = data.get("id", "")
-        if not payment_number and transaction_id:
-            with get_db() as db:
-                row = db.execute("SELECT payment_number FROM payment_orders WHERE provider='paddle' AND provider_session_id=?", (transaction_id,)).fetchone()
-            payment_number = row["payment_number"] if row else ""
-        if payment_number:
-            mark_payment_paid(payment_number, transaction_id, transaction_id)
-    return {"received": True}
 
 
 @app.post("/api/payments/stripe/webhook")
@@ -4977,15 +5028,69 @@ async def stripe_webhook(request: Request):
         import stripe
         event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}")
-    event_type = event.get("type", "")
-    obj = event.get("data", {}).get("object", {})
-    if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"} and obj.get("payment_status") == "paid":
-        payment_number = (obj.get("metadata") or {}).get("payment_number") or obj.get("client_reference_id")
-        if payment_number:
-            mark_payment_paid(payment_number, obj.get("id", ""), obj.get("payment_intent", "") or "")
-    return {"received": True}
+        raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}") from exc
 
+    event_id = str(event.get("id") or "").strip()
+    event_type = str(event.get("type") or "")
+    obj = event.get("data", {}).get("object", {})
+    if not isinstance(obj, dict):
+        obj = dict(obj)
+    metadata = _stripe_event_metadata(obj)
+    payment_number = str(metadata.get("payment_number") or obj.get("client_reference_id") or "").strip()
+    object_id = _stripe_object_id(obj)
+
+    if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
+        if event_type == "checkout.session.async_payment_succeeded" or obj.get("payment_status") == "paid":
+            provider_payment_id = _stripe_subscription_id(obj) or _stripe_object_id(obj.get("payment_intent"))
+            if payment_number:
+                mark_payment_paid(
+                    payment_number,
+                    object_id,
+                    provider_payment_id,
+                    event_id,
+                )
+    elif event_type in {"checkout.session.async_payment_failed", "checkout.session.expired"}:
+        target_status = "failed" if event_type.endswith("failed") else "expired"
+        now = utc_now()
+
+        def operation(db):
+            if payment_number:
+                db.execute(
+                    "UPDATE payment_orders SET status=?,updated_at=? WHERE payment_number=? AND status='pending'",
+                    (target_status, now, payment_number),
+                )
+            elif object_id:
+                db.execute(
+                    "UPDATE payment_orders SET status=?,updated_at=? WHERE provider='stripe' AND provider_session_id=? AND status='pending'",
+                    (target_status, now, object_id),
+                )
+
+        run_db_write(operation)
+    elif event_type == "invoice.paid":
+        billing_reason = str(obj.get("billing_reason") or "")
+        if billing_reason not in {"subscription_create", "manual"}:
+            mark_subscription_cycle_paid(
+                _stripe_subscription_id(obj),
+                event_id,
+                invoice_id=object_id,
+                payment_number=payment_number,
+                period_end=_stripe_invoice_period_end(obj),
+            )
+    elif event_type == "invoice.payment_failed":
+        set_subscription_status(
+            _stripe_subscription_id(obj),
+            "past_due",
+            event_id,
+            {"invoice_id": object_id, "billing_reason": obj.get("billing_reason", "")},
+        )
+    elif event_type == "customer.subscription.deleted":
+        set_subscription_status(
+            object_id,
+            "cancelled",
+            event_id,
+            {"cancel_at_period_end": bool(obj.get("cancel_at_period_end"))},
+        )
+    return {"received": True}
 
 
 @app.get("/api/licenses")
@@ -5017,7 +5122,7 @@ def activate_license(license_key: str, device_id: str = Query(...), customer_ema
 def run_enterprise_acceptance() -> dict:
     checks=[]
     def add(cid,name,ok,detail): checks.append({"id":cid,"name":name,"status":"PASS" if ok else "FAIL","detail":detail})
-    add("V28-001","版本信息",APP_VERSION=="45.0.5",f"Backend version {APP_VERSION}")
+    add("V28-001","版本信息",APP_VERSION=="46.0.0",f"Backend version {APP_VERSION}")
     try:
         with get_db() as db:
             tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -5034,9 +5139,9 @@ def run_enterprise_acceptance() -> dict:
     except Exception as exc:
         add("V28-002","数据库检查",False,str(exc))
     provider=payment_provider()
-    add("V28-007","支付插件选择",provider in {"demo","paddle","paypal","stripe"},f"Active provider: {provider}")
+    add("V28-007","支付插件选择",provider in {"demo","stripe"},f"Active provider: {provider}")
     add("V28-008","银行卡数据隔离",True,"Application schema stores no card number or CVV fields")
-    add("V28-009","Webhook 路由",True,"Paddle, PayPal and Stripe webhook routes registered")
+    add("V28-009","Webhook 路由",True,"Stripe Checkout webhook route registered")
     add("V28-010","动态处理界面",True,"Frontend uses timed live progress, page and stage updates")
     passed=sum(1 for x in checks if x["status"]=="PASS")
     failed=len(checks)-passed

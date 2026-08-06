@@ -30,11 +30,27 @@ const resolveApiBase = () => {
   return '';
 };
 const API_BASE = resolveApiBase();
-const VERSION = '45.0.6';
+const VERSION = '46.0.0';
+const normalizeApiDetail = detail => {
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) return {
+    code: String(detail.code || ''),
+    message: String(detail.message || ''),
+    email: String(detail.email || ''),
+    requestId: String(detail.request_id || detail.requestId || '')
+  };
+  return { code: '', message: String(detail || ''), email: '', requestId: '' };
+};
+const apiErrorMessage = detail => normalizeApiDetail(detail).message || String(detail || '');
 const authMessage = (detail, zh, status) => {
-  const value = String(detail || '').trim();
+  const info = normalizeApiDetail(detail);
+  const value = info.message.trim();
+  if (info.code === 'EMAIL_NOT_VERIFIED') return zh ? '邮箱尚未验证，请完成验证码验证后登录。' : 'Verify your email before signing in.';
+  if (info.code === 'ACCOUNT_DISABLED') return zh ? '该账户已被管理员停用，请联系管理员。' : 'This account was disabled by an administrator.';
+  if (info.code === 'ACCOUNT_SUSPENDED') return zh ? '该账户暂时被暂停，请稍后重试或联系管理员。' : 'This account is temporarily suspended.';
+  if (info.code === 'ACCOUNT_UNAVAILABLE') return zh ? '该账户当前不可用，请联系管理员。' : 'This account is currently unavailable.';
+  if (info.code === 'SECURITY_POLICY_BLOCKED') return zh ? `当前登录请求被安全策略阻止。${info.requestId ? ` 请求编号：${info.requestId}` : ''}` : `This sign-in request was blocked by the security policy.${info.requestId ? ` Request ID: ${info.requestId}` : ''}`;
   if (status === 401 || /incorrect email or password/i.test(value)) return zh ? '邮箱或密码错误，请重新输入。' : 'Incorrect email or password.';
-  if (status === 403 || /not active/i.test(value)) return zh ? '该账户当前不可用，请联系管理员。' : 'This account is not active. Please contact an administrator.';
+  if (status === 403 || /not active/i.test(value)) return zh ? '当前请求未获授权，请检查账户状态后重试。' : 'This request is not authorized. Check the account status and try again.';
   if (status === 409 || /already exists/i.test(value)) return zh ? '该邮箱已经注册，请直接登录。' : 'This email is already registered. Please sign in.';
   if (status === 429) {
     const seconds = value.match(/(\d+)\s*秒/);
@@ -204,7 +220,7 @@ const I18N = {
     workflowTitle: '从上传到交付，全流程可视化',
     workflowDesc: '不再依赖手工复制、格式调整和重复检查。',
     pricingTitle: '商业套餐与第三方结算中心',
-    pricingDesc: '统一管理套餐、订单、AI 点数与第三方安全结算；优先支持 Paddle，并保留 PayPal、Stripe 插件。',
+    pricingDesc: '统一管理套餐、订单与 AI 点数；通过 Stripe 提供银行卡、支付宝和微信支付。',
     ctaTitle: '把重复文档工作交给 AI',
     ctaDesc: '从一个文件开始体验，再逐步接入整个企业工作流。',
     freeStart: '免费开始',
@@ -400,7 +416,7 @@ const I18N = {
     workflowTitle: 'A visible workflow from upload to delivery',
     workflowDesc: 'Reduce copying, formatting and repetitive checks.',
     pricingTitle: 'Commercial plans and payment hub',
-    pricingDesc: 'Manage plans, orders, AI credits and secure third-party checkout in one place, with Paddle first and PayPal/Stripe plugins available.',
+    pricingDesc: 'Manage plans, orders, and AI credits with Stripe card, Alipay, and WeChat Pay checkout.',
     ctaTitle: 'Give repetitive document work to AI',
     ctaDesc: 'Start with one file, then connect the full enterprise workflow.',
     freeStart: 'Start free',
@@ -1231,7 +1247,7 @@ function App() {
   }, []);
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
-    if (['paypal-return', 'demo', 'cancelled'].includes(q.get('payment'))) setPage('billing');
+    if (['success', 'demo', 'cancelled'].includes(q.get('payment'))) setPage('billing');
   }, []);
   useEffect(() => {
     if (page !== 'order') return;
@@ -3062,7 +3078,8 @@ function PaymentCenter({
     [wallet, setWallet] = useState(null),
     [salesOpen, setSalesOpen] = useState(false),
     [creditsHelpOpen, setCreditsHelpOpen] = useState(false),
-    [paymentSuccess, setPaymentSuccess] = useState(null);
+    [paymentSuccess, setPaymentSuccess] = useState(null),
+    [paymentMethod, setPaymentMethod] = useState('card');
   const L = (zh, en, vi) => isZh ? zh : isVi ? vi : en;
   const names = {
     Free: L('免费版', 'Free', 'Miễn phí'),
@@ -3077,73 +3094,87 @@ function PaymentCenter({
       name: currentUser.name || '',
       email: currentUser.email || ''
     }));
-    fetch(`${API_BASE}/api/payments/config`).then(r => r.json()).then(setConfig).catch(() => setMessage(L('商业服务暂时不可用。', 'Commercial service unavailable.', 'Dịch vụ thương mại chưa khả dụng.')));
+    fetch(`${API_BASE}/api/payments/config`).then(async r => {
+      const j = await readJson(r);
+      if (!r.ok) throw new Error(apiErrorMessage(j.detail) || 'Commercial service unavailable.');
+      setConfig(j);
+      const first = (j.payment_methods || []).find(item => item.enabled && (item.available || j.test_mode));
+      if (first) setPaymentMethod(current => (j.payment_methods || []).some(item => item.id === current && item.enabled && (item.available || j.test_mode)) ? current : first.id);
+    }).catch(() => setMessage(L('商业服务暂时不可用。', 'Commercial service unavailable.', 'Dịch vụ thương mại chưa khả dụng.')));
   }, []);
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (q.get('payment') !== 'demo') return;
-    const paymentNumber = q.get('payment_number'),
-      email = q.get('email');
-    if (!paymentNumber || !email) return;
-    setForm(v => ({
-      ...v,
-      email
-    }));
+    const paymentNumber = q.get('payment_number');
+    if (!paymentNumber || !authToken) return;
     setBusy(true);
     setMessage(L('正在完成 Demo 支付验收，请稍候…', 'Completing Demo checkout acceptance…', 'Đang hoàn tất thanh toán Demo…'));
     fetch(`${API_BASE}/api/payments/demo-confirm`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`
       },
-      body: JSON.stringify({
-        payment_number: paymentNumber,
-        customer_email: email
-      })
+      body: JSON.stringify({ payment_number: paymentNumber })
     }).then(async r => {
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || 'Demo checkout failed');
       setMessage(L('Demo 付款成功：订单、点数和 License 已完成。未产生真实扣款。', 'Demo payment succeeded: order, credits and license are complete. No real charge was made.', 'Thanh toán Demo thành công: đơn hàng, điểm và License đã hoàn tất. Không có khoản trừ tiền thật.'));
       setTab('wallet');
-      return fetch(`${API_BASE}/api/wallet?customer_email=${encodeURIComponent(email)}`);
+      return fetch(`${API_BASE}/api/wallet`, { headers: { Authorization: `Bearer ${authToken}` } });
     }).then(r => r && r.json()).then(j => j && setWallet(j)).catch(e => setMessage(e.message)).finally(() => {
       setBusy(false);
       window.history.replaceState({}, '', `${window.location.pathname}#pricing`);
     });
-  }, []);
+  }, [authToken]);
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
-    if (q.get('payment') !== 'paypal-return') return;
-    const orderId = q.get('token');
-    if (!orderId) return;
-    setBusy(true);
-    setMessage(L('正在确认 PayPal 付款，请稍候…', 'Confirming your PayPal payment…', 'Đang xác nhận thanh toán PayPal…'));
-    fetch(`${API_BASE}/api/payments/paypal/capture?order_id=${encodeURIComponent(orderId)}`, {
-      method: 'POST'
-    }).then(async r => {
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || 'PayPal capture failed');
-      const email = j.customer_email || currentUser?.email || '';
-      if (email) setForm(v => ({
-        ...v,
-        email
-      }));
-      setPaymentSuccess(j);
-      setMessage(L('付款成功，套餐或 DA AI 点数已经到账。', 'Payment successful. Your plan or DA Credits are now active.', 'Thanh toán thành công. Gói hoặc DA Credits đã được kích hoạt.'));
-      setTab('wallet');
-      if (!email) return null;
-      return fetch(`${API_BASE}/api/wallet`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`
+    if (q.get('payment') !== 'success') return;
+    const paymentNumber = q.get('payment_number');
+    if (!paymentNumber || !authToken) return;
+    let cancelled = false;
+    const wait = ms => new Promise(resolve => window.setTimeout(resolve, ms));
+    const confirmPayment = async () => {
+      setBusy(true);
+      setMessage(L('正在确认付款结果，请稍候…', 'Confirming your payment…', 'Đang xác nhận thanh toán…'));
+      try {
+        let status = null;
+        for (let attempt = 0; attempt < 10 && !cancelled; attempt += 1) {
+          const response = await fetch(`${API_BASE}/api/payments/status?payment_number=${encodeURIComponent(paymentNumber)}`, {
+            cache: 'no-store',
+            headers: { Authorization: `Bearer ${authToken}` }
+          });
+          const body = await readJson(response);
+          if (!response.ok) throw new Error(apiErrorMessage(body.detail) || 'Payment status request failed');
+          status = body;
+          if (body.status === 'paid') break;
+          if (['failed', 'expired', 'cancelled'].includes(body.status)) throw new Error(L('付款未完成，请重新选择付款方式。', 'Payment was not completed. Choose a payment method and try again.', 'Thanh toán chưa hoàn tất. Vui lòng thử lại.'));
+          await wait(1500);
         }
-      });
-    }).then(r => r && r.json()).then(j => j && setWallet(j)).catch(e => setMessage(e.message)).finally(() => {
-      setBusy(false);
-      window.history.replaceState({}, '', `${window.location.pathname}#payment-success`);
-    });
-  }, [authToken, currentUser?.email]);
+        if (cancelled) return;
+        if (!status || status.status !== 'paid') throw new Error(L('付款仍在处理中，请稍后在钱包中刷新状态。', 'Payment is still processing. Refresh your wallet shortly.', 'Thanh toán vẫn đang xử lý. Vui lòng làm mới ví sau.'));
+        setPaymentSuccess(status);
+        setMessage(L('付款成功，套餐或 DA AI 点数已经到账。', 'Payment successful. Your plan or DA Credits are now active.', 'Thanh toán thành công. Gói hoặc DA Credits đã được kích hoạt.'));
+        setTab('wallet');
+        const walletResponse = await fetch(`${API_BASE}/api/wallet`, { headers: { Authorization: `Bearer ${authToken}` } });
+        const walletBody = await readJson(walletResponse);
+        if (walletResponse.ok) setWallet(walletBody);
+      } catch (error) {
+        if (!cancelled) setMessage(error.message);
+      } finally {
+        if (!cancelled) {
+          setBusy(false);
+          window.history.replaceState({}, '', `${window.location.pathname}#payment-success`);
+        }
+      }
+    };
+    confirmPayment();
+    return () => { cancelled = true; };
+  }, [authToken]);
   const plans = config.plans.filter(p => p.kind === 'subscription' && (p.billing === billing || p.id === 'free')).concat(config.plans.filter(p => p.kind === 'contact'));
   const packs = config.plans.filter(p => p.kind === 'credit_pack');
+  const availableMethods = (config.payment_methods || []).filter(item => item.enabled && (item.available || config.test_mode));
+  const selectedMethod = availableMethods.find(item => item.id === paymentMethod) || availableMethods[0] || null;
   const choose = p => {
     setForm(v => ({
       ...v,
@@ -3182,7 +3213,7 @@ function PaymentCenter({
         })
       });
       const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || 'Activation failed');
+      if (!r.ok) throw new Error(apiErrorMessage(j.detail) || 'Activation failed');
       setWallet(j.wallet);
       setTab('wallet');
       setMessage(L('免费版已开通，500 DA AI 点数已到账。', 'Free plan activated with 500 DA Credits.', 'Đã kích hoạt gói miễn phí và cộng 500 DA Credits.'));
@@ -3207,7 +3238,7 @@ function PaymentCenter({
     }
     choose(p);
     if (!currentUser?.email) return setMessage(L('当前账户缺少邮箱，请前往设置 → 个人资料补充。', 'Your account has no email. Add it in Settings → Profile.', 'Tài khoản chưa có email. Hãy thêm trong Cài đặt → Hồ sơ.'));
-    if (!config.checkout_available) return setMessage(L('当前没有可用的支付插件。请在服务器配置 Paddle、PayPal 或 Stripe；本地验收可启用 Demo 支付模式。', 'No payment plugin is available. Configure Paddle, PayPal or Stripe on the server, or enable Demo payment mode for local acceptance.', 'Chưa có plugin thanh toán. Hãy cấu hình Paddle, PayPal hoặc Stripe, hoặc bật chế độ Demo để nghiệm thu.'));
+    if (!config.checkout_available || !selectedMethod) return setMessage(L('当前没有可用的付款方式。请在服务器配置 Stripe，并在 Stripe 后台启用银行卡、支付宝或微信支付。', 'No payment method is available. Configure Stripe and enable card, Alipay, or WeChat Pay in Stripe.', 'Chưa có phương thức thanh toán. Hãy cấu hình Stripe và bật thẻ, Alipay hoặc WeChat Pay.'));
     setBusy(true);
     setMessage('');
     try {
@@ -3221,7 +3252,8 @@ function PaymentCenter({
           plan_id: p.id,
           customer_name: currentUser?.name || form.name,
           customer_email: currentUser?.email || form.email,
-          locale
+          locale,
+          payment_method: selectedMethod.id
         })
       });
       const raw = await r.text();
@@ -3233,7 +3265,7 @@ function PaymentCenter({
           detail: raw || `Checkout failed (HTTP ${r.status})`
         };
       }
-      if (!r.ok) throw new Error(j.detail || `Checkout failed (HTTP ${r.status})`);
+      if (!r.ok) throw new Error(apiErrorMessage(j.detail) || `Checkout failed (HTTP ${r.status})`);
       if (!j.checkout_url) throw new Error('Checkout URL was not returned by the server.');
       window.location.href = j.checkout_url;
     } catch (e) {
@@ -3313,7 +3345,7 @@ function PaymentCenter({
             }} disabled={busy}>{config.checkout_available ? L(config.provider === 'demo' ? '模拟购买' : '立即购买', config.provider === 'demo' ? 'Demo purchase' : 'Buy now', config.provider === 'demo' ? 'Mua Demo' : 'Mua ngay') : L('选择额度包', 'Choose credit pack', 'Chọn gói điểm')}</button></article>;
         })}</section><p className="estimate-note">{L('以上数量仅为便于理解的估算，实际消耗取决于文件页数、大小、语言、版式和处理复杂度。', 'Usage figures are estimates for guidance only. Actual credit use depends on pages, file size, language, layout and processing complexity.', 'Số lượng trên chỉ là ước tính tham khảo. Điểm thực tế phụ thuộc vào số trang, kích thước, ngôn ngữ, bố cục và độ phức tạp.')}</p></>}{tab === 'wallet' && <section className="wallet-panel wallet-v282 wallet-center"><div className="wallet-center-head"><div><span>WALLET CENTER</span><h2>{L('我的钱包', 'My wallet', 'Ví của tôi')}</h2><p>{L('统一查看额度余额、消费流水、支付记录与发票。', 'View balances, usage, payments and invoices in one place.', 'Xem số dư, giao dịch, thanh toán và hóa đơn.')}</p></div><div><button type="button" onClick={() => setTab('credits')}>{L('充值 Credits', 'Buy Credits', 'Mua Credits')}</button><button type="button" onClick={() => setTab('plans')}>{L('管理套餐', 'Manage plan', 'Quản lý gói')}</button></div></div>{wallet ? <><div className="wallet-hero-card"><div className="wallet-total"><small>{L('可用 AI 处理额度', 'Available AI processing balance', 'Số dư điểm xử lý AI')}</small><b>{wallet.total_credits.toLocaleString()} DA Credits</b><span>{names[(config.plans.find(p => p.id === wallet.plan_id) || {}).name] || wallet.plan_id}</span></div><div className="wallet-usage"><span>{L('当前套餐使用情况', 'Current plan usage', 'Mức sử dụng gói hiện tại')}</span><div><i style={{
                 width: `${Math.min(100, Math.round((wallet.subscription_credits - wallet.total_credits) / Math.max(1, wallet.subscription_credits) * 100))}%`
-              }} /></div><small>{L('余额和流水由支付与任务系统实时同步', 'Balance and activity sync with payment and processing systems', 'Số dư và giao dịch được đồng bộ theo thời gian thực')}</small></div></div><div className="wallet-buckets"><div><b>{wallet.subscription_credits.toLocaleString()}</b><small>{L('套餐赠送额度', 'Subscription credits', 'Điểm từ gói')}</small></div><div><b>{wallet.purchased_credits.toLocaleString()}</b><small>{L('单独购买额度', 'Purchased credits', 'Điểm đã mua')}</small></div><div><b>{wallet.bonus_credits.toLocaleString()}</b><small>{L('奖励额度', 'Bonus credits', 'Điểm thưởng')}</small></div><div><b>{wallet.ledger?.length || 0}</b><small>{L('交易记录', 'Transactions', 'Giao dịch')}</small></div></div><div className="wallet-record-grid"><div className="wallet-ledger"><h3>{L('最近流水', 'Recent activity', 'Giao dịch gần đây')}</h3>{wallet.ledger?.length > 0 ? wallet.ledger.slice(0, 10).map(x => <div key={x.id}><span>{x.note || x.transaction_type}</span><b>{x.credits > 0 ? '+' : ''}{x.credits}</b></div>) : <p>{L('暂无消费或充值记录。', 'No credit activity yet.', 'Chưa có giao dịch điểm.')}</p>}</div><div className="wallet-ledger"><h3>{L('支付与发票', 'Payments & invoices', 'Thanh toán & hóa đơn')}</h3><p>{L('支付成功后，订单和发票记录将在此显示。', 'Completed payments and invoices will appear here.', 'Thanh toán và hóa đơn sẽ hiển thị tại đây.')}</p><button type="button" onClick={() => setMessage(L('暂无可下载发票。', 'No invoice is available yet.', 'Chưa có hóa đơn.'))}>{L('查看发票', 'View invoices', 'Xem hóa đơn')}</button></div></div></> : <div className="wallet-loading-card"><b>{L('正在读取钱包数据', 'Loading wallet', 'Đang tải ví')}</b><p>{L('请稍候，系统正在同步余额与交易记录。', 'Please wait while balances and activity are synchronized.', 'Vui lòng chờ đồng bộ số dư và giao dịch.')}</p><button className="submit-order" onClick={loadWallet}>{L('重新查询', 'Retry', 'Thử lại')}</button></div>}</section>}{tab !== 'wallet' && <aside className="payment-form commercial-checkout"><div className="checkout-step-head"><span>02</span><div><small>{L('账户与结算', 'ACCOUNT & CHECKOUT', 'TÀI KHOẢN & THANH TOÁN')}</small><h2>{L('确认账户与订单', 'Confirm account and order', 'Xác nhận tài khoản và đơn hàng')}</h2></div></div>{selectedPlan && <div className="checkout-order-summary"><div><small>{L('当前套餐', 'Selected plan', 'Gói đã chọn')}</small><b>{selectedPlanName}</b></div><div><small>{L('价格', 'Price', 'Giá')}</small><b>{selectedAmount || L('定制报价', 'Custom quote', 'Báo giá tùy chỉnh')}{selectedCycle && <em>{selectedCycle}</em>}</b></div><div><small>{L('付款方式', 'Payment method', 'Phương thức')}</small><b>{config.provider_label || 'PayPal'}</b></div></div>}<div className="checkout-account-readonly"><div><small>{L('付款账户', 'Billing account', 'Tài khoản thanh toán')}</small><b>{currentUser?.name || L('未填写姓名', 'Name not set', 'Chưa có tên')}</b><span>{currentUser?.email || L('未填写邮箱', 'Email not set', 'Chưa có email')}</span></div><button type="button" onClick={() => setPage('settings')}>{L('前往设置修改', 'Edit in settings', 'Sửa trong cài đặt')}</button></div>{message && <div className="alert">{message}</div>}<button className="submit-order checkout-primary" onClick={() => checkout()} disabled={busy || !selectedPlan}><ShieldCheck />{busy ? '...' : !selectedPlan ? L('请先选择套餐', 'Choose a plan first', 'Vui lòng chọn gói') : form.plan_id === 'free' ? L('开通免费版', 'Activate free', 'Kích hoạt miễn phí') : selectedPlan?.kind === 'contact' ? L('联系企业销售', 'Contact enterprise sales', 'Liên hệ bán hàng') : config.checkout_available ? L(`继续支付 ${selectedAmount}`, `Continue · Pay ${selectedAmount}`, `Tiếp tục thanh toán ${selectedAmount}`) : L('确认所选套餐', 'Confirm selection', 'Xác nhận gói')}</button><small className="secure-note"><ShieldCheck />{config.provider_label || 'Commerce Hub'} Checkout · HTTPS · Verified Webhooks · Idempotent crediting</small></aside>}{creditsHelpOpen && <div className="modal-backdrop" onClick={() => setCreditsHelpOpen(false)}><section className="sales-modal credits-help-modal" onClick={e => e.stopPropagation()}><button className="modal-close" onClick={() => setCreditsHelpOpen(false)}><X /></button><span className="help-kicker">DA CREDITS</span><h2>{L('什么是 DA AI 点数？', 'What are DA Credits?', 'DA Credits là gì?')}</h2><p>{L('DA AI 点数是平台的 AI 处理额度，不是现金，也不是会员等级。', 'DA Credits are the platform’s AI processing units. They are not cash and they are not a membership tier.', 'DA Credits là đơn vị xử lý AI của nền tảng, không phải tiền mặt và không phải cấp thành viên.')}</p><div className="credits-help-grid"><div><b>{L('可以做什么', 'What they are used for', 'Dùng để làm gì')}</b><span>{L('文档翻译、OCR、PDF/Word/Excel/PPT 转换、数据提取和智能整理。', 'Translation, OCR, PDF/Word/Excel/PPT conversion, data extraction and smart organization.', 'Dịch tài liệu, OCR, chuyển đổi PDF/Word/Excel/PPT, trích xuất dữ liệu và xử lý thông minh.')}</span></div><div><b>{L('如何获得', 'How you get them', 'Cách nhận điểm')}</b><span>{L('会员套餐每月自动赠送；余额不足时也可以一次性购买。', 'Monthly credits come with your subscription; extra credits can be purchased once when needed.', 'Gói thành viên tặng điểm hàng tháng; có thể mua thêm một lần khi cần.')}</span></div><div><b>{L('如何消耗', 'How they are used', 'Cách tiêu hao')}</b><span>{L('实际消耗由文件大小、页数、语言、功能和版式复杂度决定。', 'Actual use depends on file size, pages, language, selected feature and layout complexity.', 'Mức tiêu hao phụ thuộc vào kích thước, số trang, ngôn ngữ, tính năng và độ phức tạp bố cục.')}</span></div><div><b>{L('是否自动续费', 'Auto-renewal', 'Tự động gia hạn')}</b><span>{L('单独购买的点数包不会自动续费；会员套餐是否续费以结算页面说明为准。', 'Credit packs do not auto-renew. Subscription renewal is shown clearly during checkout.', 'Gói điểm mua riêng không tự động gia hạn; việc gia hạn gói thành viên được hiển thị rõ khi thanh toán.')}</span></div></div><p className="estimate-note">{L('系统会在正式计费前显示预计消耗；处理完成后可在钱包中查看实际扣除记录。', 'The system will show an estimated cost before billing and the actual deduction in your wallet after processing.', 'Hệ thống sẽ hiển thị mức tiêu hao dự kiến trước khi tính phí và khoản trừ thực tế trong ví sau khi xử lý.')}</p></section></div>}{salesOpen && <div className="modal-backdrop" onClick={() => setSalesOpen(false)}><section className="sales-modal" onClick={e => e.stopPropagation()}><button className="modal-close" onClick={() => setSalesOpen(false)}><X /></button><h2>{L('联系企业销售', 'Contact Enterprise Sales', 'Liên hệ bán hàng doanh nghiệp')}</h2><p>{L('提交后我们会通过邮箱与你联系并提供定制报价。', 'We will contact you by email with a custom quote.', 'Chúng tôi sẽ liên hệ qua email và gửi báo giá tùy chỉnh.')}</p><label>{L('姓名', 'Name', 'Họ tên')}<input value={form.name} onChange={e => setForm({
+              }} /></div><small>{L('余额和流水由支付与任务系统实时同步', 'Balance and activity sync with payment and processing systems', 'Số dư và giao dịch được đồng bộ theo thời gian thực')}</small></div></div><div className="wallet-buckets"><div><b>{wallet.subscription_credits.toLocaleString()}</b><small>{L('套餐赠送额度', 'Subscription credits', 'Điểm từ gói')}</small></div><div><b>{wallet.purchased_credits.toLocaleString()}</b><small>{L('单独购买额度', 'Purchased credits', 'Điểm đã mua')}</small></div><div><b>{wallet.bonus_credits.toLocaleString()}</b><small>{L('奖励额度', 'Bonus credits', 'Điểm thưởng')}</small></div><div><b>{wallet.ledger?.length || 0}</b><small>{L('交易记录', 'Transactions', 'Giao dịch')}</small></div></div><div className="wallet-record-grid"><div className="wallet-ledger"><h3>{L('最近流水', 'Recent activity', 'Giao dịch gần đây')}</h3>{wallet.ledger?.length > 0 ? wallet.ledger.slice(0, 10).map(x => <div key={x.id}><span>{x.note || x.transaction_type}</span><b>{x.credits > 0 ? '+' : ''}{x.credits}</b></div>) : <p>{L('暂无消费或充值记录。', 'No credit activity yet.', 'Chưa có giao dịch điểm.')}</p>}</div><div className="wallet-ledger"><h3>{L('支付与发票', 'Payments & invoices', 'Thanh toán & hóa đơn')}</h3><p>{L('支付成功后，订单和发票记录将在此显示。', 'Completed payments and invoices will appear here.', 'Thanh toán và hóa đơn sẽ hiển thị tại đây.')}</p><button type="button" onClick={() => setMessage(L('暂无可下载发票。', 'No invoice is available yet.', 'Chưa có hóa đơn.'))}>{L('查看发票', 'View invoices', 'Xem hóa đơn')}</button></div></div></> : <div className="wallet-loading-card"><b>{L('正在读取钱包数据', 'Loading wallet', 'Đang tải ví')}</b><p>{L('请稍候，系统正在同步余额与交易记录。', 'Please wait while balances and activity are synchronized.', 'Vui lòng chờ đồng bộ số dư và giao dịch.')}</p><button className="submit-order" onClick={loadWallet}>{L('重新查询', 'Retry', 'Thử lại')}</button></div>}</section>}{tab !== 'wallet' && <aside className="payment-form commercial-checkout"><div className="checkout-step-head"><span>02</span><div><small>{L('账户与结算', 'ACCOUNT & CHECKOUT', 'TÀI KHOẢN & THANH TOÁN')}</small><h2>{L('确认账户与订单', 'Confirm account and order', 'Xác nhận tài khoản và đơn hàng')}</h2></div></div>{selectedPlan && <div className="checkout-order-summary"><div><small>{L('当前套餐', 'Selected plan', 'Gói đã chọn')}</small><b>{selectedPlanName}</b></div><div><small>{L('价格', 'Price', 'Giá')}</small><b>{selectedAmount || L('定制报价', 'Custom quote', 'Báo giá tùy chỉnh')}{selectedCycle && <em>{selectedCycle}</em>}</b></div><div><small>{L('付款方式', 'Payment method', 'Phương thức')}</small><b>{selectedMethod ? isZh ? selectedMethod.label_zh : selectedMethod.label : config.provider_label || 'Stripe'}</b></div></div>}<div className="checkout-account-readonly"><div><small>{L('付款账户', 'Billing account', 'Tài khoản thanh toán')}</small><b>{currentUser?.name || L('未填写姓名', 'Name not set', 'Chưa có tên')}</b><span>{currentUser?.email || L('未填写邮箱', 'Email not set', 'Chưa có email')}</span></div><button type="button" onClick={() => setPage('settings')}>{L('前往设置修改', 'Edit in settings', 'Sửa trong cài đặt')}</button></div>{availableMethods.length > 0 && selectedPlan?.amount_cents > 0 && <section className="payment-method-selector"><div><small>{L('选择付款方式', 'Choose payment method', 'Chọn phương thức thanh toán')}</small><b>{L('由 Stripe 安全结算', 'Secure checkout by Stripe', 'Thanh toán an toàn qua Stripe')}</b></div><div className="payment-method-options">{availableMethods.map(method => <button type="button" key={method.id} className={paymentMethod === method.id ? 'active' : ''} onClick={() => { setPaymentMethod(method.id); setMessage(''); }}><span>{method.id === 'card' ? 'CARD' : method.id === 'alipay' ? 'ALIPAY' : 'WECHAT'}</span><b>{isZh ? method.label_zh : method.label}</b><small>{isZh ? method.description_zh : method.description}</small></button>)}</div>{selectedPlan?.kind === 'subscription' && selectedMethod && !selectedMethod.supports_recurring && <p className="prepaid-method-note">{L('支付宝和微信支付按所选周期一次性预付，到期后需要手动续购，不会自动扣款。', 'Alipay and WeChat Pay are prepaid for the selected period and require manual renewal; they do not auto-charge.', 'Alipay và WeChat Pay trả trước theo kỳ đã chọn và cần gia hạn thủ công.')}</p>}</section>}{message && <div className="alert">{message}</div>}<button className="submit-order checkout-primary" onClick={() => checkout()} disabled={busy || !selectedPlan}><ShieldCheck />{busy ? '...' : !selectedPlan ? L('请先选择套餐', 'Choose a plan first', 'Vui lòng chọn gói') : form.plan_id === 'free' ? L('开通免费版', 'Activate free', 'Kích hoạt miễn phí') : selectedPlan?.kind === 'contact' ? L('联系企业销售', 'Contact enterprise sales', 'Liên hệ bán hàng') : config.checkout_available ? L(`继续支付 ${selectedAmount}`, `Continue · Pay ${selectedAmount}`, `Tiếp tục thanh toán ${selectedAmount}`) : L('确认所选套餐', 'Confirm selection', 'Xác nhận gói')}</button><small className="secure-note"><ShieldCheck />Stripe Checkout · HTTPS · Verified Webhooks · Idempotent crediting</small></aside>}{creditsHelpOpen && <div className="modal-backdrop" onClick={() => setCreditsHelpOpen(false)}><section className="sales-modal credits-help-modal" onClick={e => e.stopPropagation()}><button className="modal-close" onClick={() => setCreditsHelpOpen(false)}><X /></button><span className="help-kicker">DA CREDITS</span><h2>{L('什么是 DA AI 点数？', 'What are DA Credits?', 'DA Credits là gì?')}</h2><p>{L('DA AI 点数是平台的 AI 处理额度，不是现金，也不是会员等级。', 'DA Credits are the platform’s AI processing units. They are not cash and they are not a membership tier.', 'DA Credits là đơn vị xử lý AI của nền tảng, không phải tiền mặt và không phải cấp thành viên.')}</p><div className="credits-help-grid"><div><b>{L('可以做什么', 'What they are used for', 'Dùng để làm gì')}</b><span>{L('文档翻译、OCR、PDF/Word/Excel/PPT 转换、数据提取和智能整理。', 'Translation, OCR, PDF/Word/Excel/PPT conversion, data extraction and smart organization.', 'Dịch tài liệu, OCR, chuyển đổi PDF/Word/Excel/PPT, trích xuất dữ liệu và xử lý thông minh.')}</span></div><div><b>{L('如何获得', 'How you get them', 'Cách nhận điểm')}</b><span>{L('会员套餐每月自动赠送；余额不足时也可以一次性购买。', 'Monthly credits come with your subscription; extra credits can be purchased once when needed.', 'Gói thành viên tặng điểm hàng tháng; có thể mua thêm một lần khi cần.')}</span></div><div><b>{L('如何消耗', 'How they are used', 'Cách tiêu hao')}</b><span>{L('实际消耗由文件大小、页数、语言、功能和版式复杂度决定。', 'Actual use depends on file size, pages, language, selected feature and layout complexity.', 'Mức tiêu hao phụ thuộc vào kích thước, số trang, ngôn ngữ, tính năng và độ phức tạp bố cục.')}</span></div><div><b>{L('是否自动续费', 'Auto-renewal', 'Tự động gia hạn')}</b><span>{L('单独购买的点数包不会自动续费；会员套餐是否续费以结算页面说明为准。', 'Credit packs do not auto-renew. Subscription renewal is shown clearly during checkout.', 'Gói điểm mua riêng không tự động gia hạn; việc gia hạn gói thành viên được hiển thị rõ khi thanh toán.')}</span></div></div><p className="estimate-note">{L('系统会在正式计费前显示预计消耗；处理完成后可在钱包中查看实际扣除记录。', 'The system will show an estimated cost before billing and the actual deduction in your wallet after processing.', 'Hệ thống sẽ hiển thị mức tiêu hao dự kiến trước khi tính phí và khoản trừ thực tế trong ví sau khi xử lý.')}</p></section></div>}{salesOpen && <div className="modal-backdrop" onClick={() => setSalesOpen(false)}><section className="sales-modal" onClick={e => e.stopPropagation()}><button className="modal-close" onClick={() => setSalesOpen(false)}><X /></button><h2>{L('联系企业销售', 'Contact Enterprise Sales', 'Liên hệ bán hàng doanh nghiệp')}</h2><p>{L('提交后我们会通过邮箱与你联系并提供定制报价。', 'We will contact you by email with a custom quote.', 'Chúng tôi sẽ liên hệ qua email và gửi báo giá tùy chỉnh.')}</p><label>{L('姓名', 'Name', 'Họ tên')}<input value={form.name} onChange={e => setForm({
             ...form,
             name: e.target.value
           })} /></label><label>{L('邮箱', 'Email', 'Email')}<input type="email" value={form.email} onChange={e => setForm({
@@ -3449,7 +3481,16 @@ function AuthPage({
       });
       const j = await readJson(r);
       if (!r.ok) {
-        const err = new Error(j.detail || 'Authentication failed');
+        const detail = normalizeApiDetail(j.detail);
+        if (!registering && detail.code === 'EMAIL_NOT_VERIFIED') {
+          setVerify({ email: detail.email || email, code: '' });
+          setCountdown(0);
+          setFlow('verify');
+          setNotice(zh ? '该邮箱尚未验证。请点击“重新发送”获取新验证码，验证成功后即可登录。' : 'This email is not verified. Select Resend to get a new code, then verify to sign in.');
+          return;
+        }
+        const err = new Error(detail.message || 'Authentication failed');
+        err.detail = j.detail;
         err.status = r.status;
         throw err;
       }
@@ -3468,7 +3509,7 @@ function AuthPage({
       if (!j.token || !j.user) throw new Error('Authentication failed');
       finishAuth(j);
     } catch (e) {
-      setError(authMessage(e.message, zh, e.status));
+      setError(authMessage(e.detail || e.message, zh, e.status));
     } finally {
       setBusy(false);
     }
@@ -5007,7 +5048,7 @@ function AdminConsole({
           settingsFailed: L('设置操作失败', 'Settings operation failed')
         }} /></section>}
   {(tab === 'orders' || tab === 'documents' || tab === 'failed') && <section className="admin-card-v2 admin-table-card-v2"><div className="admin-table-v2 orders"><div className="th"><span>{L('订单/任务', 'Order / job')}</span><span>{L('用户', 'User')}</span><span>{L('文件', 'Files')}</span><span>{L('金额', 'Amount')}</span><span>{L('状态', 'Status')}</span><span>{L('创建时间', 'Created')}</span></div>{orders.filter(o => tab !== 'failed' || String(o.status).toLowerCase().includes('fail')).map(o => <div className="tr" key={o.id}><span><b>{o.order_number || `#${o.id}`}</b></span><span>{o.email || o.customer_email || '—'}</span><span>{o.files?.length ?? o.file_count ?? '—'}</span><span>{o.quote_amount ? `${o.quote_currency || 'CNY'} ${o.quote_amount}` : '—'}</span><span>{statusBadge(o.status)}</span><span>{o.created_at ? new Date(o.created_at).toLocaleString() : '—'}</span></div>)}</div>{!orders.length && <Empty title={L('暂无数据', 'No data')} desc={L('真实订单和任务会显示在这里。', 'Real orders and jobs will appear here.')} />}</section>}
-  {tab === 'payments' && <section className="admin-card-v2 admin-table-card-v2"><div className="admin-table-v2 payments"><div className="th"><span>{L('支付单号', 'Payment')}</span><span>{L('用户', 'Customer')}</span><span>{L('渠道', 'Provider')}</span><span>{L('金额', 'Amount')}</span><span>{L('状态', 'Status')}</span><span>{L('时间', 'Created')}</span></div>{payments.map(p => <div className="tr" key={p.id}><span>{p.provider_order_id || p.order_number || `#${p.id}`}</span><span>{p.customer_email || '—'}</span><span>{p.provider || 'PayPal'}</span><span>{money(p.amount_cents)}</span><span>{statusBadge(p.status)}</span><span>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</span></div>)}</div>{!payments.length && <Empty icon={CreditCard} title={L('暂无支付记录', 'No payments')} desc={L('真实支付记录会显示在这里。', 'Real payment records will appear here.')} />}</section>}
+  {tab === 'payments' && <section className="admin-card-v2 admin-table-card-v2"><div className="admin-table-v2 payments"><div className="th"><span>{L('支付单号', 'Payment')}</span><span>{L('用户', 'Customer')}</span><span>{L('渠道', 'Provider')}</span><span>{L('金额', 'Amount')}</span><span>{L('状态', 'Status')}</span><span>{L('时间', 'Created')}</span></div>{payments.map(p => <div className="tr" key={p.id}><span>{p.provider_order_id || p.order_number || `#${p.id}`}</span><span>{p.customer_email || '—'}</span><span>{p.payment_method || p.provider || '—'}</span><span>{money(p.amount_cents)}</span><span>{statusBadge(p.status)}</span><span>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</span></div>)}</div>{!payments.length && <Empty icon={CreditCard} title={L('暂无支付记录', 'No payments')} desc={L('真实支付记录会显示在这里。', 'Real payment records will appear here.')} />}</section>}
   {tab === 'audit' && <section className="admin-card-v2 admin-table-card-v2"><div className="admin-table-v2 audit"><div className="th"><span>{L('操作者', 'Actor')}</span><span>{L('操作', 'Action')}</span><span>{L('对象', 'Target')}</span><span>{L('原因', 'Reason')}</span><span>{L('时间', 'Time')}</span></div>{audit.map(x => <div className="tr" key={x.id}><span>{x.actor_email || x.actor_role || '—'}</span><span>{x.action}</span><span>{x.target_type} #{x.target_id || '—'}</span><span title={x.reason || ''}>{x.reason || '—'}</span><span>{new Date(x.created_at).toLocaleString()}</span></div>)}</div>{!audit.length && <Empty icon={ShieldCheck} title={L('暂无审计记录', 'No audit logs')} desc={L('后台敏感操作会自动记录。', 'Sensitive admin actions will be logged automatically.')} />}</section>}
   {['plans', 'credits', 'files', 'settings'].includes(tab) && <section className="admin-card-v2"><Empty icon={tab === 'settings' ? Settings2 : tab === 'credits' ? Coins : FolderOpen} title={titleMap[tab]} desc={L('页面框架已建立，后续接入真实业务接口时无需再调整管理后台布局。', 'The page framework is ready; business APIs can be connected without changing the admin layout.')} /></section>}
   </section>

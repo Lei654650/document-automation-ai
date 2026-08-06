@@ -55,30 +55,18 @@ services:
         sync: false
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
-      - key: PAYPAL_MODE
-        value: sandbox
-      - key: PAYPAL_LIVE_ENABLED
-        value: "false"
-      - key: PAYPAL_CLIENT_ID
-        sync: false
-      - key: PAYPAL_CLIENT_SECRET
-        sync: false
-      - key: PAYPAL_WEBHOOK_ID
-        sync: false
       - key: PAYMENT_TEST_MODE
         value: "false"
-      - key: PADDLE_ENV
-        value: sandbox
-      - key: PADDLE_API_KEY
-        sync: false
-      - key: PADDLE_WEBHOOK_SECRET
-        sync: false
-      - key: PADDLE_PRICE_MAP
-        value: "{}"
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
+      - key: STRIPE_CARD_ENABLED
+        value: "true"
+      - key: STRIPE_ALIPAY_ENABLED
+        value: "true"
+      - key: STRIPE_WECHAT_PAY_ENABLED
+        value: "true"
     disk:
       name: document-automation-data
       mountPath: /data

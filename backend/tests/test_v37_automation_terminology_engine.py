@@ -6,7 +6,8 @@ from app.engines.translation_engine import (
 
 
 def test_v37_cache_namespace_invalidates_previous_ai_wording():
-    assert TRANSLATION_CACHE_NAMESPACE.startswith("v40.0-")
+    assert TRANSLATION_CACHE_NAMESPACE.startswith("v45.0.5-")
+    assert "language-quality" in TRANSLATION_CACHE_NAMESPACE
 
 
 def test_equipment_category_labels_are_stable():

@@ -7,6 +7,8 @@ import os
 import shutil
 import tempfile
 import time
+import types
+import sys
 import zipfile
 from pathlib import Path
 
@@ -26,9 +28,10 @@ os.environ.update(
         "OWNER_EMAIL": "acceptance-owner@example.test",
         "EMAIL_VERIFICATION_DEV_CODE_ENABLED": "true",
         "PASSWORD_RESET_DEV_CODE_ENABLED": "true",
-        "PAYPAL_MODE": "sandbox",
-        "PAYPAL_LIVE_ENABLED": "false",
         "PAYMENT_TEST_MODE": "false",
+        "STRIPE_CARD_ENABLED": "true",
+        "STRIPE_ALIPAY_ENABLED": "true",
+        "STRIPE_WECHAT_PAY_ENABLED": "true",
         "TRANSLATION_PROVIDER": "none",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -65,7 +68,7 @@ def test_health_capabilities_proxy_and_unconfigured_states(client: TestClient):
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
-    assert health.json()["version"] == "45.0.0"
+    assert health.json()["version"] == "46.0.0"
 
     capabilities = client.get("/api/capabilities")
     assert capabilities.status_code == 200
@@ -75,8 +78,9 @@ def test_health_capabilities_proxy_and_unconfigured_states(client: TestClient):
     assert public["authentication"]["google_configured"] is False
     assert public["authentication"]["local_verification_code_enabled"] is True
     assert public["ai_providers"] == {"openai_configured": False, "deepseek_configured": False}
-    assert public["payments"]["paypal_mode"] == "sandbox"
-    assert public["payments"]["paypal_live_enabled"] is False
+    assert public["payments"]["provider"] == "demo"
+    assert public["payments"]["processor"] == "demo"
+    assert {item["id"] for item in public["payments"]["methods"]} == {"card", "alipay", "wechat_pay"}
 
     auth_config = client.get("/api/auth/config").json()
     assert auth_config["google_enabled"] is False
@@ -87,6 +91,21 @@ def test_health_capabilities_proxy_and_unconfigured_states(client: TestClient):
     vite_config = (Path(__file__).resolve().parents[2] / "frontend" / "vite.config.js").read_text(encoding="utf-8")
     assert "'/api': devApiProxy" in vite_config
     assert "VITE_DEV_API_PROXY" in vite_config
+
+
+def test_public_frontend_cors_allows_login_from_official_domains(client: TestClient):
+    for origin in ("https://docai365.com", "https://www.docai365.com"):
+        response = client.options(
+            "/api/auth/login",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers.get("access-control-allow-origin") == origin
+        assert "POST" in response.headers.get("access-control-allow-methods", "")
 
 
 def test_registration_login_logout_and_password_reset_local_code(client: TestClient):
@@ -174,87 +193,213 @@ def test_openai_and_deepseek_profiles_are_independent_and_never_mask_keys(monkey
     assert "api_key_masked" not in encoded
 
 
-def test_paypal_sandbox_checkout_capture_webhook_wallet_and_credits(client: TestClient, monkeypatch):
-    email = "paypal-flow@example.test"
+def test_login_reports_unverified_and_disabled_account_states(client: TestClient):
+    pending_email = "pending-login@example.test"
+    registration = client.post(
+        "/api/auth/register",
+        json={"name": "Pending User", "email": pending_email, "password": "LocalTest9!", "device_fingerprint": "pending-device"},
+    )
+    assert registration.status_code == 200, registration.text
+    pending_login = client.post("/api/auth/login", json={"email": pending_email, "password": "LocalTest9!"})
+    assert pending_login.status_code == 403
+    assert pending_login.json()["detail"]["code"] == "EMAIL_NOT_VERIFIED"
+    assert pending_login.json()["detail"]["email"] == pending_email
+    assert pending_login.json()["detail"]["can_resend"] is True
+
+    disabled_email = "disabled-login@example.test"
+    _register_and_verify(client, disabled_email)
+    with main_module.get_db() as db:
+        db.execute("UPDATE users SET status='disabled' WHERE email=?", (disabled_email,))
+        db.commit()
+    disabled_login = client.post("/api/auth/login", json={"email": disabled_email, "password": "LocalTest9!"})
+    assert disabled_login.status_code == 403
+    assert disabled_login.json()["detail"]["code"] == "ACCOUNT_DISABLED"
+
+
+def test_stripe_card_alipay_wechat_checkout_webhook_wallet_and_credits(client: TestClient, monkeypatch):
+    email = "stripe-flow@example.test"
     token = _register_and_verify(client, email)
     headers = {"Authorization": f"Bearer {token}"}
+    calls = []
 
-    monkeypatch.setattr(main_module, "PAYPAL_CLIENT_ID", "sandbox-client-id-placeholder-123456")
-    monkeypatch.setattr(main_module, "PAYPAL_CLIENT_SECRET", "sandbox-client-secret-placeholder-123456")
-    monkeypatch.setattr(main_module, "PAYPAL_WEBHOOK_ID", "sandbox-webhook-placeholder")
-    monkeypatch.setattr(main_module, "PAYPAL_MODE", "sandbox")
-    monkeypatch.setattr(main_module, "PAYPAL_LIVE_ENABLED", False)
-    monkeypatch.setattr(main_module, "PADDLE_API_KEY", "")
-    monkeypatch.setattr(main_module, "PADDLE_PRICE_MAP", {})
-    monkeypatch.setattr(main_module, "STRIPE_SECRET_KEY", "")
-    monkeypatch.setattr(main_module, "paypal_access_token", lambda: "sandbox-access-token-placeholder")
+    monkeypatch.setattr(main_module, "STRIPE_SECRET_KEY", "sk_test_placeholder")
+    monkeypatch.setattr(main_module, "STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder")
+    monkeypatch.setattr(main_module, "STRIPE_CARD_ENABLED", True)
+    monkeypatch.setattr(main_module, "STRIPE_ALIPAY_ENABLED", True)
+    monkeypatch.setattr(main_module, "STRIPE_WECHAT_PAY_ENABLED", True)
+    monkeypatch.setattr(main_module, "PAYMENT_TEST_MODE", False)
 
-    def fake_paypal_request(path, method="GET", payload=None, access_token=""):
-        if path == "/v2/checkout/orders":
-            return {
-                "id": "SANDBOX-ORDER-001",
-                "links": [{"rel": "payer-action", "href": "https://www.sandbox.paypal.com/checkoutnow?token=SANDBOX-ORDER-001"}],
-            }
-        if path.endswith("/capture"):
-            return {
-                "status": "COMPLETED",
-                "purchase_units": [{"payments": {"captures": [{"id": "SANDBOX-CAPTURE-001", "status": "COMPLETED"}]}}],
-            }
-        if path == "/v1/notifications/verify-webhook-signature":
-            return {"verification_status": "SUCCESS"}
-        raise AssertionError(f"Unexpected PayPal path: {path}")
+    class FakeSession:
+        def __init__(self, session_id, url):
+            self.id = session_id
+            self.url = url
 
-    monkeypatch.setattr(main_module, "paypal_request", fake_paypal_request)
+    def fake_session_create(**kwargs):
+        calls.append(kwargs)
+        index = len(calls)
+        return FakeSession(f"cs_test_{index}", f"https://checkout.stripe.test/session/{index}")
+
+    fake_webhook = types.SimpleNamespace(construct_event=lambda payload, signature, secret: {})
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        checkout=types.SimpleNamespace(Session=types.SimpleNamespace(create=fake_session_create)),
+        Webhook=fake_webhook,
+    )
+    monkeypatch.setitem(sys.modules, "stripe", fake_stripe)
 
     config = client.get("/api/payments/config").json()
-    assert config["provider"] == "paypal"
-    assert config["paypal_mode"] == "sandbox"
-    assert config["live_checkout"] is False
+    assert config["provider"] == "stripe"
+    assert config["processor"] == "stripe"
+    assert config["production_ready"] is True
+    assert [item["id"] for item in config["payment_methods"] if item["available"]] == ["card", "alipay", "wechat_pay"]
 
-    checkout = client.post(
-        "/api/payments/checkout",
-        headers=headers,
-        json={"plan_id": "starter_monthly", "customer_name": "Ignored", "customer_email": email, "locale": "en"},
-    )
-    assert checkout.status_code == 200, checkout.text
-    order = checkout.json()
-    assert order["provider"] == "paypal"
-    assert "sandbox.paypal.com" in order["checkout_url"]
-
-    capture = client.post(
-        "/api/payments/paypal/capture",
-        params={"order_id": "SANDBOX-ORDER-001", "payment_number": order["payment_number"], "email": email},
-    )
-    assert capture.status_code == 200, capture.text
-    assert capture.json()["status"] == "paid"
-
-    status = client.get("/api/payments/status", params={"payment_number": order["payment_number"], "email": email})
-    assert status.status_code == 200
-    assert status.json()["status"] == "paid"
-    wallet_before = client.get("/api/wallet", headers=headers).json()
-    assert wallet_before["subscription_credits"] == main_module.PAYMENT_PLANS["starter_monthly"]["credits"]
-
-    webhook = client.post(
-        "/api/payments/paypal/webhook",
-        headers={
-            "paypal-auth-algo": "SHA256withRSA",
-            "paypal-cert-url": "https://api-m.sandbox.paypal.com/cert.pem",
-            "paypal-transmission-id": "test-transmission",
-            "paypal-transmission-sig": "test-signature",
-            "paypal-transmission-time": "2026-07-31T00:00:00Z",
-        },
-        json={
-            "event_type": "PAYMENT.CAPTURE.COMPLETED",
-            "resource": {
-                "id": "SANDBOX-CAPTURE-001",
-                "supplementary_data": {"related_ids": {"order_id": "SANDBOX-ORDER-001"}},
+    checkouts = {}
+    for method in ("card", "alipay", "wechat_pay"):
+        response = client.post(
+            "/api/payments/checkout",
+            headers=headers,
+            json={
+                "plan_id": "starter_monthly",
+                "customer_name": "Ignored",
+                "customer_email": "attacker@example.test",
+                "locale": "zh",
+                "payment_method": method,
             },
+        )
+        assert response.status_code == 200, response.text
+        checkouts[method] = response.json()
+        assert response.json()["provider"] == "stripe"
+        assert response.json()["payment_method"] == method
+        assert response.json()["checkout_url"].startswith("https://checkout.stripe.test/")
+
+    assert calls[0]["mode"] == "subscription"
+    assert calls[0]["payment_method_types"] == ["card"]
+    assert "recurring" in calls[0]["line_items"][0]["price_data"]
+    assert checkouts["card"]["billing_model"] == "recurring"
+
+    assert calls[1]["mode"] == "payment"
+    assert calls[1]["payment_method_types"] == ["alipay"]
+    assert "recurring" not in calls[1]["line_items"][0]["price_data"]
+    assert checkouts["alipay"]["billing_model"] == "prepaid"
+
+    assert calls[2]["mode"] == "payment"
+    assert calls[2]["payment_method_types"] == ["wechat_pay"]
+    assert calls[2]["payment_method_options"] == {"wechat_pay": {"client": "web"}}
+    assert checkouts["wechat_pay"]["billing_model"] == "prepaid"
+
+    alipay_number = checkouts["alipay"]["payment_number"]
+    event = {
+        "id": "evt_alipay_paid",
+        "type": "checkout.session.async_payment_succeeded",
+        "data": {
+            "object": {
+                "id": "cs_test_2",
+                "payment_status": "paid",
+                "payment_intent": "pi_test_alipay",
+                "metadata": {"payment_number": alipay_number},
+            }
         },
+    }
+    fake_webhook.construct_event = lambda payload, signature, secret: event
+    webhook = client.post(
+        "/api/payments/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "test-signature", "content-type": "application/json"},
     )
     assert webhook.status_code == 200, webhook.text
-    wallet_after = client.get("/api/wallet", headers=headers).json()
-    assert wallet_after["total_credits"] == wallet_before["total_credits"]
+    webhook_again = client.post(
+        "/api/payments/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "test-signature", "content-type": "application/json"},
+    )
+    assert webhook_again.status_code == 200, webhook_again.text
 
+    status = client.get("/api/payments/status", params={"payment_number": alipay_number}, headers=headers)
+    assert status.status_code == 200
+    assert status.json()["status"] == "paid"
+    assert status.json()["payment_method"] == "alipay"
+    assert status.json()["billing_model"] == "prepaid"
+
+    wallet = client.get("/api/wallet", headers=headers).json()
+    assert wallet["subscription_credits"] == main_module.PAYMENT_PLANS["starter_monthly"]["credits"]
+    assert sum(1 for item in wallet["ledger"] if item["reference"] == alipay_number) == 1
+
+    card_number = checkouts["card"]["payment_number"]
+    card_checkout_event = {
+        "id": "evt_card_checkout_paid",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_1",
+                "payment_status": "paid",
+                "subscription": "sub_test_card",
+                "metadata": {"payment_number": card_number},
+            }
+        },
+    }
+    fake_webhook.construct_event = lambda payload, signature, secret: card_checkout_event
+    assert client.post(
+        "/api/payments/stripe/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "test-signature", "content-type": "application/json"},
+    ).status_code == 200
+
+    with main_module.get_db() as db:
+        db.execute(
+            "UPDATE customer_wallets SET subscription_credits=123 WHERE customer_email=?",
+            (email,),
+        )
+        db.commit()
+
+    renewal_period_end = int(time.time()) + 31 * 86400
+    renewal_event = {
+        "id": "evt_card_cycle_renewal",
+        "type": "invoice.paid",
+        "data": {
+            "object": {
+                "id": "in_test_cycle",
+                "billing_reason": "subscription_cycle",
+                "subscription": "sub_test_card",
+                "parent": {
+                    "subscription_details": {
+                        "metadata": {"payment_number": card_number}
+                    }
+                },
+                "lines": {"data": [{"period": {"end": renewal_period_end}}]},
+            }
+        },
+    }
+    fake_webhook.construct_event = lambda payload, signature, secret: renewal_event
+    for _ in range(2):
+        response = client.post(
+            "/api/payments/stripe/webhook",
+            content=b"{}",
+            headers={"stripe-signature": "test-signature", "content-type": "application/json"},
+        )
+        assert response.status_code == 200, response.text
+
+    renewed_wallet = client.get("/api/wallet", headers=headers).json()
+    assert renewed_wallet["subscription_credits"] == main_module.PAYMENT_PLANS["starter_monthly"]["credits"]
+    assert sum(1 for item in renewed_wallet["ledger"] if item["reference"] == "in_test_cycle") == 1
+    with main_module.get_db() as db:
+        order = db.execute(
+            "SELECT provider_payment_id,status FROM payment_orders WHERE payment_number=?",
+            (card_number,),
+        ).fetchone()
+        renewal_count = db.execute(
+            "SELECT COUNT(*) FROM payment_events WHERE provider_event_id='evt_card_cycle_renewal'",
+        ).fetchone()[0]
+    assert order["provider_payment_id"] == "sub_test_card"
+    assert order["status"] == "paid"
+    assert renewal_count == 1
+
+    other_token = _register_and_verify(client, "other-stripe-user@example.test")
+    forbidden = client.get(
+        "/api/payments/status",
+        params={"payment_number": alipay_number},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert forbidden.status_code == 404
 
 def test_file_upload_task_status_and_authenticated_download(client: TestClient, monkeypatch):
     email = "document-flow@example.test"

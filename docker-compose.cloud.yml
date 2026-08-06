@@ -22,12 +22,12 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
-      PAYPAL_MODE: sandbox
-      PAYPAL_LIVE_ENABLED: "false"
-      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
-      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
-      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
       PAYMENT_TEST_MODE: "false"
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CARD_ENABLED: "true"
+      STRIPE_ALIPAY_ENABLED: "true"
+      STRIPE_WECHAT_PAY_ENABLED: "true"
     volumes:
       - document_data:/data
     restart: unless-stopped

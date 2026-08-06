@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions
 chcp 65001 >nul
 set "ROOT=%~dp0"
@@ -15,7 +15,7 @@ if not exist "%RUNTIME%" mkdir "%RUNTIME%"
 >"%LOG%" echo ===== Document Automation AI setup started %date% %time% =====
 
 echo ============================================================
-echo Document Automation AI V45.0.0 Recovered - Automatic Setup
+echo Document Automation AI V46.0.0 Recovered - Automatic Setup
 echo ============================================================
 echo This setup is launched automatically whenever required runtime files are missing.
 echo.

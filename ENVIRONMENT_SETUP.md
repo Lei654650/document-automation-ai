@@ -1,6 +1,6 @@
 # Environment setup
 
-Version: Document Automation AI V45.0.0 Recovered
+Version: Document Automation AI V46.0.0
 
 Never place populated environment files in Git or in a delivery archive. The repository contains templates only.
 
@@ -20,34 +20,45 @@ Fill `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM_
 - STARTTLS: `SMTP_USE_TLS=true`, `SMTP_USE_SSL=false`, commonly port 587.
 - Implicit SSL: `SMTP_USE_TLS=false`, `SMTP_USE_SSL=true`, commonly port 465.
 
-In Render, disable `EMAIL_VERIFICATION_DEV_CODE_ENABLED` and `PASSWORD_RESET_DEV_CODE_ENABLED`. Production and cloud mode never return development codes.
+In production, disable `EMAIL_VERIFICATION_DEV_CODE_ENABLED` and `PASSWORD_RESET_DEV_CODE_ENABLED`. Production and cloud mode never return development codes.
 
 ## Google
 
-Create a Google Identity Services web client. Put `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` in Render. Add the local and deployed frontend origins in Google Cloud. The current frontend uses the Google Identity Services popup and sends the returned ID token to `/api/auth/google`.
+Create a Google Identity Services web client. Put `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` in the backend environment. Add the local and deployed frontend origins in Google Cloud. The frontend uses the Google Identity Services popup and sends the returned ID token to `/api/auth/google`.
 
 ## AI providers
 
 Set `TRANSLATION_PROVIDER` to `openai`, `deepseek`, or `none`. OpenAI and DeepSeek profiles are independent, so both sets of variables may be prepared at once. Keys remain backend-only. If no key is present, capability and settings responses report only `configured=false`.
 
-## PayPal Sandbox
+## Stripe payments
 
-Keep `PAYPAL_MODE=sandbox` and `PAYPAL_LIVE_ENABLED=false`. Fill the Sandbox `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_WEBHOOK_ID` in Render. Configure the webhook URL as:
+Stripe Checkout is the only production payment processor. Configure:
 
-`https://<render-backend>/api/payments/paypal/webhook`
+```env
+PAYMENT_TEST_MODE=false
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_CARD_ENABLED=true
+STRIPE_ALIPAY_ENABLED=true
+STRIPE_WECHAT_PAY_ENABLED=true
+PAYMENT_SUCCESS_URL=https://docai365.com/?payment=success&payment_number={PAYMENT_NUMBER}&session_id={CHECKOUT_SESSION_ID}
+PAYMENT_CANCEL_URL=https://docai365.com/?payment=cancelled
+```
 
-Live is guarded by both `PAYPAL_MODE=live` and `PAYPAL_LIVE_ENABLED=true`. Do not enable either during Sandbox acceptance.
+Webhook endpoint:
 
-## Paddle and Stripe
+```text
+https://api.docai365.com/api/payments/stripe/webhook
+```
 
-The backend has checkout/webhook integration points for both. Their variables are optional and must be filled only after the corresponding external products, prices and webhook endpoints exist. Paddle takes provider priority when both its API key and price map are configured.
+Subscribe to the events listed in `PAYMENT_SETUP_CN.md`. Payment method availability still depends on the Stripe account country, currency and Dashboard approval.
 
-## Render
+## Render / Railway
 
-Use `render.yaml`. Secret values are marked `sync: false`; enter them in the Render dashboard. The Docker service mounts persistent storage at `/data`. Set `PUBLIC_BASE_URL` to the frontend URL and `CORS_ORIGINS` to the comma-separated allowed frontend origins.
+Use `render.yaml` or the corresponding Railway environment-variable panel. Secret values must be entered in the platform dashboard. The Docker service should use durable storage for `/data`. Set `PUBLIC_BASE_URL` to the frontend URL and `CORS_ORIGINS` to the comma-separated allowed frontend origins.
 
 ## Vercel
 
-Use `vercel.json`. Set only the public build variable `VITE_API_BASE_URL` to the Render backend origin, without a trailing slash. Do not place backend secrets in Vercel frontend variables.
+Use `vercel.json`. Set only the public build variable `VITE_API_BASE_URL` to the backend origin, without a trailing slash. Do not place backend secrets in Vercel frontend variables.
 
-See `ENVIRONMENT_VARIABLES.md` for the complete variable inventory.
+See `ENVIRONMENT_VARIABLES.md` and `PAYMENT_SETUP_CN.md` for the complete configuration.

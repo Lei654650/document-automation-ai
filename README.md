@@ -1,4 +1,8 @@
-# Document Automation AI — Version 45.0.0 Recovered
+# Document Automation AI V46.0.0
+
+本版本修复新客户邮箱未验证时无法登录的问题，并将正式支付统一为 Stripe Checkout：银行卡支持订阅自动续费，支付宝和微信支付按所选周期一次性预付并手动续购。PayPal 与 Paddle 已从正式支付代码、界面和部署配置中移除。
+
+详细部署步骤见 `PAYMENT_SETUP_CN.md`，验收结果见 `ACCEPTANCE_REPORT_V46.md`。
 
 完整企业级 AI 文档自动化工程。
 
@@ -17,7 +21,7 @@
 
 ## 版本
 
-Version 45.0.0 Recovered
+Version 46.0.0
 
 ## OCR setup on Windows
 

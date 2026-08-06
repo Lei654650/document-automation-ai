@@ -9,14 +9,14 @@ set "LOGDIR=%ROOT%logs"
 set "STARTLOG=%LOGDIR%\startup.log"
 set "VENV_PY=%BACKEND%\.venv\Scripts\python.exe"
 set "NPM_RUN=%ROOT%Npm_Run.bat"
-set "APP_VERSION=45.0.0"
+set "APP_VERSION=46.0.0"
 cd /d "%ROOT%"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 if not exist "%RUNTIME%" mkdir "%RUNTIME%"
-title Document Automation AI V45.0.0
+title Document Automation AI V46.0.0
 
 echo ============================================================
-echo Document Automation AI V45.0.0 - One Click Start
+echo Document Automation AI V46.0.0 - One Click Start
 echo ============================================================
 echo Project root: %ROOT%
 echo ===== Start requested %date% %time% =====>>"%STARTLOG%"
@@ -25,7 +25,7 @@ rem Never trust setup.ready by itself. Verify the real runtime files.
 set "NEED_SETUP=0"
 if not exist "%VENV_PY%" set "NEED_SETUP=1"
 if exist "%VENV_PY%" (
-  "%VENV_PY%" -c "import py7zr, rarfile" >nul 2>&1
+  "%VENV_PY%" -c "import py7zr, rarfile, stripe" >nul 2>&1
   if errorlevel 1 set "NEED_SETUP=1"
 )
 if not exist "%FRONTEND%\node_modules\.bin\vite.cmd" set "NEED_SETUP=1"
@@ -65,7 +65,7 @@ call :STOP_PORT 8000 Backend
 call :STOP_PORT 5173 Frontend
 
 echo Starting backend...
-start "Document Automation AI Backend V45.0.0" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
+start "Document Automation AI Backend V46.0.0" "%ComSpec%" /k ""%ROOT%Start_Backend.bat""
 
 echo Waiting for backend health check and version identity...
 set /a COUNT=0
@@ -85,7 +85,7 @@ goto WAIT_BACKEND
 :BACKEND_READY
 echo Backend V%APP_VERSION% is healthy.
 echo Starting frontend...
-start "Document Automation AI Frontend V45.0.0" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
+start "Document Automation AI Frontend V46.0.0" "%ComSpec%" /k ""%ROOT%Start_Frontend.bat""
 
 echo Waiting for frontend...
 set /a COUNT=0

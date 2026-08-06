@@ -13,7 +13,7 @@ def validate_security_configuration(*, cloud_mode: bool, admin_password: str, au
         issues.append("ADMIN_PASSWORD is missing or uses a default value")
     if cloud_mode and (not auth_secret or len(auth_secret) < 32):
         issues.append("AUTH_SECRET must be a stable random value of at least 32 characters")
-    for name in ("STRIPE_SECRET_KEY", "PAYPAL_CLIENT_SECRET", "PADDLE_API_KEY", "GOOGLE_CLIENT_SECRET"):
+    for name in ("STRIPE_SECRET_KEY", "GOOGLE_CLIENT_SECRET"):
         value = os.getenv(name, "").strip()
         if value and value.lower() in _PLACEHOLDERS:
             issues.append(f"{name} contains a placeholder value")
